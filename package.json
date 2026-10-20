@@ -8,7 +8,8 @@
 	"repository": { "type": "git", "url": "git+https://github.com/HansKristoffer/better-mastra.git" },
 	"engines": { "node": ">=20" },
 	"exports": {
-		".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+		".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+		"./resumable": { "types": "./dist/resumable/index.d.ts", "import": "./dist/resumable/index.js" }
 	},
 	"types": "./dist/index.d.ts",
 	"files": ["dist", "LICENSE", "README.md", "src/**/*.ts", "!src/**/*.test.ts"],
@@ -20,9 +21,14 @@
 		"lint": "bun run typecheck && biome check",
 		"lint:write": "bun run typecheck && biome check --write"
 	},
+	"peerDependencies": {
+		"ai": "^7.0.0"
+	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.2.4",
 		"@types/bun": "^1.2.0",
+		"ai": "^7.0.146",
+		"ioredis": "^5.11.1",
 		"typescript": "^5.9.2"
 	},
 	"packageManager": "bun@1.4.2"

@@ -1,0 +1,138 @@
+/** One stream entry: its id and the single value stored under field `d`. */
+export interface StreamEntry {
+	id: string
+	value: string
+}
+
+/** A dedicated connection for blocking reads, so `XREAD BLOCK` never stalls other commands. */
+export interface BlockingReader {
+	/** `XREAD BLOCK blockMs STREAMS key afterId`; resolves `[]` when the block times out. */
+	xread(key: string, afterId: string, blockMs: number): Promise<StreamEntry[]>
+	close(): void
+}
+
+/** The few Redis commands resumable streams need. Use `bunRedis` or `ioRedis`, or implement it. */
+export interface ResumableRedis {
+	set(key: string, value: string, ttlMs: number): Promise<void>
+	get(key: string): Promise<string | null>
+	del(key: string): Promise<void>
+	pexpire(key: string, ttlMs: number): Promise<void>
+	expire(key: string, seconds: number): Promise<void>
+	publish(channel: string, message: string): Promise<void>
+	/** Subscribes on a separate connection. Resolves with an unsubscribe function. */
+	subscribe(
+		channel: string,
+		onMessage: (message: string) => void
+	): Promise<() => Promise<void>>
+	xadd(key: string, value: string): Promise<void>
+	/** Opens a dedicated connection for one reader. */
+	reader(): Promise<BlockingReader>
+}
+
+type Send = (command: string, args: string[]) => Promise<unknown>
+
+/** RESP2 replies are `[[key, entries]]`; Bun's RESP3 replies are `{ key: entries }`. */
+function parseXread(reply: unknown): StreamEntry[] {
+	if (!reply) return []
+	const streams = Array.isArray(reply)
+		? reply.map((s) => s[1])
+		: Object.values(reply)
+	const entries = (streams[0] ?? []) as [string, string[]][]
+	return entries.map(([id, fields]) => ({ id, value: fields[1] ?? '' }))
+}
+
+function fromSend(
+	send: Send,
+	rest: Pick<ResumableRedis, 'subscribe' | 'reader'>
+): ResumableRedis {
+	return {
+		set: async (key, value, ttlMs) =>
+			void (await send('SET', [key, value, 'PX', String(ttlMs)])),
+		get: async (key) => ((await send('GET', [key])) as string | null) ?? null,
+		del: async (key) => void (await send('DEL', [key])),
+		pexpire: async (key, ttlMs) =>
+			void (await send('PEXPIRE', [key, String(ttlMs)])),
+		expire: async (key, seconds) =>
+			void (await send('EXPIRE', [key, String(seconds)])),
+		publish: async (channel, message) =>
+			void (await send('PUBLISH', [channel, message])),
+		xadd: async (key, value) =>
+			void (await send('XADD', [key, '*', 'd', value])),
+		...rest
+	}
+}
+
+const xreadArgs = (key: string, afterId: string, blockMs: number) => [
+	'BLOCK',
+	String(blockMs),
+	'STREAMS',
+	key,
+	afterId
+]
+
+interface BunRedisLike {
+	send(command: string, args: string[]): Promise<unknown>
+	duplicate(): Promise<BunRedisLike>
+	subscribe(
+		channel: string,
+		listener: (message: string) => void
+	): Promise<unknown>
+	close(): void
+}
+
+/** Adapter for Bun's built-in `RedisClient`. */
+export function bunRedis(client: BunRedisLike): ResumableRedis {
+	return fromSend((command, args) => client.send(command, args), {
+		async subscribe(channel, onMessage) {
+			const subscriber = await client.duplicate()
+			await subscriber.subscribe(channel, onMessage)
+			return async () => subscriber.close()
+		},
+		async reader() {
+			const connection = await client.duplicate()
+			return {
+				xread: async (key, afterId, blockMs) =>
+					parseXread(
+						await connection.send('XREAD', xreadArgs(key, afterId, blockMs))
+					),
+				close: () => connection.close()
+			}
+		}
+	})
+}
+
+interface IoRedisLike {
+	call(command: string, ...args: string[]): Promise<unknown>
+	duplicate(): IoRedisLike
+	subscribe(channel: string): Promise<unknown>
+	on(
+		event: 'message',
+		listener: (channel: string, message: string) => void
+	): unknown
+	disconnect(): void
+}
+
+/** Adapter for `ioredis`. */
+export function ioRedis(client: IoRedisLike): ResumableRedis {
+	return fromSend((command, args) => client.call(command, ...args), {
+		async subscribe(channel, onMessage) {
+			const subscriber = client.duplicate()
+			subscriber.on(
+				'message',
+				(from, message) => from === channel && onMessage(message)
+			)
+			await subscriber.subscribe(channel)
+			return async () => subscriber.disconnect()
+		},
+		async reader() {
+			const connection = client.duplicate()
+			return {
+				xread: async (key, afterId, blockMs) =>
+					parseXread(
+						await connection.call('XREAD', ...xreadArgs(key, afterId, blockMs))
+					),
+				close: () => connection.disconnect()
+			}
+		}
+	})
+}
