@@ -145,7 +145,11 @@ const MarkdownParagraph = memo(function MarkdownParagraph({
 		[fadeIn, pass]
 	)
 
-	return createElement(Markdown, { style, rules, onLinkPress }, source)
+	return createElement(
+		Markdown,
+		{ ...(style ? { style } : {}), rules, onLinkPress },
+		source
+	)
 })
 
 function FadingText({

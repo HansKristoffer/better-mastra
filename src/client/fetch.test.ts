@@ -51,9 +51,9 @@ describe('createChatFetch', () => {
 			delay: async () => controller.abort()
 		})
 
-		await expect(
-			chatFetch('x', { signal: controller.signal as RequestInit['signal'] })
-		).rejects.toThrow('aborted')
+		await expect(chatFetch('x', { signal: controller.signal })).rejects.toThrow(
+			'aborted'
+		)
 		expect(fetch).toHaveBeenCalledTimes(1)
 	})
 
