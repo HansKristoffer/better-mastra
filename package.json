@@ -8,7 +8,11 @@
 	"repository": { "type": "git", "url": "git+https://github.com/HansKristoffer/better-mastra.git" },
 	"engines": { "node": ">=20" },
 	"exports": {
-		".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+		".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+		"./client": { "types": "./dist/client/index.d.ts", "import": "./dist/client/index.js" },
+		"./react": { "types": "./dist/react/index.d.ts", "import": "./dist/react/index.js" },
+		"./react/markdown": { "types": "./dist/react/markdown/index.d.ts", "import": "./dist/react/markdown/index.js" },
+		"./vue": { "types": "./dist/vue/index.d.ts", "import": "./dist/vue/index.js" }
 	},
 	"types": "./dist/index.d.ts",
 	"files": ["dist", "LICENSE", "README.md", "src/**/*.ts", "!src/**/*.test.ts"],
@@ -20,10 +24,35 @@
 		"lint": "bun run typecheck && biome check",
 		"lint:write": "bun run typecheck && biome check --write"
 	},
+	"peerDependencies": {
+		"ai": "^7.0.135",
+		"react": ">=18",
+		"react-native": "*",
+		"react-native-markdown-display": "^7.0.0",
+		"vue": "^3.3.0",
+		"zod": "^4.0.0"
+	},
+	"peerDependenciesMeta": {
+		"react": { "optional": true },
+		"react-native": { "optional": true },
+		"react-native-markdown-display": { "optional": true },
+		"vue": { "optional": true }
+	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.2.4",
+		"@happy-dom/global-registrator": "^21.0.3",
+		"@testing-library/react": "^16.3.3",
 		"@types/bun": "^1.2.0",
-		"typescript": "^5.9.2"
+		"@types/react": "^19.3.0",
+		"@types/react-dom": "^19.3.0",
+		"ai": "7.0.146",
+		"react": "^19.3.1",
+		"react-dom": "^19.3.1",
+		"react-native": "^0.88.0",
+		"react-native-markdown-display": "^7.0.2",
+		"typescript": "^5.9.2",
+		"vue": "^3.5.44",
+		"zod": "^4.6.7"
 	},
 	"packageManager": "bun@1.4.2"
 }
