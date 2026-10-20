@@ -32,6 +32,10 @@
 		"./evals": {
 			"types": "./dist/evals/index.d.ts",
 			"import": "./dist/evals/index.js"
+		},
+		"./resumable": {
+			"types": "./dist/resumable/index.d.ts",
+			"import": "./dist/resumable/index.js"
 		}
 	},
 	"bin": {
@@ -121,6 +125,7 @@
 		"@types/node": "^26.6.5",
 		"@types/pg": "^8.23.1",
 		"ai": "^7.0.143",
+		"ioredis": "^5.11.1",
 		"pg": "^8.23.1",
 		"publint": "^0.3.12",
 		"typescript": "^5.9.2",
