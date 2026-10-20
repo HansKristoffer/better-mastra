@@ -5,14 +5,24 @@
 	"type": "module",
 	"license": "MIT",
 	"sideEffects": false,
-	"repository": { "type": "git", "url": "git+https://github.com/HansKristoffer/better-mastra.git" },
-	"engines": { "node": ">=20" },
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/HansKristoffer/better-mastra.git"
+	},
+	"engines": {
+		"node": ">=20"
+	},
 	"exports": {
-		".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
 	},
 	"types": "./dist/index.d.ts",
 	"files": ["dist", "LICENSE", "README.md", "src/**/*.ts", "!src/**/*.test.ts"],
-	"publishConfig": { "access": "public" },
+	"publishConfig": {
+		"access": "public"
+	},
 	"scripts": {
 		"build": "bun scripts/build.ts",
 		"test": "bun test",
@@ -20,10 +30,30 @@
 		"lint": "bun run typecheck && biome check",
 		"lint:write": "bun run typecheck && biome check --write"
 	},
+	"peerDependencies": {
+		"@mastra/ai-sdk": "^1.11.1",
+		"@mastra/core": "^1.76.0",
+		"@mastra/hono": "^1.7.18",
+		"ai": "^7.0.143",
+		"hono": "^4.12.32",
+		"zod": "^4.4.3"
+	},
+	"peerDependenciesMeta": {
+		"@mastra/hono": { "optional": true },
+		"hono": { "optional": true }
+	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.2.4",
+		"@mastra/ai-sdk": "^1.11.1",
+		"@mastra/core": "^1.76.0",
+		"@mastra/hono": "^1.7.18",
+		"@mastra/memory": "^1.37.1",
 		"@types/bun": "^1.2.0",
-		"typescript": "^5.9.2"
+		"@types/json-schema": "^7.0.15",
+		"ai": "^7.0.143",
+		"hono": "^4.12.32",
+		"typescript": "^5.9.2",
+		"zod": "^4.4.3"
 	},
 	"packageManager": "bun@1.4.2"
 }
