@@ -17,7 +17,12 @@
 		"types": [
 			"bun"
 		],
-		"noUncheckedIndexedAccess": true
+		"noUncheckedIndexedAccess": true,
+		"paths": {
+			"react-native": [
+				"./types/react-native.d.ts"
+			]
+		}
 	},
 	"include": [
 		"src"

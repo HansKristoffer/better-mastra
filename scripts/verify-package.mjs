@@ -32,12 +32,14 @@ try {
 	writeFileSync(join(temporary, 'package.json'), JSON.stringify({ private: true, type: 'module' }))
 	// Optional peers too, so every subpath's import is checked.
 	const optionalPeers = Object.entries(pkg.peerDependenciesMeta || {})
-		.filter(([, meta]) => meta.optional)
+		.filter(([name, meta]) => meta.optional && !name.startsWith('react-native'))
 		.map(([name]) => `${name}@${pkg.peerDependencies[name]}`)
 	execFileSync('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', join(temporary, packed.filename), ...optionalPeers], {
 		cwd: temporary, stdio: 'pipe', timeout: 120_000
 	})
-	const specifiers = Object.keys(pkg.exports).filter((key) => key !== './package.json').map((key) => pkg.name + (key === '.' ? '' : key.slice(1)))
+	// React Native subpaths load `react-native`, whose entry is Flow source Node cannot run.
+	const reactNativeOnly = ['./react/markdown']
+	const specifiers = Object.keys(pkg.exports).filter((key) => key !== './package.json' && !reactNativeOnly.includes(key)).map((key) => pkg.name + (key === '.' ? '' : key.slice(1)))
 	const code = `for (const name of ${JSON.stringify(specifiers)}) await import(name); console.log('Verified package imports');`
 	const runtime = ['plantr', 'expo-release'].includes(pkg.name) ? 'bun' : process.execPath
 	execFileSync(runtime, ['--input-type=module', '-e', code], { cwd: temporary, stdio: 'inherit', timeout: 30_000 })
