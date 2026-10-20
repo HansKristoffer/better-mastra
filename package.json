@@ -5,40 +5,158 @@
 	"type": "module",
 	"license": "MIT",
 	"sideEffects": false,
-	"repository": { "type": "git", "url": "git+https://github.com/HansKristoffer/better-mastra.git" },
-	"engines": { "node": ">=20" },
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/HansKristoffer/better-mastra.git"
+	},
+	"engines": {
+		"node": ">=20"
+	},
 	"exports": {
-		".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
-		"./dictation": { "types": "./dist/dictation/index.d.ts", "import": "./dist/dictation/index.js" },
-		"./dictation/react": { "types": "./dist/dictation/react/index.d.ts", "import": "./dist/dictation/react/index.js" },
-		"./dictation/vue": { "types": "./dist/dictation/vue/index.d.ts", "import": "./dist/dictation/vue/index.js" },
-		"./dictation/server": { "types": "./dist/dictation/server/index.d.ts", "import": "./dist/dictation/server/index.js" }
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./models": {
+			"types": "./dist/models/index.d.ts",
+			"import": "./dist/models/index.js"
+		},
+		"./usage": {
+			"types": "./dist/usage/index.d.ts",
+			"import": "./dist/usage/index.js"
+		},
+		"./embeddings": {
+			"types": "./dist/embeddings/index.d.ts",
+			"import": "./dist/embeddings/index.js"
+		},
+		"./evals": {
+			"types": "./dist/evals/index.d.ts",
+			"import": "./dist/evals/index.js"
+		},
+		"./resumable": {
+			"types": "./dist/resumable/index.d.ts",
+			"import": "./dist/resumable/index.js"
+		},
+		"./dictation": {
+			"types": "./dist/dictation/index.d.ts",
+			"import": "./dist/dictation/index.js"
+		},
+		"./dictation/react": {
+			"types": "./dist/dictation/react/index.d.ts",
+			"import": "./dist/dictation/react/index.js"
+		},
+		"./dictation/vue": {
+			"types": "./dist/dictation/vue/index.d.ts",
+			"import": "./dist/dictation/vue/index.js"
+		},
+		"./dictation/server": {
+			"types": "./dist/dictation/server/index.d.ts",
+			"import": "./dist/dictation/server/index.js"
+		}
+	},
+	"bin": {
+		"better-mastra-evals": "./dist/evals/cli.js"
 	},
 	"types": "./dist/index.d.ts",
-	"files": ["dist", "LICENSE", "README.md", "src/**/*.ts", "!src/**/*.test.ts"],
-	"publishConfig": { "access": "public" },
+	"files": [
+		"dist",
+		"LICENSE",
+		"README.md",
+		"src/**/*.ts",
+		"!src/**/*.test.ts"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
 	"scripts": {
 		"build": "bun scripts/build.ts",
 		"test": "bun test",
 		"typecheck": "tsc --noEmit",
 		"lint": "bun run typecheck && biome check",
-		"lint:write": "bun run typecheck && biome check --write"
+		"lint:write": "bun run typecheck && biome check --write",
+		"attw": "attw --pack . --profile esm-only",
+		"publint": "publint",
+		"verify:package": "node scripts/verify-package.mjs"
 	},
 	"peerDependencies": {
+		"@ai-sdk/anthropic": "^4.0.0",
+		"@ai-sdk/google-vertex": "^5.0.0",
+		"@ai-sdk/openai": "^4.0.0",
+		"@ai-sdk/openai-compatible": "^3.0.0",
+		"@ai-sdk/provider": "^4.0.0",
+		"@mastra/core": "^1.76.0",
+		"@mastra/evals": "^1.10.7",
+		"@mastra/libsql": "^1.26.0",
+		"@mastra/memory": "^1.37.0",
+		"@mastra/pg": "^1.31.0",
+		"@openrouter/ai-sdk-provider": "^3.1.0",
+		"ai": "^7.0.143",
+		"pg": "^8.16.0",
 		"react": ">=18",
-		"vue": ">=3.3"
+		"vue": ">=3.3",
+		"zod": "^4.4.3"
 	},
 	"peerDependenciesMeta": {
-		"react": { "optional": true },
-		"vue": { "optional": true }
+		"@ai-sdk/anthropic": {
+			"optional": true
+		},
+		"@ai-sdk/google-vertex": {
+			"optional": true
+		},
+		"@ai-sdk/openai": {
+			"optional": true
+		},
+		"@ai-sdk/openai-compatible": {
+			"optional": true
+		},
+		"@mastra/evals": {
+			"optional": true
+		},
+		"@mastra/libsql": {
+			"optional": true
+		},
+		"@mastra/pg": {
+			"optional": true
+		},
+		"@openrouter/ai-sdk-provider": {
+			"optional": true
+		},
+		"pg": {
+			"optional": true
+		},
+		"react": {
+			"optional": true
+		},
+		"vue": {
+			"optional": true
+		}
 	},
 	"devDependencies": {
+		"@ai-sdk/anthropic": "^4.0.84",
+		"@ai-sdk/google-vertex": "^5.0.118",
+		"@ai-sdk/openai": "^4.0.98",
+		"@ai-sdk/openai-compatible": "^3.0.74",
+		"@ai-sdk/provider": "^4.0.31",
+		"@arethetypeswrong/cli": "^0.18.2",
 		"@biomejs/biome": "^2.2.4",
+		"@mastra/core": "^1.76.0",
+		"@mastra/evals": "^1.10.7",
+		"@mastra/libsql": "^1.26.2",
+		"@mastra/memory": "^1.37.1",
+		"@mastra/pg": "^1.31.2",
+		"@openrouter/ai-sdk-provider": "^3.1.0",
 		"@types/bun": "^1.2.0",
+		"@types/node": "^26.6.5",
+		"@types/pg": "^8.23.1",
 		"@types/react": "^19.3.0",
+		"ai": "^7.0.143",
+		"ioredis": "^5.11.1",
+		"pg": "^8.23.1",
+		"publint": "^0.3.12",
 		"react": "^19.3.1",
 		"typescript": "^5.9.2",
-		"vue": "^3.5.44"
+		"vue": "^3.5.44",
+		"zod": "^4.6.7"
 	},
 	"packageManager": "bun@1.4.2"
 }
