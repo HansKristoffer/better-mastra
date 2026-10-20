@@ -52,10 +52,23 @@
 		"./dictation/server": {
 			"types": "./dist/dictation/server/index.d.ts",
 			"import": "./dist/dictation/server/index.js"
+		},
+		"./turn": {
+			"types": "./dist/turn/index.d.ts",
+			"import": "./dist/turn/index.js"
+		},
+		"./hono": {
+			"types": "./dist/hono/index.d.ts",
+			"import": "./dist/hono/index.js"
+		},
+		"./tools": {
+			"types": "./dist/tools/index.d.ts",
+			"import": "./dist/tools/index.js"
 		}
 	},
 	"bin": {
-		"better-mastra-evals": "./dist/evals/cli.js"
+		"better-mastra-evals": "./dist/evals/cli.js",
+		"better-mastra-tool-manifest": "./dist/tools/cli.js"
 	},
 	"types": "./dist/index.d.ts",
 	"files": [
@@ -84,13 +97,16 @@
 		"@ai-sdk/openai": "^4.0.0",
 		"@ai-sdk/openai-compatible": "^3.0.0",
 		"@ai-sdk/provider": "^4.0.0",
+		"@mastra/ai-sdk": "^1.11.1",
 		"@mastra/core": "^1.76.0",
 		"@mastra/evals": "^1.10.7",
+		"@mastra/hono": "^1.7.18",
 		"@mastra/libsql": "^1.26.0",
 		"@mastra/memory": "^1.37.0",
 		"@mastra/pg": "^1.31.0",
 		"@openrouter/ai-sdk-provider": "^3.1.0",
 		"ai": "^7.0.143",
+		"hono": "^4.12.32",
 		"pg": "^8.16.0",
 		"react": ">=18",
 		"vue": ">=3.3",
@@ -112,6 +128,9 @@
 		"@mastra/evals": {
 			"optional": true
 		},
+		"@mastra/hono": {
+			"optional": true
+		},
 		"@mastra/libsql": {
 			"optional": true
 		},
@@ -119,6 +138,9 @@
 			"optional": true
 		},
 		"@openrouter/ai-sdk-provider": {
+			"optional": true
+		},
+		"hono": {
 			"optional": true
 		},
 		"pg": {
@@ -139,17 +161,21 @@
 		"@ai-sdk/provider": "^4.0.31",
 		"@arethetypeswrong/cli": "^0.18.2",
 		"@biomejs/biome": "^2.2.4",
+		"@mastra/ai-sdk": "^1.11.1",
 		"@mastra/core": "^1.76.0",
 		"@mastra/evals": "^1.10.7",
+		"@mastra/hono": "^1.7.18",
 		"@mastra/libsql": "^1.26.2",
 		"@mastra/memory": "^1.37.1",
 		"@mastra/pg": "^1.31.2",
 		"@openrouter/ai-sdk-provider": "^3.1.0",
 		"@types/bun": "^1.2.0",
+		"@types/json-schema": "^7.0.15",
 		"@types/node": "^26.6.5",
 		"@types/pg": "^8.23.1",
 		"@types/react": "^19.3.0",
 		"ai": "^7.0.143",
+		"hono": "^4.12.32",
 		"ioredis": "^5.11.1",
 		"pg": "^8.23.1",
 		"publint": "^0.3.12",
