@@ -8,11 +8,19 @@
 	"repository": { "type": "git", "url": "git+https://github.com/HansKristoffer/better-mastra.git" },
 	"engines": { "node": ">=20" },
 	"exports": {
-		".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+		".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+		"./evals": { "types": "./dist/evals/index.d.ts", "import": "./dist/evals/index.js" }
 	},
+	"bin": { "better-mastra-evals": "./dist/evals/cli.js" },
 	"types": "./dist/index.d.ts",
 	"files": ["dist", "LICENSE", "README.md", "src/**/*.ts", "!src/**/*.test.ts"],
 	"publishConfig": { "access": "public" },
+	"peerDependencies": {
+		"@mastra/core": "^1.76.0",
+		"@mastra/evals": "^1.10.7",
+		"ai": "^7.0.143",
+		"zod": "^4.4.3"
+	},
 	"scripts": {
 		"build": "bun scripts/build.ts",
 		"test": "bun test",
@@ -22,8 +30,12 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.2.4",
+		"@mastra/core": "^1.76.0",
+		"@mastra/evals": "^1.10.7",
 		"@types/bun": "^1.2.0",
-		"typescript": "^5.9.2"
+		"ai": "^7.0.143",
+		"typescript": "^5.9.2",
+		"zod": "^4.4.3"
 	},
 	"packageManager": "bun@1.4.2"
 }
