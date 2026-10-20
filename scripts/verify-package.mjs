@@ -30,7 +30,11 @@ try {
 	}
 	for (const file of Object.values(pkg.bin || {})) assert.ok(files.has(file.replace(/^\.\//, '')), `Missing binary: ${file}`)
 	writeFileSync(join(temporary, 'package.json'), JSON.stringify({ private: true, type: 'module' }))
-	execFileSync('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', join(temporary, packed.filename)], {
+	// Optional peers too, so every subpath's import is checked.
+	const optionalPeers = Object.entries(pkg.peerDependenciesMeta || {})
+		.filter(([, meta]) => meta.optional)
+		.map(([name]) => `${name}@${pkg.peerDependencies[name]}`)
+	execFileSync('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', join(temporary, packed.filename), ...optionalPeers], {
 		cwd: temporary, stdio: 'pipe', timeout: 120_000
 	})
 	const specifiers = Object.keys(pkg.exports).filter((key) => key !== './package.json').map((key) => pkg.name + (key === '.' ? '' : key.slice(1)))

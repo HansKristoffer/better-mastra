@@ -87,6 +87,9 @@
 		"@ai-sdk/openai-compatible": {
 			"optional": true
 		},
+		"@mastra/evals": {
+			"optional": true
+		},
 		"@mastra/libsql": {
 			"optional": true
 		},
