@@ -36,6 +36,22 @@
 		"./resumable": {
 			"types": "./dist/resumable/index.d.ts",
 			"import": "./dist/resumable/index.js"
+		},
+		"./dictation": {
+			"types": "./dist/dictation/index.d.ts",
+			"import": "./dist/dictation/index.js"
+		},
+		"./dictation/react": {
+			"types": "./dist/dictation/react/index.d.ts",
+			"import": "./dist/dictation/react/index.js"
+		},
+		"./dictation/vue": {
+			"types": "./dist/dictation/vue/index.d.ts",
+			"import": "./dist/dictation/vue/index.js"
+		},
+		"./dictation/server": {
+			"types": "./dist/dictation/server/index.d.ts",
+			"import": "./dist/dictation/server/index.js"
 		}
 	},
 	"bin": {
@@ -76,6 +92,8 @@
 		"@openrouter/ai-sdk-provider": "^3.1.0",
 		"ai": "^7.0.143",
 		"pg": "^8.16.0",
+		"react": ">=18",
+		"vue": ">=3.3",
 		"zod": "^4.4.3"
 	},
 	"peerDependenciesMeta": {
@@ -105,6 +123,12 @@
 		},
 		"pg": {
 			"optional": true
+		},
+		"react": {
+			"optional": true
+		},
+		"vue": {
+			"optional": true
 		}
 	},
 	"devDependencies": {
@@ -124,11 +148,14 @@
 		"@types/bun": "^1.2.0",
 		"@types/node": "^26.6.5",
 		"@types/pg": "^8.23.1",
+		"@types/react": "^19.3.0",
 		"ai": "^7.0.143",
 		"ioredis": "^5.11.1",
 		"pg": "^8.23.1",
 		"publint": "^0.3.12",
+		"react": "^19.3.1",
 		"typescript": "^5.9.2",
+		"vue": "^3.5.44",
 		"zod": "^4.6.7"
 	},
 	"packageManager": "bun@1.4.2"
