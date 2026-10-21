@@ -1,6 +1,6 @@
 {
 	"name": "better-mastra",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"description": "A small layer on Mastra and the AI SDK: model registry, chat turns, resumable streams and chat clients for React and Vue.",
 	"type": "module",
 	"license": "MIT",
