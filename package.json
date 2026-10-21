@@ -107,6 +107,9 @@
 		"publint": "publint",
 		"verify:package": "node scripts/verify-package.mjs"
 	},
+	"dependencies": {
+		"hanzio": "^3.1.0"
+	},
 	"peerDependencies": {
 		"@ai-sdk/anthropic": "^4.0.0",
 		"@ai-sdk/google-vertex": "^5.0.0",
