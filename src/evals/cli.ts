@@ -183,6 +183,8 @@ const cli = defineCli({
 	name: 'better-mastra-evals',
 	description:
 		"Real turns through the app's production turn, scored by checks and a judge",
+	// `better-mastra-evals` alone, or with options first, runs `run`.
+	defaultCommand: 'run',
 	commands: {
 		run: defineCommand({
 			description: 'Run a suite and save its report',
@@ -222,14 +224,5 @@ const cli = defineCli({
 	}
 })
 
-// `run` is the default command: no command, or options first, runs it.
-const argv = process.argv.slice(2)
-const [first] = argv
-if (
-	first === undefined ||
-	(first.startsWith('-') && first !== '-h' && first !== '--help')
-)
-	argv.unshift('run')
-
 // App pools (database, Redis) keep the event loop alive after the last run.
-process.exit(await cli.run(argv))
+process.exit(await cli.run())
