@@ -356,9 +356,11 @@ function stepOf(
 		return []
 	}
 
-	const start = parts.findLastIndex(
-		(part, index) => index < at && part.type === 'step-start'
-	)
+	// The tsconfig lib predates `findLastIndex`.
+	const start = parts
+		.slice(0, at)
+		.map((part) => part.type)
+		.lastIndexOf('step-start')
 	const end = parts.findIndex(
 		(part, index) => index > at && part.type === 'step-start'
 	)
