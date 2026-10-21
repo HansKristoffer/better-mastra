@@ -502,3 +502,75 @@ function approve(message: UIMessage | undefined): UIMessage {
 		)
 	}
 }
+
+describe('runChatTurn with a client action that failed', () => {
+	test('should hand the model the client action error as its result', async () => {
+		// Given a client action that failed in the app
+		const harness = createHarness({
+			replies: [textReply('Find den under Budget.')]
+		})
+		const failed = {
+			id: 'a-1',
+			role: 'assistant',
+			parts: [
+				{ type: 'step-start' },
+				{
+					type: 'tool-openScreen',
+					toolCallId: 'call-1',
+					state: 'output-error',
+					input: { destination: 'budget' },
+					errorText: 'The app could not open this place.'
+				}
+			]
+		} as unknown as UIMessage
+
+		// When the client sends the result back
+		const result = await harness.run({
+			messages: [userMessage('Åbn mit budget'), failed]
+		})
+		await readTurn(result)
+
+		// Then the model reads the error as the call's result
+		const prompt = harness.model.doStreamCalls[0]?.prompt ?? []
+		expect(prompt.find((message) => message.role === 'tool')).toMatchObject({
+			content: [
+				{
+					type: 'tool-result',
+					toolCallId: 'call-1',
+					output: {
+						type: 'error-text',
+						value: 'The app could not open this place.'
+					}
+				}
+			]
+		})
+	})
+})
+
+describe('runChatTurn logging', () => {
+	test('should add the app attributes and the resolved scope to every error it logs', async () => {
+		// Given an app that tags its turn logs with the user and organization
+		const logged: Record<string, unknown>[] = []
+		const harness = createHarness({
+			replies: [failingReply(new Error('the provider failed'))],
+			overrides: {
+				logger: { error: (_message, attributes) => logged.push(attributes) },
+				logAttributes: (request, scope) => ({
+					userId: request.auth,
+					organizationId: scope?.organizationId
+				})
+			}
+		})
+
+		// When the model fails during the turn
+		await readTurn(await harness.run({ messages: [userMessage('Mad?')] }))
+
+		// Then the error carries both
+		expect(logged.length).toBeGreaterThan(0)
+		expect(logged[0]).toMatchObject({
+			userId: 'user-1',
+			organizationId: 'org-1',
+			stage: 'model'
+		})
+	})
+})

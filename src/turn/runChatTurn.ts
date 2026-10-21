@@ -15,7 +15,7 @@ import {
 	MASTRA_THREAD_ID_KEY,
 	type RequestContext
 } from '@mastra/core/request-context'
-import { isToolUIPart, type UIMessage, type UIMessageChunk } from 'ai'
+import type { UIMessage, UIMessageChunk } from 'ai'
 
 import {
 	classifyTurnChanges,
@@ -208,6 +208,14 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 	readonly maxMessageLength?: number
 	readonly sendReasoning?: boolean
 	readonly logger?: ChatTurnLogger
+	/**
+	 * Attributes every error the turn logs carries, such as the user id.
+	 * `scope` is undefined until the turn has resolved it.
+	 */
+	logAttributes?(
+		request: ChatTurnRequest<TAuth, TBody>,
+		scope: TScope | undefined
+	): Record<string, unknown>
 	readonly now?: () => number
 }
 
@@ -233,10 +241,22 @@ export async function runChatTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	request: ChatTurnRequest<TAuth, TBody>,
 	deps: ChatTurnDeps<TAuth, TBody, TScope>
 ): Promise<ChatTurnResult> {
-	const logger = deps.logger ?? consoleLogger
+	const base = deps.logger ?? consoleLogger
+	let scope: TScope | undefined
+	const logger: ChatTurnLogger = deps.logAttributes
+		? {
+				error: (message, attributes) =>
+					base.error(message, {
+						...deps.logAttributes?.(request, scope),
+						...attributes
+					})
+			}
+		: base
 
 	try {
-		return await admitAndRun(request, deps, logger)
+		return await admitAndRun(request, deps, logger, (resolved) => {
+			scope = resolved
+		})
 	} catch (error) {
 		const staged = error instanceof ChatTurnStageError ? error : undefined
 
@@ -259,7 +279,8 @@ export function refused(refusal: ChatRefusal): ChatTurnResult {
 async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 	request: ChatTurnRequest<TAuth, TBody>,
 	deps: ChatTurnDeps<TAuth, TBody, TScope>,
-	logger: ChatTurnLogger
+	logger: ChatTurnLogger,
+	onScope: (scope: TScope) => void
 ): Promise<ChatTurnResult> {
 	const startedAt = (deps.now ?? Date.now)()
 	const messages = readMessages(request.body, deps.maxMessageLength ?? 4_000)
@@ -269,6 +290,8 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 	const scope = await atStage('scope', () => deps.resolveScope(request))
 
 	if (scope === undefined) return refused('forbidden')
+
+	onScope(scope)
 
 	const gateRefusal = await atStage('gate', async () =>
 		deps.gate?.(scope, request.body)
@@ -614,8 +637,8 @@ async function classifyChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 /**
  * The messages the turn hands to Mastra, or undefined for a body a client must
  * never send: a system message, or a user message over the maximum length.
- * Observational memory's parts a client sent back are dropped, and a client
- * tool's error becomes a result the model can read.
+ * Observational memory's parts a client sent back are dropped. A client
+ * tool's error reaches the model as Mastra's `error-text` result.
  */
 function readMessages(
 	body: ChatTurnBody,
@@ -627,34 +650,7 @@ function readMessages(
 			(message.role === 'user' && textOf(message).length > maxMessageLength)
 	)
 
-	return isRefused
-		? undefined
-		: body.messages.map((message) =>
-				clientToolErrorsAsResults(toUserFacingMessage(message))
-			)
-}
-
-/**
- * Mastra builds the model's history from tool calls with a result only, so an
- * `output-error` call vanished with its error, and a step that reasoned right
- * before it ended in a bare thinking block, which Anthropic rejects.
- */
-export function clientToolErrorsAsResults(message: UIMessage): UIMessage {
-	if (message.role !== 'assistant') return message
-
-	return {
-		...message,
-		parts: message.parts.map((part) =>
-			isToolUIPart(part) && part.state === 'output-error'
-				? ({
-						...part,
-						state: 'output-available',
-						output: { error: part.errorText || 'The tool failed.' },
-						errorText: undefined
-					} as unknown as typeof part)
-				: part
-		)
-	}
+	return isRefused ? undefined : body.messages.map(toUserFacingMessage)
 }
 
 function textOf(message: UIMessage | undefined): string {

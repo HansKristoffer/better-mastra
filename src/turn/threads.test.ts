@@ -2,9 +2,12 @@ import { describe, expect, spyOn, test } from 'bun:test'
 import type { MastraDBMessage } from '@mastra/core/memory'
 import { getToolName, isToolUIPart } from 'ai'
 
+import { InMemoryStore } from '@mastra/core/storage'
+
 import {
 	type AnswerRating,
 	createThreadHandlers,
+	sweepAbandonedRuns,
 	sweepOldThreads
 } from './threads.js'
 import {
@@ -325,4 +328,82 @@ test('should sweep every expired thread, not only the first batch, and keep live
 		'foreign-old',
 		'live'
 	])
+})
+
+describe('sweepAbandonedRuns', () => {
+	async function suspendedRuns(threadIds: readonly string[]) {
+		const store = new InMemoryStore()
+		const workflows = await store.getStore('workflows')
+
+		if (!workflows) throw new Error('The store has no workflows domain.')
+
+		for (const [index, threadId] of threadIds.entries()) {
+			await workflows.persistWorkflowSnapshot({
+				workflowName: 'agentic-loop',
+				runId: `run-${index}`,
+				snapshot: {
+					status: 'suspended',
+					context: {
+						input: {
+							messageListState: { memoryInfo: { threadId, resourceId: 'r' } }
+						}
+					}
+				} as never,
+				createdAt: new Date('2026-10-01T00:00:00Z'),
+				updatedAt: new Date('2026-10-01T00:00:00Z')
+			})
+		}
+
+		return workflows
+	}
+
+	test('should delete the matching runs under the thread lock and leave a busy thread', async () => {
+		// Given three abandoned runs, one of another agent and one on a busy thread
+		const workflows = await suspendedRuns([
+			'chat:idle',
+			'chat:busy',
+			'other:idle'
+		])
+		const locked: string[] = []
+
+		// When the sweep runs for the chat threads
+		const deleted = await sweepAbandonedRuns({
+			workflows,
+			olderThan: new Date('2026-10-10T00:00:00Z'),
+			filter: (run) => run.threadId?.startsWith('chat:') === true,
+			withLock: async (run, remove) => {
+				locked.push(run.threadId ?? '')
+				if (run.threadId === 'chat:busy') return false
+				await remove()
+				return true
+			}
+		})
+
+		// Then only the idle chat thread's run is gone
+		expect(deleted).toBe(1)
+		expect(locked.sort()).toEqual(['chat:busy', 'chat:idle'])
+		const { runs } = await workflows.listWorkflowRuns({
+			workflowName: 'agentic-loop'
+		})
+		expect(runs.map((run) => run.runId).sort()).toEqual(['run-1', 'run-2'])
+	})
+
+	test('should count the runs without deleting them in a dry run', async () => {
+		// Given two abandoned runs
+		const workflows = await suspendedRuns(['chat:a', 'chat:b'])
+
+		// When the sweep only counts
+		const found = await sweepAbandonedRuns({
+			workflows,
+			olderThan: new Date('2026-10-10T00:00:00Z'),
+			dryRun: true
+		})
+
+		// Then it reports both and keeps them
+		expect(found).toBe(2)
+		const { runs } = await workflows.listWorkflowRuns({
+			workflowName: 'agentic-loop'
+		})
+		expect(runs).toHaveLength(2)
+	})
 })

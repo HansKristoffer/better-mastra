@@ -79,7 +79,14 @@ export function defineTool<
 		: createTool(definition.tool)
 	const hidden = definition.hiddenInputs ?? {}
 	const hiddenNames = Object.keys(hidden)
-	const baseExecute = base.execute
+	// Mastra's tool validates its input before it calls the function it wraps.
+	// With hidden inputs that second pass is the only check of the filled
+	// values, so it stays; without them the outer tool already validated the
+	// same input, so the function the options name runs directly.
+	const baseExecute =
+		hiddenNames.length === 0 && !isTool(definition.tool)
+			? definition.tool.execute
+			: base.execute
 	const toModelOutput = definition.toModelOutput
 	// Only a read is safe to run in an eval's dry run.
 	const honoursDryRun = definition.tier !== 'read'

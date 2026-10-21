@@ -17,7 +17,12 @@ import type {
 	MastraMemory,
 	StorageThreadType
 } from '@mastra/core/memory'
-import type { MemoryStorage, WorkflowsStorage } from '@mastra/core/storage'
+import {
+	getSnapshotMemoryInfo,
+	type MemoryStorage,
+	type WorkflowRun,
+	type WorkflowsStorage
+} from '@mastra/core/storage'
 import type { UIMessage } from 'ai'
 
 import {
@@ -435,18 +440,41 @@ export async function sweepOldThreads(input: {
 	return { deleted, failed }
 }
 
+/** A suspended agent run a sweep found. */
+export interface AbandonedRun {
+	readonly runId: string
+	/** The thread its snapshot names, when it names one. */
+	readonly threadId: string | undefined
+	readonly resourceId: string | undefined
+	/** When its snapshot was last stored: when it suspended. */
+	readonly suspendedAt: Date
+}
+
 /**
  * Deletes the snapshots of agent runs still suspended since before
  * `olderThan`, so an approval nobody answered can no longer be resumed.
- * Returns how many runs were deleted.
+ * Returns how many runs were deleted, or with `dryRun` how many would be.
  */
 export async function sweepAbandonedRuns(input: {
 	readonly workflows: WorkflowsStorage
 	readonly olderThan: Date
 	readonly pageSize?: number
+	/** Which runs to sweep, such as only the threads of one agent. Default every one. */
+	readonly filter?: (run: AbandonedRun) => boolean
+	/**
+	 * Runs `remove` under the app's lock of the run's thread, so a turn that
+	 * is resuming the run keeps it. Resolves false when the thread is busy,
+	 * which leaves the run to the next sweep.
+	 */
+	readonly withLock?: (
+		run: AbandonedRun,
+		remove: () => Promise<void>
+	) => Promise<boolean>
+	/** Counts the runs without deleting any. */
+	readonly dryRun?: boolean
 }): Promise<number> {
 	const perPage = input.pageSize ?? 100
-	const runIds: string[] = []
+	const abandoned: AbandonedRun[] = []
 
 	for (let page = 0; ; page++) {
 		const { runs } = await input.workflows.listWorkflowRuns({
@@ -457,22 +485,64 @@ export async function sweepAbandonedRuns(input: {
 			page
 		})
 
-		runIds.push(
+		abandoned.push(
 			...runs
 				.filter((run) => run.updatedAt <= input.olderThan)
-				.map((run) => run.runId)
+				.map(toAbandonedRun)
+				.filter((run) => input.filter?.(run) ?? true)
 		)
 
 		if (runs.length < perPage) break
 	}
 
-	for (const runId of runIds) {
-		for (const workflowName of AGENT_RUN_WORKFLOWS) {
-			await input.workflows.deleteWorkflowRunById({ runId, workflowName })
+	if (input.dryRun) return abandoned.length
+
+	let deleted = 0
+
+	for (const run of abandoned) {
+		const remove = async () => {
+			for (const workflowName of AGENT_RUN_WORKFLOWS) {
+				await input.workflows.deleteWorkflowRunById({
+					runId: run.runId,
+					workflowName
+				})
+			}
+		}
+
+		if (input.withLock) {
+			if (await input.withLock(run, remove)) deleted += 1
+		} else {
+			await remove()
+			deleted += 1
 		}
 	}
 
-	return runIds.length
+	return deleted
+}
+
+function toAbandonedRun(run: WorkflowRun): AbandonedRun {
+	const memory = getSnapshotMemoryInfo(
+		typeof run.snapshot === 'string'
+			? parseSnapshot(run.snapshot)
+			: run.snapshot
+	)
+
+	return {
+		runId: run.runId,
+		threadId: memory?.threadId,
+		resourceId: memory?.resourceId ?? run.resourceId,
+		suspendedAt: run.updatedAt
+	}
+}
+
+function parseSnapshot(
+	snapshot: string
+): Parameters<typeof getSnapshotMemoryInfo>[0] {
+	try {
+		return JSON.parse(snapshot)
+	} catch {
+		return undefined
+	}
 }
 
 function toUiMessages(

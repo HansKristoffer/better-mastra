@@ -69,6 +69,58 @@ describe('defineTool', () => {
 		expect(validated?.issues).toBeUndefined()
 	})
 
+	test('should validate the input of a tool without hidden inputs once', async () => {
+		// Given a tool whose schema counts how often it runs
+		let validations = 0
+		const defined = defineTool({
+			tool: {
+				id: 'budget_find',
+				description: 'Finds a budget.',
+				inputSchema: z.object({
+					month: z.string().refine(() => {
+						validations += 1
+						return true
+					})
+				}),
+				execute: async (input: unknown) => input
+			},
+			tier: 'read'
+		})
+
+		// When the model calls it
+		const result = await run(defined.tool, { month: '2026-10' }, contextFor({}))
+
+		// Then the input was validated by the tool the turn runs, and only there
+		expect(result).toEqual({ month: '2026-10' })
+		expect(validations).toBe(1)
+	})
+
+	test('should report an overlong list once when the schema caps it too', () => {
+		// Given a write capped both by its schema and by its definition
+		const defined = defineTool({
+			tool: {
+				id: 'budget_setMany',
+				description: 'Sets budgets.',
+				inputSchema: toolInputSchema(z.object({ ids: z.array(z.string()) }), {
+					maxArrayItems: 2
+				}),
+				execute: async () => ({ ok: true })
+			},
+			tier: 'approval',
+			maxArrayItems: 2
+		})
+
+		// When the model sends three
+		const result = defined.tool.inputSchema?.['~standard'].validate({
+			ids: ['a', 'b', 'c']
+		}) as { issues?: readonly unknown[] }
+
+		// Then the cap is reported once
+		expect(result.issues).toEqual([
+			{ message: 'At most 2 items in one change.', path: ['ids'] }
+		])
+	})
+
 	test('should wrap a tool made elsewhere, such as orpc-fn createMastraTool', async () => {
 		const made = createTool({
 			id: 'deals_list',
@@ -177,6 +229,59 @@ describe('defineTool', () => {
 		expect(renderToolManifestSource(manifest)).toContain(
 			'export const toolManifest = {'
 		)
+	})
+})
+
+describe('renderToolManifestSource', () => {
+	test("should name the kinds in the app's words and write what Biome writes", () => {
+		// Given tools the app calls procedures and screen actions
+		const definitions = [
+			defineTool({
+				tool: {
+					id: 'budget_set',
+					description: 'Sets a budget.',
+					inputSchema: z.object({ amount: z.number() }),
+					execute: async () => ({ ok: true })
+				},
+				tier: 'approval',
+				card: 'changePlan',
+				invalidates: ['budget', 'goals', 'transactions', 'accounts'],
+				manifest: {
+					confirmFields: [{ path: 'amount', format: { kind: 'amountKr' } }],
+					note: 'It\'s the user\'s "own" budget'
+				}
+			}),
+			defineTool({
+				tool: {
+					id: 'open-screen',
+					description: 'Opens a screen.',
+					inputSchema: z.object({ to: z.string() })
+				},
+				tier: 'read'
+			})
+		]
+		const manifest = buildToolManifest(definitions, {
+			kind: (definition) =>
+				definition.kind === 'client' ? 'screenAction' : 'procedure'
+		})
+
+		// When its module is written with the app's type
+		const source = renderToolManifestSource(manifest, {
+			exportName: 'assistantToolManifest',
+			type: { name: 'AssistantToolManifest', from: './toolManifest' }
+		})
+
+		// Then the kinds are the app's, and Biome leaves the module as it is
+		expect(manifest['budget_set']?.kind).toBe('procedure')
+		expect(manifest['open-screen']?.kind).toBe('screenAction')
+		expect(source).toContain(
+			'export const assistantToolManifest: AssistantToolManifest = {'
+		)
+		const formatted = Bun.spawnSync(
+			['node_modules/.bin/biome', 'format', '--stdin-file-path=manifest.ts'],
+			{ stdin: new TextEncoder().encode(source) }
+		)
+		expect(formatted.stdout.toString()).toBe(source)
 	})
 })
 
