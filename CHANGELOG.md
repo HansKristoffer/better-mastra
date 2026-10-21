@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/HansKristoffer/better-mastra/compare/v0.1.0...v0.1.1) (2026-10-21)
+
+
+### Miscellaneous Chores
+
+* release 0.1.1 ([dae890a](https://github.com/HansKristoffer/better-mastra/commit/dae890a54ead4e7d367739ae7e6142a8d91a6d0a))
+
 ## 0.1.0 (2026-10-20)
 
 
