@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/HansKristoffer/better-mastra/compare/v0.2.0...v0.3.0) (2026-10-21)
+
+
+### Features
+
+* hellu's turn, route, client, dictation and evals follow-ups ([#20](https://github.com/HansKristoffer/better-mastra/issues/20)) ([cd1c8ac](https://github.com/HansKristoffer/better-mastra/commit/cd1c8ac00e040112cb756971414ff88ccc24a0ee))
+
 ## [0.2.0](https://github.com/HansKristoffer/better-mastra/compare/v0.1.1...v0.2.0) (2026-10-21)
 
 
