@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/HansKristoffer/better-mastra/compare/v0.3.0...v0.4.0) (2026-10-21)
+
+
+### Features
+
+* per-user request limits, abandoned-run sweep hooks and an app-typed tool manifest ([#19](https://github.com/HansKristoffer/better-mastra/issues/19)) ([3190e09](https://github.com/HansKristoffer/better-mastra/commit/3190e0904b78d9303fd3b3b8b78368b80f65d276))
+
+
+### Bug Fixes
+
+* **cli:** use hanzio/cli's defaultCommand for the evals run command ([#22](https://github.com/HansKristoffer/better-mastra/issues/22)) ([a4b4f14](https://github.com/HansKristoffer/better-mastra/commit/a4b4f14319402bff1c19764cfa27d0883bd49624))
+
 ## [0.3.0](https://github.com/HansKristoffer/better-mastra/compare/v0.2.0...v0.3.0) (2026-10-21)
 
 
