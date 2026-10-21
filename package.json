@@ -21,6 +21,18 @@
 			"types": "./dist/models/index.d.ts",
 			"import": "./dist/models/index.js"
 		},
+		"./openrouter": {
+			"types": "./dist/openrouter/index.d.ts",
+			"import": "./dist/openrouter/index.js"
+		},
+		"./pg": {
+			"types": "./dist/pg/index.d.ts",
+			"import": "./dist/pg/index.js"
+		},
+		"./libsql": {
+			"types": "./dist/libsql/index.d.ts",
+			"import": "./dist/libsql/index.js"
+		},
 		"./usage": {
 			"types": "./dist/usage/index.d.ts",
 			"import": "./dist/usage/index.js"

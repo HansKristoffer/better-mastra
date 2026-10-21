@@ -4,6 +4,26 @@ A small layer on Mastra and the AI SDK: model registry, chat turns, resumable st
 
 Work in progress.
 
+## Runtime presets
+
+Storage and memory presets are synchronous; pools connect on their first query, so a process can build its Mastra at import time:
+
+```ts
+import { Mastra } from '@mastra/core'
+import { createMemory, shutdown } from 'better-mastra' // presets come from the package root
+import { openRouterRoute } from 'better-mastra/openrouter'
+import { pgStorage } from 'better-mastra/pg' // or libsqlStorage from 'better-mastra/libsql'
+
+const storage = pgStorage({ connectionString: process.env.DATABASE_URL })
+const models = openRouterRoute({ apiKey: process.env.OPENROUTER_API_KEY })
+const memory = createMemory({ storage: storage.store, observer: models.model('google/gemini-3.5-flash') })
+export const mastra = new Mastra({ storage: storage.store })
+
+await storage.init() // once, in the process that migrates
+```
+
+`pgStorage` and `libsqlStorage` from the package root are the same presets loaded on call (they return promises); they stay for compatibility.
+
 ## Resumable streams (`better-mastra/resumable`)
 
 Opt-in. A dropped connection no longer aborts the turn: the client reconnects with AI SDK `reconnectToStream` (`useChat({ resume: true })`) and gets a full replay of the current assistant message plus the live tail (`resumeStreamIsReplay: true`, the `DefaultChatTransport` default).

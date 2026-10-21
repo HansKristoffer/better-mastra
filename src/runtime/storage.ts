@@ -3,8 +3,7 @@ import type {
 	RetentionConfig
 } from '@mastra/core/storage'
 import type { Pool, PoolConfig } from 'pg'
-import { errorAttributes, type Logger, silentLogger } from '../models/route.js'
-import { asMastraStorage } from './type-bridge.js'
+import type { Logger } from '../models/route.js'
 
 /** A Mastra store with the calls a process needs around it. */
 export type MastraStorage = {
@@ -17,9 +16,6 @@ export type MastraStorage = {
 	/** Closes what this preset opened (graceful shutdown). */
 	close: () => Promise<void>
 }
-
-/** Probes an idle connection after this long, so a quiet socket is not severed on the way. */
-const KEEP_ALIVE_INITIAL_DELAY_MS = 10_000
 
 export type PgStorageOptions = (
 	| { connectionString: string; pool?: undefined }
@@ -100,116 +96,24 @@ export function initWithRetry(
 	}
 }
 
-function positiveInteger(name: string, value: number) {
-	if (!Number.isInteger(value) || value < 1) {
-		throw new Error(`${name} must be a positive integer, got "${value}"`)
-	}
-	return value
-}
-
 /**
- * Mastra storage on Postgres, in its own schema, on pools that survive a
- * dropped connection: keep-alive on, and an idle client the network severs
- * is logged instead of becoming an unhandled error. Table creation is off;
- * `init()` creates and migrates once at startup. Needs `@mastra/pg` and `pg`.
+ * `pgStorage` from `better-mastra/pg`, loaded on call so the root import never
+ * needs `@mastra/pg`.
+ * @deprecated Import `pgStorage` from `better-mastra/pg`: it is synchronous.
  */
 export async function pgStorage(
 	options: PgStorageOptions
 ): Promise<MastraStorage> {
-	const [{ PostgresStore, PostgresStoreVNext }, pg] = await Promise.all([
-		import('@mastra/pg'),
-		import('pg')
-	])
-	const logger = options.logger ?? silentLogger
-	const id = options.id ?? 'mastra'
-	const schemaName = options.schema ?? 'mastra'
-	const observabilitySchema =
-		options.observabilitySchema === false
-			? undefined
-			: (options.observabilitySchema ?? 'mastra_observability')
-	const poolMax = positiveInteger('poolMax', options.poolMax ?? 5)
-	const owned: Pool[] = []
-
-	const createPool = (name: string, max: number) => {
-		const pool = new pg.Pool({
-			connectionString: options.connectionString,
-			max,
-			keepAlive: true,
-			keepAliveInitialDelayMillis: KEEP_ALIVE_INITIAL_DELAY_MS,
-			...(options.ssl !== undefined ? { ssl: options.ssl } : {}),
-			...(options.connectionTimeoutMillis !== undefined
-				? { connectionTimeoutMillis: options.connectionTimeoutMillis }
-				: {})
-		})
-		pool.on('error', (error) => {
-			logger.warn('Idle database connection dropped', {
-				pool: name,
-				...errorAttributes(error)
-			})
-		})
-		owned.push(pool)
-		return pool
-	}
-
-	const pool = options.pool ?? createPool(schemaName, poolMax)
-	const observabilityPool =
-		observabilitySchema === undefined
-			? undefined
-			: options.pool
-				? options.pool
-				: createPool(
-						observabilitySchema,
-						Math.min(
-							poolMax,
-							positiveInteger(
-								'observabilityPoolMax',
-								options.observabilityPoolMax ?? 2
-							)
-						)
-					)
-
-	const createStore = (disableInit: boolean) => {
-		const config = {
-			id,
-			pool,
-			schemaName,
-			disableInit,
-			...(options.retention ? { retention: options.retention } : {})
-		}
-		return observabilityPool && observabilitySchema
-			? new PostgresStoreVNext({
-					...config,
-					observability: {
-						pool: observabilityPool,
-						schemaName: observabilitySchema
-					}
-				})
-			: new PostgresStore(config)
-	}
-
-	return {
-		store: asMastraStorage(createStore(true)),
-		init: initWithRetry(() => createStore(false).init()),
-		ping: async () => {
-			await pool.query('SELECT 1')
-		},
-		close: async () => {
-			await Promise.all(owned.splice(0).map((owned) => owned.end()))
-		}
-	}
+	return (await import('../pg/index.js')).pgStorage(options)
 }
 
-/** Mastra storage on libSQL (a local file or Turso). Needs `@mastra/libsql`. */
+/**
+ * `libsqlStorage` from `better-mastra/libsql`, loaded on call.
+ * @deprecated Import `libsqlStorage` from `better-mastra/libsql`: it is synchronous.
+ */
 export async function libsqlStorage(
 	url: string,
 	options: { id?: string } = {}
 ): Promise<MastraStorage> {
-	const { LibSQLStore } = await import('@mastra/libsql')
-	const store = new LibSQLStore({ id: options.id ?? 'mastra', url })
-	return {
-		store: asMastraStorage(store),
-		init: () => store.init(),
-		ping: () => store.init(),
-		close: () => store.close()
-	}
+	return (await import('../libsql/index.js')).libsqlStorage(url, options)
 }

@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import { Pool } from 'pg'
+import { libsqlStorage } from '../libsql/index'
+import { pgStorage } from '../pg/index'
 import {
 	initWithRetry,
 	isConcurrentDdlError,
-	libsqlStorage,
-	pgStorage
+	libsqlStorage as libsqlStorageAsync,
+	pgStorage as pgStorageAsync
 } from './storage'
 
 const CONNECTION = 'postgresql://user:secret@db.test.invalid:5432/app'
@@ -17,7 +19,7 @@ type PgInternals = {
 
 describe('pgStorage', () => {
 	test('builds a store in the mastra schema with table creation off, on keep-alive pools', async () => {
-		const storage = await pgStorage({ connectionString: CONNECTION })
+		const storage = pgStorage({ connectionString: CONNECTION })
 		const store = storage.store as unknown as PgInternals
 
 		expect(store).toEqual(
@@ -34,15 +36,15 @@ describe('pgStorage', () => {
 		await storage.close()
 	})
 
-	test.each([0, -1, 2.5])('refuses a pool size of %p', async (poolMax) => {
-		await expect(
-			pgStorage({ connectionString: CONNECTION, poolMax })
-		).rejects.toThrow(`poolMax must be a positive integer, got "${poolMax}"`)
+	test.each([0, -1, 2.5])('refuses a pool size of %p', (poolMax) => {
+		expect(() => pgStorage({ connectionString: CONNECTION, poolMax })).toThrow(
+			`poolMax must be a positive integer, got "${poolMax}"`
+		)
 	})
 
 	test('never ends a pool the caller owns', async () => {
 		const pool = new Pool({ connectionString: CONNECTION })
-		const storage = await pgStorage({ pool, observabilitySchema: false })
+		const storage = pgStorage({ pool, observabilitySchema: false })
 		await storage.close()
 		expect(pool.ending).toBe(false)
 		await pool.end()
@@ -57,10 +59,7 @@ describe('pgStorage', () => {
 				schema: 'better_mastra_test',
 				observabilitySchema: 'better_mastra_test_observability'
 			}
-			const [first, second] = await Promise.all([
-				pgStorage(options),
-				pgStorage(options)
-			])
+			const [first, second] = [pgStorage(options), pgStorage(options)]
 			await Promise.all([first.init(), second.init(), first.init()])
 			await first.ping()
 			await Promise.all([first.close(), second.close()])
@@ -69,9 +68,20 @@ describe('pgStorage', () => {
 	)
 })
 
+describe('root async presets', () => {
+	test('still resolve to the same stores', async () => {
+		const pg = await pgStorageAsync({ connectionString: CONNECTION })
+		expect((pg.store as unknown as PgInternals).schema).toBe('mastra')
+		await pg.close()
+		const libsql = await libsqlStorageAsync('file::memory:')
+		await libsql.init()
+		await libsql.close()
+	})
+})
+
 describe('libsqlStorage', () => {
 	test('creates its tables, answers a ping and closes', async () => {
-		const storage = await libsqlStorage('file::memory:')
+		const storage = libsqlStorage('file::memory:')
 		await storage.init()
 		await storage.ping()
 		await storage.close()
