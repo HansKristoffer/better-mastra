@@ -8,29 +8,46 @@
 import { writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { CliError, defineCli, defineCommand } from 'hanzio/cli'
+import { z } from 'zod'
 
 import type { DefinedTool } from './defineTool.js'
 import { buildToolManifest, renderToolManifestSource } from './manifest.js'
 
-const [modulePath, outPath, exportName = 'tools'] = process.argv.slice(2)
+const cli = defineCli({
+	name: 'better-mastra-tool-manifest',
+	commands: defineCommand({
+		description: 'Write the client tool manifest module for a tools export',
+		input: z.object({
+			module: z
+				.string()
+				.meta({ positional: true })
+				.describe('Module that exports the tools'),
+			out: z.string().meta({ positional: true }).describe('File to write'),
+			export: z
+				.string()
+				.default('tools')
+				.meta({ positional: true })
+				.describe('Export holding the defineTool array')
+		}),
+		run: async (input) => {
+			const loaded = (await import(
+				pathToFileURL(resolve(input.module)).href
+			)) as Record<string, unknown>
+			const definitions = loaded[input.export]
+			if (!Array.isArray(definitions))
+				throw new CliError(
+					`${input.module} has no array export named ${input.export}.`
+				)
+			await writeFile(
+				resolve(input.out),
+				renderToolManifestSource(
+					buildToolManifest(definitions as DefinedTool[])
+				)
+			)
+			return `Wrote ${definitions.length} tools to ${input.out}.`
+		}
+	})
+})
 
-if (!modulePath || !outPath) {
-	console.error('Usage: better-mastra-tool-manifest <module> <out> [export]')
-	process.exit(1)
-}
-
-const loaded = (await import(
-	pathToFileURL(resolve(modulePath)).href
-)) as Record<string, unknown>
-const definitions = loaded[exportName]
-
-if (!Array.isArray(definitions)) {
-	console.error(`${modulePath} has no array export named ${exportName}.`)
-	process.exit(1)
-}
-
-await writeFile(
-	resolve(outPath),
-	renderToolManifestSource(buildToolManifest(definitions as DefinedTool[]))
-)
-console.log(`Wrote ${definitions.length} tools to ${outPath}.`)
+process.exitCode = await cli.run()

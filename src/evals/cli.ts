@@ -1,12 +1,7 @@
 #!/usr/bin/env node
 // better-mastra-evals: real turns through the app's production turn, scored
 // by hard checks and a judge, against the app's `evals.config.ts`.
-//
-//   better-mastra-evals run [--suite smoke] [--case <id-prefix>]... [--tag <tag>]
-//                       [--repeats 3] [--concurrency 3] [--model <id>]...
-//                       [--no-judge] [--compare <baseline.json>] [--verbose]
-//   better-mastra-evals inspect <report.json> [--case <id-prefix>]...
-//   better-mastra-evals compare <baseline.json> <candidate.json>
+// `better-mastra-evals --help` lists the commands; `run` is the default.
 //
 // Several --model values run the suite on each and print a model comparison.
 // Run it with Bun (`bunx --bun better-mastra-evals`) or Node 22.18+ so the
@@ -15,7 +10,8 @@
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { parseArgs } from 'node:util'
+import { defineCli, defineCommand } from 'hanzio/cli'
+import { z } from 'zod'
 import type { EvalCase } from './case.js'
 import { type EvalConfig, runEvalSuite, selectCases } from './config.js'
 import {
@@ -25,25 +21,25 @@ import {
 	formatReport
 } from './report.js'
 
-const { positionals, values } = parseArgs({
-	args: process.argv.slice(2),
-	allowPositionals: true,
-	options: {
-		config: { type: 'string', default: 'evals.config.ts' },
-		suite: { type: 'string', default: 'smoke' },
-		case: { type: 'string', multiple: true },
-		tag: { type: 'string' },
-		repeats: { type: 'string', default: '3' },
-		concurrency: { type: 'string', default: '3' },
-		model: { type: 'string', multiple: true },
-		'no-judge': { type: 'boolean', default: false },
-		compare: { type: 'string' },
-		verbose: { type: 'boolean', default: false }
-	}
+const runInput = z.object({
+	config: z.string().default('evals.config.ts').describe('Eval config module'),
+	suite: z.string().default('smoke').describe('Suite to run'),
+	case: z.array(z.string()).describe('Only cases whose id starts with this'),
+	tag: z.string().optional().describe('Only cases with this tag'),
+	repeats: z.number().default(3).describe('Runs per case'),
+	concurrency: z.number().default(3).describe('Cases in flight'),
+	model: z
+		.array(z.string())
+		.describe('Model to run on; several print a comparison'),
+	judge: z.boolean().default(true).describe('Score runs with the config judge'),
+	compare: z.string().optional().describe('Baseline report to compare with'),
+	verbose: z.boolean().describe('Keep app console logs')
 })
 
-async function loadConfig(): Promise<EvalConfig> {
-	const file = resolve(values.config)
+type RunInput = z.output<typeof runInput>
+
+async function loadConfig(path: string): Promise<EvalConfig> {
+	const file = resolve(path)
 	const module = await import(pathToFileURL(file).href)
 	if (!module.default) throw new Error(`${file} has no default export`)
 	return module.default
@@ -67,46 +63,46 @@ async function save(config: EvalConfig, report: EvalReport) {
 }
 
 /** Apps log to the console; while cases run that buries the progress lines. */
-function silenceLogs() {
-	if (values.verbose) return () => {}
+function silenceLogs(verbose: boolean) {
+	if (verbose) return () => {}
 	const { log, info, debug } = console
 	console.log = console.info = console.debug = () => {}
 	return () => Object.assign(console, { log, info, debug })
 }
 
-async function run() {
-	const config = await loadConfig()
+async function run(values: RunInput) {
+	const config = await loadConfig(values.config)
 	try {
-		await runWith(config)
+		return await runWith(config, values)
 	} finally {
 		await config.teardown?.()
 	}
 }
 
-async function runWith(config: EvalConfig) {
+async function runWith(config: EvalConfig, values: RunInput) {
 	await config.setup?.()
 	const all =
 		typeof config.cases === 'function' ? await config.cases() : config.cases
-	const prefixes = values.case ?? []
+	const prefixes = values.case
 	const cases: readonly EvalCase<unknown>[] = selectCases(all, {
 		suite: values.suite,
 		prefixes,
 		...(values.tag ? { tag: values.tag } : {})
 	})
-	const models = values.model?.length ? values.model : [config.defaultModel]
+	const models = values.model.length ? values.model : [config.defaultModel]
 	const reports: EvalReport[] = []
 	for (const modelId of models) {
 		console.error(
-			`Running ${cases.length} cases x${values.repeats} on ${modelId}${config.judge && !values['no-judge'] ? ', judged' : ''}`
+			`Running ${cases.length} cases x${values.repeats} on ${modelId}${config.judge && values.judge ? ', judged' : ''}`
 		)
-		const restore = silenceLogs()
+		const restore = silenceLogs(values.verbose)
 		const report = await runEvalSuite(config, {
 			cases,
 			suite: prefixes.length ? 'selected' : values.suite,
 			modelId,
-			repeats: Number(values.repeats),
-			concurrency: Number(values.concurrency),
-			judge: !values['no-judge'],
+			repeats: values.repeats,
+			concurrency: values.concurrency,
+			judge: values.judge,
 			onRun: (testCase, result) =>
 				console.error(`${result.pass ? 'pass' : 'FAIL'} ${testCase.id}`)
 		}).finally(restore)
@@ -125,7 +121,7 @@ async function runWith(config: EvalConfig) {
 	const failed = reports.some((report) =>
 		report.results.some((result) => result.runs.some((r) => !r.pass))
 	)
-	if (failed) process.exitCode = 1
+	return failed ? 1 : 0
 }
 
 function inspect(report: EvalReport, prefixes: readonly string[]) {
@@ -161,29 +157,57 @@ function inspect(report: EvalReport, prefixes: readonly string[]) {
 	}
 }
 
-const command = positionals[0] ?? 'run'
-switch (command) {
-	case 'run':
-		await run()
-		break
-	case 'inspect': {
-		const file = positionals[1]
-		if (!file) throw new Error('inspect needs a report file')
-		inspect(await readReport(file), values.case ?? [])
-		break
+const cli = defineCli({
+	name: 'better-mastra-evals',
+	description:
+		"Real turns through the app's production turn, scored by checks and a judge",
+	commands: {
+		run: defineCommand({
+			description: 'Run a suite and save its report',
+			input: runInput,
+			run: async (input, ctx) => {
+				ctx.exitCode = await run(input)
+			}
+		}),
+		inspect: defineCommand({
+			description: "Print a report's failed checks and transcripts",
+			input: z.object({
+				report: z.string().meta({ positional: true }).describe('Report file'),
+				case: z
+					.array(z.string())
+					.describe('Only cases whose id starts with this')
+			}),
+			run: async (input) => inspect(await readReport(input.report), input.case)
+		}),
+		compare: defineCommand({
+			description: 'Compare a candidate report with a baseline',
+			input: z.object({
+				baseline: z
+					.string()
+					.meta({ positional: true })
+					.describe('Baseline report file'),
+				candidate: z
+					.string()
+					.meta({ positional: true })
+					.describe('Candidate report file')
+			}),
+			run: async (input) =>
+				compareReports(
+					await readReport(input.baseline),
+					await readReport(input.candidate)
+				)
+		})
 	}
-	case 'compare': {
-		const [, baseline, candidate] = positionals
-		if (!baseline || !candidate)
-			throw new Error('compare needs two report files')
-		console.log(
-			compareReports(await readReport(baseline), await readReport(candidate))
-		)
-		break
-	}
-	default:
-		throw new Error(`Unknown command ${command}: run, inspect or compare`)
-}
+})
+
+// `run` is the default command: no command, or options first, runs it.
+const argv = process.argv.slice(2)
+const [first] = argv
+if (
+	first === undefined ||
+	(first.startsWith('-') && first !== '-h' && first !== '--help')
+)
+	argv.unshift('run')
 
 // App pools (database, Redis) keep the event loop alive after the last run.
-process.exit()
+process.exit(await cli.run(argv))
