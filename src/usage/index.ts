@@ -19,3 +19,10 @@ export {
 	type RunUsage,
 	type StreamTextUsage
 } from './stream.js'
+export {
+	admitUserRequest,
+	type RunRedisScript,
+	USER_REQUEST_ADMISSION_SCRIPT,
+	type UserRequestAdmission,
+	type UserRequestWindow
+} from './userRequests.js'

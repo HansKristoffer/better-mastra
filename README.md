@@ -79,3 +79,24 @@ Redis ops for a ~1,500-chunk turn:
 | This, cross-replica reconnect | +1 PUBLISH, +1 XADD and EXPIRE per 50 ms batch, reader XREADs |
 
 Failure behaviour: a buffer over `maxBufferBytes` (2 MB) keeps streaming but new reconnects get 204. If the owner crashes, its locator expires and the cross-replica reader ends with an `error` chunk after `idleTimeoutMs`; the client reloads the thread from Mastra memory. If Redis is down, turns still run and same-replica reconnects work; cross-replica reconnects return 204. Finished turns stay resumable for `graceMs` (30 s).
+
+## Per-user request limits (`better-mastra/usage`)
+
+`admitUserRequest` charges one request against every window of a user's operation at once, or refuses it with the seconds until the fullest window has room. The keys hold an HMAC of the user id, never the id itself. Pass any Redis client's `EVAL`:
+
+```ts
+import { admitUserRequest } from 'better-mastra/usage'
+
+const admission = await admitUserRequest({
+	runScript: (script, keys, args) => redis.send('EVAL', [script, String(keys.length), ...keys, ...args.map(String)]),
+	secret: process.env.AUTH_SECRET,
+	keyPrefix: 'app:ai-usage',
+	operation: 'receipt',
+	userId,
+	windows: [
+		{ name: 'minute', seconds: 60, limit: 5 },
+		{ name: 'day', seconds: 86_400, limit: 50 }
+	]
+})
+// { kind: 'admitted' } | { kind: 'limited', retryAfterSeconds } | { kind: 'unavailable', error }
+```

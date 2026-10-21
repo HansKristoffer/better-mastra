@@ -88,11 +88,15 @@ export function withHiddenInputs(
 			validate: (value) => {
 				const input = withoutKeys(value, hiddenInputs)
 				const finish = (result: ValidationResult): ValidationResult => {
+					const own = (result.issues ?? []).filter(
+						(issue) => !isHiddenInputIssue(issue, hiddenInputs)
+					)
+					// A schema from `toolInputSchema` with the same cap already reported the list.
 					const issues = [
-						...(result.issues ?? []).filter(
-							(issue) => !isHiddenInputIssue(issue, hiddenInputs)
-						),
-						...findOverlongLists(input, options.maxArrayItems, [])
+						...own,
+						...findOverlongLists(input, options.maxArrayItems, []).filter(
+							(issue) => !own.some((reported) => isSameIssue(reported, issue))
+						)
 					]
 
 					if (issues.length > 0) return { issues }
@@ -315,4 +319,14 @@ function isPlainObject(
 	value: unknown
 ): value is Readonly<Record<string, unknown>> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isSameIssue(
+	left: { readonly message: string; readonly path?: unknown },
+	right: { readonly message: string; readonly path?: unknown }
+): boolean {
+	return (
+		left.message === right.message &&
+		JSON.stringify(left.path ?? []) === JSON.stringify(right.path ?? [])
+	)
 }

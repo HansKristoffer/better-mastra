@@ -38,7 +38,8 @@ export {
 	REPLY_SUGGESTIONS_PART,
 	replySuggestionsSchema,
 	sendReplySuggestions,
-	toReplySuggestions
+	toReplySuggestions,
+	toReplySuggestionsMessage
 } from './replySuggestions.js'
 export {
 	type DefinedRequestContext,
@@ -54,7 +55,6 @@ export {
 	type ChatTurnResult,
 	type ChatTurnSinks,
 	type ChatTurnStage,
-	clientToolErrorsAsResults,
 	type PreparedChatTurn,
 	refused,
 	runChatTurn,
@@ -78,6 +78,7 @@ export {
 	type DeleteThreadResult,
 	deleteThreadEverywhere,
 	sweepAbandonedRuns,
+	type AbandonedRun,
 	sweepOldThreads,
 	type ThreadHandlersOptions,
 	type ThreadPage,

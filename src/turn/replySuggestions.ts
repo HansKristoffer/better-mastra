@@ -37,12 +37,14 @@ export const replySuggestionsSchema = z.object({
  */
 export function createReplySuggestionsAgent(input: {
 	readonly id: string
+	/** The agent's name in Studio and traces. Default the id. */
+	readonly name?: string
 	readonly instructions: string
 	readonly model: () => LanguageModel
 }): Agent {
 	return new Agent({
 		id: input.id,
-		name: input.id,
+		name: input.name ?? input.id,
 		instructions: input.instructions,
 		model: () => asAgentModel(input.model()),
 		maxRetries: 0
