@@ -51,9 +51,11 @@ import {
 	isUserFacingPart,
 	REPLY_SUGGESTIONS_PART,
 	readReplySuggestions,
+	readUserMessage,
 	STRANDED_TOOL_ERROR,
 	selectRequestMessages,
-	type ToolPart
+	type ToolPart,
+	USER_MESSAGE_PART
 } from './messages.js'
 import { type PendingChange, readWaitingChanges } from './pending.js'
 import {
@@ -167,6 +169,11 @@ export interface ChatSession<TResumeData = unknown> {
 	) => boolean
 	readonly stop: () => void
 	readonly tryAgain: () => void
+	/**
+	 * Writes the newest answer again from the user's message, when no user
+	 * turn runs or waits; the server replaces the stored answer.
+	 */
+	readonly regenerate: () => void
 	/** Answers an approval the user turn waits for; any other approval is left alone. */
 	readonly answerApproval: (answer: ApprovalAnswer) => void
 	/** Resumes a suspended run the user turn waits for, once. */
@@ -251,6 +258,8 @@ export function createChatSession<TResumeData = unknown>(
 	let offersReplies = true
 	/** The resume the request in flight sends, read by the transport. */
 	let pendingResume: RunResume | undefined
+	/** The messages on screen when the request started; the answer it streams is not among them. */
+	let shownBeforeRequest = new Set<string>()
 	let requestError: Error | undefined
 	let requestEnd: RequestEnd | undefined
 
@@ -298,6 +307,11 @@ export function createChatSession<TResumeData = unknown>(
 		},
 		onData: (part) => {
 			options.onData?.(part)
+
+			if (part.type === USER_MESSAGE_PART) {
+				showQuestion(readUserMessage(part.data))
+				return
+			}
 
 			if (part.type !== REPLY_SUGGESTIONS_PART || !offersReplies) {
 				return
@@ -408,6 +422,29 @@ export function createChatSession<TResumeData = unknown>(
 		}
 
 		effect satisfies never
+	}
+
+	/**
+	 * A reattached answer's question, when the page on screen was read before
+	 * the thread stored it: it goes before the answer the stream started.
+	 */
+	function showQuestion(message: UIMessage | undefined): void {
+		if (
+			message === undefined ||
+			chat.messages.some((shown) => shown.id === message.id)
+		) {
+			return
+		}
+
+		const messages = [...chat.messages]
+		const last = messages.at(-1)
+		const answerIndex =
+			last?.role === 'assistant' && !shownBeforeRequest.has(last.id)
+				? messages.length - 1
+				: messages.length
+
+		messages.splice(answerIndex, 0, message)
+		chat.messages = messages
 	}
 
 	function restoreDraft(text: string): void {
@@ -528,6 +565,7 @@ export function createChatSession<TResumeData = unknown>(
 	}
 
 	function resetRequest(): void {
+		shownBeforeRequest = new Set(chat.messages.map((message) => message.id))
 		takeReplySuggestions()
 		offersReplies = true
 		pendingResume = undefined
@@ -787,6 +825,20 @@ export function createChatSession<TResumeData = unknown>(
 		tryAgain: () => {
 			startsOver = true
 			dispatch({ kind: 'try-again-pressed' })
+			startsOver = false
+		},
+		regenerate: () => {
+			const { messages } = chat
+			const hasAnswer =
+				messages.at(-1)?.role === 'assistant' &&
+				messages.some((message) => message.role === 'user')
+
+			if (!hasAnswer) {
+				return
+			}
+
+			startsOver = true
+			dispatch({ kind: 'regenerate-pressed' })
 			startsOver = false
 		},
 		answerApproval: ({ approvalId, approved, reason }) => {

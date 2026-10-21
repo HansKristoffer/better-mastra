@@ -12,7 +12,7 @@ import {
 
 const KEY = {
 	apiKey: 'temporary-key',
-	expiresAt: '2026-10-19T10:01:00Z',
+	expiresAt: '2099-01-01T00:00:00Z',
 	websocketUrl: 'wss://stt-rt.eu.soniox.com/transcribe-websocket',
 	model: 'stt-rt-v5'
 }
@@ -24,14 +24,48 @@ afterEach(() => {
 })
 
 describe('startDictation', () => {
-	test('should end without asking for a key when the microphone is not allowed', async () => {
+	test('should ask for the key while the permission prompt is open, and connect nothing when the microphone is not allowed', async () => {
 		const fake = createFakes({ permission: false })
 
 		const start = await startDictation(fake.options)
 
 		expect(start).toEqual({ kind: 'permission_denied' })
-		expect(fake.options.requestKey).not.toHaveBeenCalled()
+		expect(fake.options.requestKey).toHaveBeenCalledTimes(1)
 		expect(fake.socketFactory.open).not.toHaveBeenCalled()
+	})
+
+	test('should say there is no microphone when the device has none', async () => {
+		const fake = createFakes()
+		fake.microphone.requestPermission.mockImplementation(async () => {
+			throw Object.assign(new Error('Requested device not found'), {
+				name: 'NotFoundError'
+			})
+		})
+
+		expect(await startDictation(fake.options)).toEqual({
+			kind: 'no_microphone'
+		})
+		expect(fake.socketFactory.open).not.toHaveBeenCalled()
+	})
+
+	test('should ask for a new key when the permission prompt outlasted the first one', async () => {
+		const fake = createFakes()
+		const fresh = { ...KEY, apiKey: 'fresh-key' }
+		fake.options.requestKey
+			.mockImplementationOnce(async () => ({
+				...KEY,
+				expiresAt: '2000-01-01T00:00:00Z'
+			}))
+			.mockImplementationOnce(async () => fresh)
+
+		await startedSession(fake)
+
+		expect(fake.options.requestKey).toHaveBeenCalledTimes(2)
+		expect(fake.socketFactory.open).toHaveBeenCalledWith(
+			fresh.websocketUrl,
+			{ Authorization: 'Bearer fresh-key' },
+			expect.anything()
+		)
 	})
 
 	test('should report dictation as unavailable and release the microphone when the API gives no key', async () => {

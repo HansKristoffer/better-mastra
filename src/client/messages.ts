@@ -52,6 +52,12 @@ export const REPLY_SUGGESTIONS_PART = 'data-reply-suggestions'
 
 export const REPLY_SUGGESTIONS_MAX = 3
 
+/** The transient data part a turn streams right after its start: the user's message, for a client that reattaches before the thread stores it. */
+export const USER_MESSAGE_PART = 'data-user-message'
+
+/** The tripwire part a run that a processor stopped ends with; its `reason` says why. */
+const TRIPWIRE_PART = 'data-tripwire'
+
 /** The longest reply offered, in characters; a longer one is dropped. */
 export const REPLY_SUGGESTION_MAX_LENGTH = 80
 
@@ -335,6 +341,41 @@ export function countShownParts(
  * too long or repeated ones, at most three; undefined when the data is not a
  * reply list.
  */
+/** The user message a `data-user-message` part carries, or undefined for any other data. */
+export function readUserMessage(data: unknown): UIMessage | undefined {
+	const message = (data as { message?: unknown } | null)?.message as
+		| Partial<UIMessage>
+		| undefined
+
+	return typeof message?.id === 'string' &&
+		message.role === 'user' &&
+		Array.isArray(message.parts)
+		? (message as UIMessage)
+		: undefined
+}
+
+/**
+ * Why the server stopped the answer early, such as `tool_call_budget`
+ * (`TOOL_CALL_BUDGET_STOP_REASON`): the `reason` of its tripwire part.
+ * Undefined for an answer that ended on its own.
+ */
+export function readStopReason(
+	message: UIMessage | undefined
+): string | undefined {
+	if (message?.role !== 'assistant') return undefined
+
+	for (const part of message.parts) {
+		const reason =
+			part.type === TRIPWIRE_PART
+				? (part as { data?: { reason?: unknown } }).data?.reason
+				: undefined
+
+		if (typeof reason === 'string') return reason
+	}
+
+	return undefined
+}
+
 export function readReplySuggestions(
 	data: unknown
 ): readonly string[] | undefined {

@@ -8,6 +8,7 @@ import {
 	isUserFacingPart,
 	mergeThreadMessages,
 	readReplySuggestions,
+	readStopReason,
 	selectRequestMessages,
 	toMessageBlocks
 } from './messages'
@@ -240,6 +241,28 @@ describe('readReplySuggestions', () => {
 			})
 		).toEqual(['Ja', 'Nej', 'Måske'])
 		expect(readReplySuggestions({ other: true })).toBeUndefined()
+	})
+})
+
+describe('readStopReason', () => {
+	test('reads why the server stopped an answer early, and nothing for one that ended on its own', () => {
+		const stopped: UIMessage = {
+			id: 'a1',
+			role: 'assistant',
+			parts: [
+				{ type: 'text', text: 'Jeg kigger…' },
+				{
+					type: 'data-tripwire',
+					data: { reason: 'tool_call_budget' }
+				} as UIMessage['parts'][number]
+			]
+		}
+
+		expect(readStopReason(stopped)).toBe('tool_call_budget')
+		expect(
+			readStopReason({ ...stopped, parts: stopped.parts.slice(0, 1) })
+		).toBeUndefined()
+		expect(readStopReason({ ...stopped, role: 'user' })).toBeUndefined()
 	})
 })
 

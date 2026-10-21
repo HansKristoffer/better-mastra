@@ -115,6 +115,8 @@ export type ChatTurnEvent =
 	| { readonly kind: 'follow-up-ready' }
 	| { readonly kind: 'stop-pressed' }
 	| { readonly kind: 'try-again-pressed' }
+	/** The user asked for the newest answer written again. */
+	| { readonly kind: 'regenerate-pressed' }
 	/**
 	 * Changes wait for the user: the request ended answered with them in its
 	 * last assistant message, or a thread loaded from history shows them.
@@ -238,6 +240,8 @@ function reduceIdle(
 			return refuseUnaskedRequest(state)
 		case 'stream-watched':
 			return watchStream('idle')
+		case 'regenerate-pressed':
+			return regenerate()
 		case 'content-shown':
 		case 'request-finished':
 		case 'error-response':
@@ -292,6 +296,7 @@ function reduceRequesting(
 			return abortRequest(userTurn)
 		case 'follow-up-ready':
 		case 'try-again-pressed':
+		case 'regenerate-pressed':
 		case 'approval-sent':
 		case 'resume-pressed':
 		case 'stream-watched':
@@ -329,6 +334,7 @@ function reduceStreaming(
 		case 'content-shown':
 		case 'follow-up-ready':
 		case 'try-again-pressed':
+		case 'regenerate-pressed':
 		case 'approval-sent':
 		case 'resume-pressed':
 		case 'stream-watched':
@@ -357,6 +363,7 @@ function reduceContinuing(
 		case 'error-response':
 		case 'connection-lost':
 		case 'try-again-pressed':
+		case 'regenerate-pressed':
 		case 'changes-waiting':
 		case 'approval-sent':
 		case 'resume-pressed':
@@ -384,6 +391,7 @@ function reduceStopping(
 		case 'follow-up-ready':
 		case 'stop-pressed':
 		case 'try-again-pressed':
+		case 'regenerate-pressed':
 		case 'approval-sent':
 		case 'resume-pressed':
 		case 'stream-watched':
@@ -415,6 +423,7 @@ function reduceWaiting(
 		case 'follow-up-ready':
 		case 'stop-pressed':
 		case 'try-again-pressed':
+		case 'regenerate-pressed':
 		case 'changes-waiting':
 		case 'stream-watched':
 		case 'nothing-to-resume':
@@ -433,6 +442,8 @@ function reduceFailed(
 			return canTryAgain(state.failure)
 				? tryAgain(state.resume)
 				: unchanged(state)
+		case 'regenerate-pressed':
+			return regenerate()
 		case 'changes-waiting':
 			return waitForUser(newUserTurn(), event.changes)
 		case 'approval-sent':
@@ -472,6 +483,14 @@ function startUserTurn(
 						files: message.files
 					}
 		]
+	}
+}
+
+/** A new user turn that writes the newest answer again from the user's message. */
+function regenerate(): ChatTurnTransition {
+	return {
+		state: { kind: 'requesting', userTurn: newUserTurn() },
+		effects: [{ kind: 'request' }]
 	}
 }
 

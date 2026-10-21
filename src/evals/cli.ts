@@ -33,6 +33,10 @@ const runInput = z.object({
 		.describe('Model to run on; several print a comparison'),
 	judge: z.boolean().default(true).describe('Score runs with the config judge'),
 	compare: z.string().optional().describe('Baseline report to compare with'),
+	output: z
+		.string()
+		.optional()
+		.describe('Report file to write; several models add -<model>'),
 	verbose: z.boolean().describe('Keep app console logs')
 })
 
@@ -49,7 +53,23 @@ async function readReport(file: string): Promise<EvalReport> {
 	return JSON.parse(await readFile(file, 'utf8'))
 }
 
-async function save(config: EvalConfig, report: EvalReport) {
+/** `--output` for one model, with the model before the extension when several run. */
+function outputFile(output: string, modelId: string, models: number) {
+	if (models === 1) return resolve(output)
+	const model = modelId.replaceAll('/', '_')
+	const dot = output.lastIndexOf('.')
+	return resolve(
+		dot > output.lastIndexOf('/')
+			? `${output.slice(0, dot)}-${model}${output.slice(dot)}`
+			: `${output}-${model}`
+	)
+}
+
+async function save(config: EvalConfig, report: EvalReport, output?: string) {
+	if (output) {
+		await writeFile(output, `${JSON.stringify(report, null, '\t')}\n`)
+		return output
+	}
 	const dir = resolve(config.outputDir ?? '.evals')
 	await mkdir(dir, { recursive: true })
 	const ignore = resolve(dir, '.gitignore')
@@ -107,7 +127,9 @@ async function runWith(config: EvalConfig, values: RunInput) {
 				console.error(`${result.pass ? 'pass' : 'FAIL'} ${testCase.id}`)
 		}).finally(restore)
 		console.log(formatReport(report))
-		console.log(`\n${await save(config, report)}\n`)
+		const output =
+			values.output && outputFile(values.output, modelId, models.length)
+		console.log(`\n${await save(config, report, output)}\n`)
 		reports.push(report)
 	}
 	if (reports.length > 1) console.log(formatModelComparison(reports))

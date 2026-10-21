@@ -12,10 +12,10 @@ export type EvalCheck = {
 	detail?: string
 }
 
-/** Common words per language, plus letters only that language uses. */
+/** Common words per language, plus letters only that language uses, and its name for check names. */
 export type LanguageWords = Record<
 	string,
-	{ words: readonly string[]; letters?: RegExp }
+	{ words: readonly string[]; letters?: RegExp; label?: string }
 >
 
 export const DEFAULT_LANGUAGE_WORDS: LanguageWords = {
@@ -206,7 +206,7 @@ export function answerRuleChecks(
 			options.languages
 		)
 		checks.push({
-			check: `replies in ${input.language}`,
+			check: `replies in ${options.languages?.[input.language]?.label ?? input.language}`,
 			pass: language === 'unknown' || language === input.language,
 			detail: language
 		})

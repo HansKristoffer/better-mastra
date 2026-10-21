@@ -15,13 +15,15 @@ import {
 	type EvalTrace,
 	type EvalTurn
 } from './case.js'
+import { DRY_RUN_KEY, dryRunResult } from '../tools/dryRun.js'
 
 /**
  * Request-context key an eval run sets: write tools wrapped in
- * `withEvalDryRun` record the call and return a marker instead of writing, so
- * a case can run again and again against the same seeded data. No route sets it.
+ * `withEvalDryRun`, and tools of `better-mastra/tools` (`isDryRun`), record
+ * the call and return a marker instead of writing, so a case can run again
+ * and again against the same seeded data. No route sets it.
  */
-export const EVAL_DRY_RUN_KEY = 'betterMastraEvalDryRun'
+export const EVAL_DRY_RUN_KEY = DRY_RUN_KEY
 
 export function isEvalDryRun(
 	requestContext: { get(key: string): unknown } | undefined,
@@ -41,11 +43,7 @@ export function withEvalDryRun<T extends Pick<Tool, 'id' | 'execute'>>(
 		...tool,
 		execute: ((input, context) =>
 			isEvalDryRun(context?.requestContext, key)
-				? Promise.resolve({
-						dryRun: true,
-						tool: tool.id,
-						note: 'Evaluation run: the change was recorded, not applied. Answer as if it succeeded.'
-					})
+				? Promise.resolve(dryRunResult(tool.id))
 				: execute(input, context)) as typeof execute
 	}
 }
@@ -57,6 +55,8 @@ export type EvalUsage = {
 	cacheReadTokens?: number
 	cacheWriteTokens?: number
 	modelId?: string
+	/** The request's steps, for a route that prices a call from them (OpenRouter reports cost per step). */
+	steps?: readonly unknown[]
 }
 
 export type EvalTurnInput<C> = {

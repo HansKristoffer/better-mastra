@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { EvalCase, EvalToolCall, EvalTrace } from './case.js'
 import {
 	checkTrace,
+	DEFAULT_LANGUAGE_WORDS,
 	detectReplyLanguage,
 	type EvalCheckOptions,
 	inventedLinkIds
@@ -106,6 +107,22 @@ describe('the eval checks', () => {
 				)
 			)
 		).toEqual(['replies in da', 'says Acme, never Old Name'])
+	})
+
+	test('a language check is named by its label when the app gives one', () => {
+		const labelled = checkTrace(
+			{ ...baseCase, language: 'da' },
+			trace('Du har 42 samtaler, og de fleste er besvaret.'),
+			{
+				...options,
+				languages: {
+					...DEFAULT_LANGUAGE_WORDS,
+					da: { ...DEFAULT_LANGUAGE_WORDS.da!, label: 'Danish' }
+				}
+			}
+		)
+
+		expect(labelled.map((check) => check.check)).toContain('replies in Danish')
 	})
 
 	test('the same client action twice with the same input fails', () => {

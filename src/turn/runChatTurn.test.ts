@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { UIMessage } from 'ai'
 
 import { REPLY_SUGGESTIONS_PART } from './replySuggestions.js'
-import { TURN_ERROR_SENTENCE } from './stream.js'
+import { TURN_ERROR_SENTENCE, USER_MESSAGE_PART } from './stream.js'
 import {
 	ASK_TOOL,
 	createHarness,
@@ -412,6 +412,76 @@ describe('runChatTurn', () => {
 		// Then the turn closes as stopped and gives the lock back
 		expect(harness.finished[0]?.outcome).toBe('stopped')
 		expect(harness.held.size).toBe(0)
+	})
+
+	test("should hand prepare the cleaned messages and stream the user's message right after the start", async () => {
+		// Given a turn that records what prepare receives
+		const harness = createHarness()
+		const prepare = harness.deps.prepare
+		const prepared: (readonly UIMessage[])[] = []
+		harness.deps.prepare = (input) => {
+			prepared.push(input.messages)
+			return prepare(input)
+		}
+		const question: UIMessage = {
+			id: 'question-1',
+			role: 'user',
+			parts: [
+				{ type: 'text', text: 'Mad?' },
+				{ type: 'data-om-status', data: {} } as UIMessage['parts'][number]
+			]
+		}
+
+		// When the user asks, with observational memory's part sent back
+		const { chunks } = await readTurn(
+			await harness.run({ messages: [question] })
+		)
+
+		// Then prepare got the message without it, and the client got the question after the start
+		expect(prepared[0]?.[0]?.parts).toEqual([
+			expect.objectContaining({ type: 'text', text: 'Mad?' })
+		])
+		expect(chunks[0]?.type).toBe('start')
+		expect(chunks[1]).toMatchObject({
+			type: USER_MESSAGE_PART,
+			data: {
+				message: {
+					id: 'question-1',
+					role: 'user',
+					parts: [expect.objectContaining({ type: 'text', text: 'Mad?' })]
+				}
+			},
+			transient: true
+		})
+	})
+
+	test('should replace the stored answer when the client asks for it written again', async () => {
+		// Given a thread with one answer
+		const harness = createHarness({
+			replies: [textReply('Første svar.'), textReply('Andet svar.')]
+		})
+		const question = userMessage('Mad?')
+		await readTurn(await harness.run({ messages: [question] }))
+
+		// When the client regenerates it, sending only the question
+		await readTurn(
+			await harness.run({ messages: [question], trigger: 'regenerate-message' })
+		)
+
+		// Then the model never read the first answer, and the thread keeps only the second
+		expect(
+			JSON.stringify(harness.model.doStreamCalls[1]?.prompt)
+		).not.toContain('Første svar.')
+		const { messages } = await harness.memory.recall({
+			...harness.threadKey,
+			perPage: false
+		})
+		const texts = messages.map((message) =>
+			message.content.parts.flatMap((part) =>
+				part.type === 'text' ? [part.text] : []
+			)
+		)
+		expect(texts).toEqual([['Mad?'], ['Andet svar.']])
 	})
 })
 

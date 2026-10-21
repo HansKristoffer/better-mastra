@@ -24,8 +24,11 @@ import {
 /** Where the dictation is: asking for the microphone and a key, listening, or waiting for the last words. */
 export type DictationPhase = 'idle' | 'starting' | 'listening' | 'finishing'
 
-/** Why the last dictation gave no text: the microphone was refused, or dictation failed. */
-export type DictationNotice = 'permission_denied' | 'unavailable'
+/** Why the last dictation gave no text: the microphone was refused or is missing, or dictation failed. */
+export type DictationNotice =
+	| 'permission_denied'
+	| 'no_microphone'
+	| 'unavailable'
 
 export interface UseDictationOptions
 	extends Omit<DictationOptions, 'signal' | 'onEnd' | 'locale' | 'microphone'> {
@@ -35,6 +38,8 @@ export interface UseDictationOptions
 	/** The text, when a dictation that heard something stops or fails; never mid-way and never after `cancel`. */
 	readonly onDictated?: (text: string) => void
 	readonly onEnd?: (end: DictationEnd) => void
+	/** The notice, once, when a dictation gives no text for one of its reasons: show a toast here. */
+	readonly onNotice?: (notice: DictationNotice) => void
 }
 
 export function useDictation(options: UseDictationOptions) {
@@ -78,6 +83,8 @@ export function useDictation(options: UseDictationOptions) {
 				options.onEnd?.(end)
 				phase.value = 'idle'
 				notice.value = end.kind === 'failed' ? 'unavailable' : undefined
+
+				if (end.kind === 'failed') options.onNotice?.('unavailable')
 			}
 		})
 		starting = undefined
@@ -91,7 +98,13 @@ export function useDictation(options: UseDictationOptions) {
 		}
 
 		phase.value = 'idle'
-		notice.value = started.kind === 'cancelled' ? undefined : started.kind
+
+		if (started.kind === 'cancelled') {
+			notice.value = undefined
+		} else {
+			notice.value = started.kind
+			options.onNotice?.(started.kind)
+		}
 	}
 
 	function stop() {

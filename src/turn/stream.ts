@@ -18,6 +18,8 @@ export interface UserFacingStreamHandlers {
 	observe?(chunk: UIMessageChunk): void
 	/** Runs once, when Mastra's stream has ended and before the client sees it close. */
 	close?(ending: TurnStreamEnding): Promise<void>
+	/** Sent right after the answer's `start`, such as the user's message for a client that reattaches. */
+	afterStart?: UIMessageChunk
 	/** Runs after `close` while the client still reads, before the answer's finish; it must not throw. */
 	epilogue?(send: (chunk: UIMessageChunk) => void): Promise<void>
 	/** The only error text the client receives. */
@@ -33,6 +35,13 @@ type SourceRead =
 /** The default only error text a client receives; the real error stays in the server log. */
 export const TURN_ERROR_SENTENCE =
 	'The assistant could not answer right now. Please try again.'
+
+/**
+ * The transient part that carries the turn's user message, right after the
+ * answer's start. Mastra stores the message when the run ends, so a client
+ * that reattaches mid-answer reads the question from here.
+ */
+export const USER_MESSAGE_PART = 'data-user-message'
 
 /** Observational memory stores its own bookkeeping as `data-om-*` parts. */
 const OBSERVATIONAL_MEMORY_PART_PREFIX = 'data-om-'
@@ -89,6 +98,7 @@ async function pump(
 ): Promise<void> {
 	// The answer's finish waits for the epilogue, so its parts belong to the answer.
 	let finish: UIMessageChunk | undefined
+	let { afterStart } = handlers
 	const reader = source.getReader()
 	let next = await readNext(reader)
 
@@ -99,6 +109,11 @@ async function pump(
 			finish = next.chunk
 		} else if (isUserFacingPart(next.chunk)) {
 			send(next.chunk.type === 'error' ? errorChunk : next.chunk)
+
+			if (next.chunk.type === 'start' && afterStart) {
+				send(afterStart)
+				afterStart = undefined
+			}
 		}
 
 		next = await readNext(reader)

@@ -24,7 +24,6 @@ import type {
 	DatasetItemPayload,
 	DatasetItemToolMock
 } from '@mastra/core/storage'
-import { extractAgentResponseMessages } from '@mastra/evals/scorers/utils'
 import type { EvalCase, EvalToolCall, EvalTrace } from './case.js'
 import { checkTrace, type EvalCheckOptions } from './checks.js'
 
@@ -58,6 +57,25 @@ export type RunToolResult = {
  */
 function uniqueMessages(output: readonly MastraDBMessage[]) {
 	return [...new Map(output.map((message) => [message.id, message])).values()]
+}
+
+/**
+ * An answer's text as `@mastra/evals` reads it (`extractAgentResponseMessages`):
+ * the stored text, else its last text part. Read here so the evals entry
+ * loads without that optional peer.
+ */
+function answerText(message: MastraDBMessage): string {
+	const { content } = message
+
+	if (typeof content.content === 'string' && content.content !== '') {
+		return content.content
+	}
+
+	const texts = content.parts.flatMap((part) =>
+		part.type === 'text' ? [part.text] : []
+	)
+
+	return texts.at(-1) ?? ''
 }
 
 function textOf(value: unknown): string {
@@ -98,9 +116,10 @@ export function readRunOutput(output: readonly MastraDBMessage[]) {
 		)
 	)
 	return {
-		answers: extractAgentResponseMessages(messages).filter(
-			(answer) => answer.trim() !== ''
-		),
+		answers: messages
+			.filter((message) => message.role === 'assistant')
+			.map(answerText)
+			.filter((answer) => answer.trim() !== ''),
 		calledTools: calls.map((call) => call.toolName),
 		toolResults: calls.filter((call) => !call.isError)
 	}
