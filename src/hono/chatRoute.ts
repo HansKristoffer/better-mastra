@@ -12,7 +12,7 @@ import { type Context, type Env, Hono } from 'hono'
 import { chatErrorResponse } from '../turn/errors.js'
 import { SSE_HEARTBEAT_MS, toChatStreamResponse } from '../turn/response.js'
 import type { ChatTurnRequest, ChatTurnResult } from '../turn/runChatTurn.js'
-import type { ChatTurnBody } from '../turn/types.js'
+import type { ChatRefusal, ChatTurnBody } from '../turn/types.js'
 import type { ResumableStreams } from './types.js'
 
 export interface ChatRouteOptions<
@@ -34,7 +34,17 @@ export interface ChatRouteOptions<
 	/** Whether the thread is the caller's; required with `resumable`. */
 	ownsThread?(threadId: string, auth: TAuth): Promise<boolean>
 	readonly heartbeatMs?: number
+	/**
+	 * The refusals the route answers itself, in the app's codes: a caller
+	 * without `auth` (`unauthenticated`), a body `parseBody` rejects
+	 * (`invalid_request`), a thread that is not the caller's on reconnect or
+	 * stop (`not_found`). Each defaults to the built-in code.
+	 */
+	readonly refusals?: Partial<Record<RouteRefusal, ChatRefusal>>
 }
+
+/** The refusals `createChatRoute` answers without running a turn. */
+export type RouteRefusal = 'unauthenticated' | 'invalid_request' | 'not_found'
 
 /** The routes on a Hono app of their own; mount it with `app.route('/', createChatRoute(...))`. */
 export function createChatRoute<
@@ -45,6 +55,8 @@ export function createChatRoute<
 	const app = new Hono<E>()
 	const heartbeatMs = options.heartbeatMs ?? SSE_HEARTBEAT_MS
 	const { resumable } = options
+	const refuse = (refusal: RouteRefusal) =>
+		chatErrorResponse(options.refusals?.[refusal] ?? refusal)
 
 	if (resumable && !options.ownsThread) {
 		throw new Error('A resumable chat route needs ownsThread.')
@@ -53,12 +65,12 @@ export function createChatRoute<
 	app.post(options.path, async (c) => {
 		const auth = await options.auth(c)
 
-		if (!auth) return chatErrorResponse('unauthenticated')
+		if (!auth) return refuse('unauthenticated')
 
 		const json: unknown = await c.req.raw.json().catch(() => undefined)
 		const body = await options.parseBody(json, auth)
 
-		if (!body) return chatErrorResponse('invalid_request')
+		if (!body) return refuse('invalid_request')
 
 		keepConnectionOpen(c)
 
@@ -90,10 +102,10 @@ export function createChatRoute<
 		const auth = await options.auth(c)
 		const threadId = c.req.param('threadId')
 
-		if (!auth) return { refusal: chatErrorResponse('unauthenticated') }
+		if (!auth) return { refusal: refuse('unauthenticated') }
 
 		if (!threadId || !(await options.ownsThread!(threadId, auth))) {
-			return { refusal: chatErrorResponse('not_found') }
+			return { refusal: refuse('not_found') }
 		}
 
 		return { threadId }
