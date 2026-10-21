@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/HansKristoffer/better-mastra/compare/v0.1.1...v0.2.0) (2026-10-21)
+
+
+### Features
+
+* **client:** actions see their step, typed resume data ([#15](https://github.com/HansKristoffer/better-mastra/issues/15)) ([e4a694d](https://github.com/HansKristoffer/better-mastra/commit/e4a694da353136b642e4adccadff4e56e5e9197a))
+* **hono:** map the chat route's own refusals to app codes ([#17](https://github.com/HansKristoffer/better-mastra/issues/17)) ([25b9fa7](https://github.com/HansKristoffer/better-mastra/commit/25b9fa76ac8eb1e0a13b5e9a07d9dd49a6a3bbce))
+* isResumePoint option for joining resumed answers ([#14](https://github.com/HansKristoffer/better-mastra/issues/14)) ([791bcb1](https://github.com/HansKristoffer/better-mastra/commit/791bcb1c8e9a413053544da4531fc4536669961d))
+* **react:** safeLinks 'web' for StreamingMarkdown ([#16](https://github.com/HansKristoffer/better-mastra/issues/16)) ([f689207](https://github.com/HansKristoffer/better-mastra/commit/f689207f0b7126f4f65fadbb01752ad1981a9cfc))
+* **resumable:** Upstash adapter and app-owned locator ([#12](https://github.com/HansKristoffer/better-mastra/issues/12)) ([e020f3a](https://github.com/HansKristoffer/better-mastra/commit/e020f3a518435749c7760c793639ee7ed8afcd19))
+* **runtime:** synchronous storage presets and OpenRouter builder ([#13](https://github.com/HansKristoffer/better-mastra/issues/13)) ([563910d](https://github.com/HansKristoffer/better-mastra/commit/563910dd86f73b9aa34f381762cb9f7f4ada5028))
+
 ## [0.1.1](https://github.com/HansKristoffer/better-mastra/compare/v0.1.0...v0.1.1) (2026-10-21)
 
 
