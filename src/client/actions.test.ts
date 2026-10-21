@@ -144,6 +144,103 @@ describe('runClientAction', () => {
 			errorText: CLIENT_ACTION_REPEATED
 		})
 	})
+
+	test('hands a repeat to onRepeat, whose result is posted as the output', async () => {
+		const handler = mock(async (input: { value: string }) => input)
+		const addToolOutput = mock(async (_output: unknown) => undefined)
+		const done = {
+			type: 'dynamic-tool' as const,
+			toolName: 'applyFilters',
+			toolCallId: 'call-1',
+			state: 'output-available' as const,
+			input: { value: 'x' },
+			output: {}
+		}
+		const action = defineClientAction({
+			name: 'applyFilters',
+			description: 'Apply filters',
+			inputSchema: z.object({ value: z.string() }),
+			handler,
+			onRepeat: async (_input, { toolCallId }) => ({
+				status: 'refused',
+				reason: 'duplicate',
+				toolCallId
+			})
+		})
+
+		await runClientAction(
+			{
+				addToolOutput,
+				messages: [{ id: 'a1', role: 'assistant', parts: [done] }]
+			},
+			[action],
+			{ toolCallId: 'call-2', toolName: 'applyFilters', input: { value: 'x' } }
+		)
+
+		expect(handler).not.toHaveBeenCalled()
+		expect(addToolOutput.mock.calls[0]?.[0]).toEqual({
+			tool: 'applyFilters',
+			toolCallId: 'call-2',
+			output: { status: 'refused', reason: 'duplicate', toolCallId: 'call-2' }
+		})
+	})
+
+	test('gives the handler the step that made the call, so it can refuse a shared step', async () => {
+		const addToolOutput = mock(async (_output: unknown) => undefined)
+		const call = (toolCallId: string, toolName: string) => ({
+			type: 'dynamic-tool' as const,
+			toolName,
+			toolCallId,
+			state: 'input-available' as const,
+			input: {}
+		})
+		const messages: UIMessage[] = [
+			{
+				id: 'a1',
+				role: 'assistant',
+				parts: [
+					{ type: 'step-start' },
+					call('earlier', 'lookupSpending'),
+					{ type: 'step-start' },
+					call('server-1', 'lookupSpending'),
+					call('screen-1', 'openScreen'),
+					{ type: 'step-start' },
+					{ type: 'text', text: 'Later' }
+				]
+			}
+		]
+		const seen: UIMessage['parts'] = []
+		const openScreen = defineClientAction({
+			name: 'openScreen',
+			description: 'Open a screen',
+			inputSchema: z.object({}),
+			handler: async (_input, { step }) => {
+				seen.push(...step)
+				const shared = step.some(
+					(part) => 'toolName' in part && part.toolName !== 'openScreen'
+				)
+				if (shared) throw new Error('mixed_step')
+				return { opened: true }
+			}
+		})
+
+		await runClientAction({ addToolOutput, messages }, [openScreen], {
+			toolCallId: 'screen-1',
+			toolName: 'openScreen',
+			input: {}
+		})
+
+		expect(seen).toEqual([
+			call('server-1', 'lookupSpending'),
+			call('screen-1', 'openScreen')
+		])
+		expect(addToolOutput.mock.calls[0]?.[0]).toEqual({
+			state: 'output-error',
+			tool: 'openScreen',
+			toolCallId: 'screen-1',
+			errorText: 'mixed_step'
+		})
+	})
 })
 
 describe('normalizeModelNulls', () => {
