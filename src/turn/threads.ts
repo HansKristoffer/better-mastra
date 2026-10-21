@@ -16,7 +16,12 @@ import type {
 	StorageThreadType
 } from '@mastra/core/memory'
 import type { MemoryStorage, WorkflowsStorage } from '@mastra/core/storage'
-import { isToolUIPart, type UIMessage } from 'ai'
+import type { UIMessage } from 'ai'
+
+import {
+	joinResumedAnswers,
+	type ResumePointOptions
+} from '../client/messages.js'
 
 import { listPendingChanges, type PendingChange } from './changes.js'
 import { toUserFacingMessage } from './stream.js'
@@ -63,6 +68,12 @@ export interface ThreadHandlersOptions<TScope> {
 	readonly agent?: Agent
 	/** Runs a delete under the thread lock; null when a turn holds it. */
 	lock?(key: ThreadKey): Promise<(() => Promise<void>) | null>
+	/**
+	 * Which parts a stored answer resumed after, so `get` shows the
+	 * continuation in the same message (see `joinResumedAnswers`). Default:
+	 * any tool result. Pass the same predicate to `mergeThreadMessages`.
+	 */
+	readonly isResumePoint?: (part: UIMessage['parts'][number]) => boolean
 }
 
 const USER_SOURCE = 'user'
@@ -160,7 +171,7 @@ export function createThreadHandlers<TScope>(
 						}
 					})
 				: { messages: [] as MastraDBMessage[] }
-			const messages = toUiMessages(visible.messages)
+			const messages = toUiMessages(visible.messages, options)
 			const [ratings, pendingChanges] = await Promise.all([
 				readRatings(scope, messages, visible.messages),
 				options.agent ? listPendingChanges(options.agent, key) : []
@@ -423,42 +434,16 @@ export async function sweepAbandonedRuns(input: {
 	return runIds.length
 }
 
-function toUiMessages(messages: MastraDBMessage[]): UIMessage[] {
-	return mergeResumedAnswers(
+function toUiMessages(
+	messages: MastraDBMessage[],
+	options: ResumePointOptions
+): UIMessage[] {
+	return joinResumedAnswers(
 		(toAISdkMessages(messages, { version: 'v7' }) as unknown as UIMessage[])
 			.map(toUserFacingMessage)
-			.filter((message) => message.parts.length > 0)
+			.filter((message) => message.parts.length > 0),
+		options.isResumePoint ? { isResumePoint: options.isResumePoint } : {}
 	)
-}
-
-/**
- * Mastra stores the text a run wrote after resuming from a client tool's
- * result as a new assistant message, while the client streamed it into the
- * message that holds the call. Joining the two keeps the message the client
- * knows, and its id.
- */
-function mergeResumedAnswers(messages: readonly UIMessage[]): UIMessage[] {
-	return messages.reduce<UIMessage[]>((merged, message) => {
-		const previous = merged.at(-1)
-		const last = previous?.parts.at(-1)
-		const continuesPrevious =
-			message.role === 'assistant' &&
-			previous?.role === 'assistant' &&
-			last !== undefined &&
-			isToolUIPart(last) &&
-			(last.state === 'output-available' || last.state === 'output-error')
-
-		if (previous && continuesPrevious) {
-			merged[merged.length - 1] = {
-				...previous,
-				parts: [...previous.parts, ...message.parts]
-			}
-		} else {
-			merged.push(message)
-		}
-
-		return merged
-	}, [])
 }
 
 async function findAnswers(

@@ -4,6 +4,7 @@ import type { UIMessage } from 'ai'
 import {
 	findStrandedToolCalls,
 	isShowingProgress,
+	isToolResultPart,
 	isUserFacingPart,
 	mergeThreadMessages,
 	readReplySuggestions,
@@ -133,6 +134,31 @@ describe('mergeThreadMessages', () => {
 		expect(mergeThreadMessages([user('u1'), first, second], [])).toEqual([
 			user('u1'),
 			{ ...first, parts: [...first.parts, ...second.parts] }
+		])
+	})
+
+	test('joins only after the parts isResumePoint names', () => {
+		const screen = assistant('a1', [tool('screen-1', 'output-available')])
+		const resumed = assistant('a2', [{ type: 'text', text: 'Der er du.' }])
+		const lookup = assistant('a3', [tool('server-1', 'output-available')])
+		const heartbeat = assistant('a4', [{ type: 'text', text: 'Hej igen.' }])
+		const isScreenAction = (part: UIMessage['parts'][number]) =>
+			isToolResultPart(part) &&
+			'toolCallId' in part &&
+			part.toolCallId.startsWith('screen-')
+
+		expect(
+			mergeThreadMessages(
+				[user('u1'), screen],
+				[resumed, user('u2'), lookup, heartbeat],
+				{ isResumePoint: isScreenAction }
+			)
+		).toEqual([
+			user('u1'),
+			{ ...screen, parts: [...screen.parts, ...resumed.parts] },
+			user('u2'),
+			lookup,
+			heartbeat
 		])
 	})
 })

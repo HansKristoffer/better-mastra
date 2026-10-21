@@ -1,9 +1,12 @@
 import { describe, expect, spyOn, test } from 'bun:test'
+import type { MastraDBMessage } from '@mastra/core/memory'
+import { getToolName, isToolUIPart } from 'ai'
 
 import { createThreadHandlers, sweepOldThreads } from './threads.js'
 import {
 	createHarness,
 	DELETE_TOOL,
+	LOOKUP_TOOL,
 	readTurn,
 	SCOPE,
 	type Scope,
@@ -53,6 +56,62 @@ describe('createThreadHandlers', () => {
 		).toMatchObject({
 			threads: []
 		})
+	})
+
+	test('should join an answer resumed after a tool result, or only after the parts isResumePoint names', async () => {
+		// Given a stored answer that ends in a tool's result and its continuation
+		const harness = createHarness({ replies: [] })
+		const { threadId, resourceId } = harness.threadKey
+		await harness.memory.createThread({ threadId, resourceId, title: 'Hej' })
+		const at = (second: number) => new Date(Date.UTC(2026, 9, 21, 9, 0, second))
+		const message = (
+			id: string,
+			role: 'user' | 'assistant',
+			second: number,
+			parts: MastraDBMessage['content']['parts']
+		): MastraDBMessage => ({
+			id,
+			role,
+			threadId,
+			resourceId,
+			createdAt: at(second),
+			content: { format: 2, parts }
+		})
+		await harness.memory.saveMessages({
+			messages: [
+				message('u1', 'user', 0, [{ type: 'text', text: 'Hvad brugte jeg?' }]),
+				message('a1', 'assistant', 1, [
+					{
+						type: 'tool-invocation',
+						toolInvocation: {
+							state: 'result',
+							toolCallId: 'call-1',
+							toolName: LOOKUP_TOOL,
+							args: {},
+							result: { total: 1200 }
+						}
+					}
+				]),
+				message('a2', 'assistant', 2, [{ type: 'text', text: '1.200 kr.' }])
+			]
+		})
+
+		// When it is read with the default and with a predicate that skips that tool
+		const joined = await handlersFor(harness).get(SCOPE, { threadId })
+		const apart = await createThreadHandlers<Scope>({
+			memory: harness.memory,
+			resourceId: (scope) => `${scope.organizationId}:${scope.userId}`,
+			userId: (scope) => scope.userId,
+			isResumePoint: (part) =>
+				isToolUIPart(part) && getToolName(part) === 'openScreen'
+		}).get(SCOPE, { threadId })
+
+		// Then the default joins the two answers under the first id, the predicate keeps them apart
+		expect(joined?.messages.map((m) => m.id)).toEqual(['u1', 'a1'])
+		expect(joined?.messages[1]?.parts.at(-1)).toEqual(
+			expect.objectContaining({ type: 'text', text: '1.200 kr.' })
+		)
+		expect(apart?.messages.map((m) => m.id)).toEqual(['u1', 'a1', 'a2'])
 	})
 
 	test('should page older messages with the cursor', async () => {
