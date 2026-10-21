@@ -136,3 +136,94 @@ export function ioRedis(client: IoRedisLike): ResumableRedis {
 		}
 	})
 }
+
+/** The `@upstash/redis` `Redis` methods the adapter uses. */
+export interface UpstashRedisLike {
+	get(key: string): Promise<unknown>
+	set(key: string, value: string, options: { px: number }): Promise<unknown>
+	del(key: string): Promise<unknown>
+	pexpire(key: string, milliseconds: number): Promise<unknown>
+	expire(key: string, seconds: number): Promise<unknown>
+	publish(channel: string, message: string): Promise<unknown>
+	subscribe(channel: string): {
+		on(
+			type: 'message',
+			listener: (event: { channel: string; message: unknown }) => void
+		): void
+		unsubscribe(): Promise<void>
+	}
+	xadd(key: string, id: '*', entries: Record<string, string>): Promise<unknown>
+	xread(key: string, id: string): Promise<unknown>
+}
+
+/**
+ * With `automaticDeserialization` on (Upstash's default) a JSON value comes
+ * back parsed; the streams want the text they wrote.
+ */
+const asText = (value: unknown): string | null =>
+	value === null || value === undefined
+		? null
+		: typeof value === 'string'
+			? value
+			: JSON.stringify(value)
+
+/**
+ * Adapter for `@upstash/redis`. Upstash speaks HTTP and has no blocking
+ * `XREAD`, so a cross-replica reader polls every `pollMs` (default 200 ms).
+ * Pass a function to create the client on first use, so a process without
+ * Upstash credentials still runs turns (only not resumable across replicas).
+ */
+export function upstashRedis(
+	client: UpstashRedisLike | (() => UpstashRedisLike),
+	options: { pollMs?: number } = {}
+): ResumableRedis {
+	const { pollMs = 200 } = options
+	let resolved: UpstashRedisLike | undefined
+	const redis = () => {
+		resolved ??= typeof client === 'function' ? client() : client
+		return resolved
+	}
+	return {
+		set: async (key, value, ttlMs) =>
+			void (await redis().set(key, value, { px: ttlMs })),
+		get: async (key) => asText(await redis().get(key)),
+		del: async (key) => void (await redis().del(key)),
+		pexpire: async (key, ttlMs) => void (await redis().pexpire(key, ttlMs)),
+		expire: async (key, seconds) => void (await redis().expire(key, seconds)),
+		publish: async (channel, message) =>
+			void (await redis().publish(channel, message)),
+		async subscribe(channel, onMessage) {
+			const subscriber = redis().subscribe(channel)
+			subscriber.on('message', ({ message }) =>
+				onMessage(asText(message) ?? '')
+			)
+			return () => subscriber.unsubscribe()
+		},
+		xadd: async (key, value) =>
+			void (await redis().xadd(key, '*', { d: value })),
+		async reader() {
+			let closed = false
+			let wake: (() => void) | undefined
+			return {
+				async xread(key, afterId, blockMs) {
+					const deadline = Date.now() + blockMs
+					while (!closed) {
+						const entries = parseXread(await redis().xread(key, afterId)).map(
+							(entry) => ({ ...entry, value: asText(entry.value) ?? '' })
+						)
+						if (entries.length || Date.now() >= deadline) return entries
+						await new Promise<void>((resolve) => {
+							wake = resolve
+							setTimeout(resolve, Math.min(pollMs, deadline - Date.now()))
+						})
+					}
+					return []
+				},
+				close() {
+					closed = true
+					wake?.()
+				}
+			}
+		}
+	}
+}
