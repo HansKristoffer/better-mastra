@@ -30,6 +30,7 @@ const CODE_FENCE = '```'
 
 /** Schemes and shapes a chat link may use. Anything else loses its href. */
 const SAFE_URL = /^(?:(?:https?|mailto|tel):|[#/]|\.{1,2}\/)/i
+const WEB_URL = /^https?:\/\//i
 
 // TYPES
 
@@ -135,6 +136,11 @@ export function createWordFadeTracker(now: () => number): WordFadeTracker {
 /** Whether a chat link may open: web, mail and phone links, and relative ones. */
 export function isSafeUrl(url: string): boolean {
 	return SAFE_URL.test(url.trim())
+}
+
+/** Whether a chat link is a web link (`http:` or `https:`): the stricter choice where mail, phone and relative links should not open. */
+export function isWebUrl(url: string): boolean {
+	return WEB_URL.test(url.trim())
 }
 
 /** The end of every whole word after `from`; a word is whole once whitespace follows it. */

@@ -33,6 +33,7 @@ import MarkdownDisplay, {
 import {
 	createWordFadeTracker,
 	isSafeUrl,
+	isWebUrl,
 	markdownParagraphs,
 	splitWordTokens,
 	trimIncompleteMarkdown,
@@ -56,6 +57,8 @@ export interface StreamingMarkdownProps {
 	readonly reducedMotion?: boolean
 	/** Opens a link; return false to keep the renderer from opening it. Only safe links reach it. */
 	readonly onLinkPress?: (url: string) => boolean
+	/** Which links are safe: `'all'` (default) web, mail, phone and relative links (`isSafeUrl`), `'web'` only `http(s)` (`isWebUrl`). */
+	readonly safeLinks?: 'all' | 'web'
 }
 
 /**
@@ -100,15 +103,16 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
 	streaming = false,
 	style,
 	reducedMotion = false,
-	onLinkPress
+	onLinkPress,
+	safeLinks = 'all'
 }: StreamingMarkdownProps): ReactNode {
 	const shown = useWordReveal(text, streaming)
 	const source = streaming ? trimIncompleteMarkdown(shown) : shown
 	const fadeIn = streaming && !reducedMotion
-	const opensLink = useMemo(
-		() => (url: string) => isSafeUrl(url) && (onLinkPress?.(url) ?? true),
-		[onLinkPress]
-	)
+	const opensLink = useMemo(() => {
+		const isSafe = safeLinks === 'web' ? isWebUrl : isSafeUrl
+		return (url: string) => isSafe(url) && (onLinkPress?.(url) ?? true)
+	}, [onLinkPress, safeLinks])
 
 	return createElement(
 		View,

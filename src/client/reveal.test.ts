@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import {
 	createWordFadeTracker,
 	isSafeUrl,
+	isWebUrl,
 	markdownParagraphs,
 	nextRevealLength,
 	REVEAL_CATCH_UP_STEPS,
@@ -124,5 +125,19 @@ describe('isSafeUrl', () => {
 		['', false]
 	])('%p → %p', (url, expected) => {
 		expect(isSafeUrl(url)).toBe(expected)
+	})
+})
+
+describe('isWebUrl', () => {
+	test.each([
+		['https://example.com', true],
+		[' HTTP://example.com/a ', true],
+		['mailto:hej@example.com', false],
+		['tel:+4512345678', false],
+		['/settings', false],
+		['#top', false],
+		['javascript:alert(1)', false]
+	])('%p → %p', (url, expected) => {
+		expect(isWebUrl(url)).toBe(expected)
 	})
 })
