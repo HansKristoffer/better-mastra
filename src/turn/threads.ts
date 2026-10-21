@@ -3,8 +3,10 @@
  * read a page, delete, rate an answer, and the retention sweep. Every handler
  * takes the caller's scope and answers only threads of the scope's memory
  * resource. Ratings are thumbs feedback on the answer's trace in Mastra's
- * observability, beside its cost and metrics, never in the thread's metadata,
- * which observational memory rewrites from an earlier read.
+ * observability, beside its cost and metrics, by default; an app without
+ * observability storage passes its own `ratings` store. Not the thread's
+ * metadata when observational memory runs: it rewrites the metadata from an
+ * earlier read.
  */
 
 import { toAISdkMessages } from '@mastra/ai-sdk/ui'
@@ -54,6 +56,26 @@ export interface AnswerRating {
 
 export type DeleteThreadResult = 'deleted' | 'not_found' | 'locked'
 
+/** Where the caller's answer ratings live, in place of Mastra's observability feedback. */
+export interface AnswerRatingStore<TScope> {
+	/** The caller's ratings of these answers of the thread, by message id. */
+	read(
+		scope: TScope,
+		thread: StorageThreadType,
+		answerIds: readonly string[]
+	): Promise<Readonly<Record<string, AnswerRating>>>
+	/** Stores the caller's rating of an answer of the thread, replacing an earlier one. */
+	write(
+		scope: TScope,
+		thread: StorageThreadType,
+		input: {
+			readonly messageId: string
+			readonly rating: 'up' | 'down'
+			readonly reason?: string
+		}
+	): Promise<void>
+}
+
 export interface ThreadHandlersOptions<TScope> {
 	readonly memory: MastraMemory
 	/** The memory resource of the caller; `deriveThreadKey(scope).resourceId`. */
@@ -64,6 +86,8 @@ export interface ThreadHandlersOptions<TScope> {
 	belongsTo?(thread: StorageThreadType, scope: TScope): boolean
 	/** The Mastra instance with observability storage, for ratings. */
 	readonly mastra?: Mastra
+	/** The rating store when ratings are not observability feedback; `mastra` is then not needed for them. */
+	readonly ratings?: AnswerRatingStore<TScope>
 	/** The chat agent, for the thread's pending changes and their snapshots. */
 	readonly agent?: Agent
 	/** Runs a delete under the thread lock; null when a turn holds it. */
@@ -173,7 +197,7 @@ export function createThreadHandlers<TScope>(
 				: { messages: [] as MastraDBMessage[] }
 			const messages = toUiMessages(visible.messages, options)
 			const [ratings, pendingChanges] = await Promise.all([
-				readRatings(scope, messages, visible.messages),
+				readRatings(scope, thread, messages, visible.messages),
 				options.agent ? listPendingChanges(options.agent, key) : []
 			])
 
@@ -224,6 +248,17 @@ export function createThreadHandlers<TScope>(
 			const [answer] = thread
 				? await findAnswers(memory, input.threadId, [input.messageId])
 				: []
+
+			if (thread && answer && options.ratings) {
+				await options.ratings.write(scope, thread, {
+					messageId: input.messageId,
+					rating: input.rating,
+					...(input.reason && { reason: input.reason })
+				})
+
+				return true
+			}
+
 			const traceId = answer && readTraceId(answer)
 
 			if (!traceId) return false
@@ -262,17 +297,23 @@ export function createThreadHandlers<TScope>(
 
 	async function readRatings(
 		scope: TScope,
+		thread: StorageThreadType,
 		messages: readonly UIMessage[],
 		stored: readonly MastraDBMessage[]
 	): Promise<Readonly<Record<string, AnswerRating>>> {
-		if (!options.mastra) return {}
-
-		const mastra = options.mastra
 		const answerIds = new Set(
 			messages.flatMap((message) =>
 				message.role === 'assistant' ? [message.id] : []
 			)
 		)
+
+		if (options.ratings) {
+			return options.ratings.read(scope, thread, [...answerIds])
+		}
+
+		if (!options.mastra) return {}
+
+		const mastra = options.mastra
 		const ratings = await Promise.all(
 			stored.map(async (message) => {
 				const traceId = readTraceId(message)

@@ -31,8 +31,13 @@ export interface ChatRouteOptions<
 	runTurn(request: ChatTurnRequest<TAuth, TBody>): Promise<ChatTurnResult>
 	/** Keeps a turn running past a disconnect, reachable again by its thread. */
 	readonly resumable?: ResumableStreams
-	/** Whether the thread is the caller's; required with `resumable`. */
-	ownsThread?(threadId: string, auth: TAuth): Promise<boolean>
+	/**
+	 * Whether the thread is the caller's; required with `resumable`.
+	 * `undefined` when no such thread exists yet, as for a thread the client
+	 * opened but never sent to: reconnecting answers 204 and stop
+	 * `{ stopped: false }`, while a thread of someone else is `not_found`.
+	 */
+	ownsThread?(threadId: string, auth: TAuth): Promise<boolean | undefined>
 	readonly heartbeatMs?: number
 	/**
 	 * The refusals the route answers itself, in the app's codes: a caller
@@ -104,17 +109,21 @@ export function createChatRoute<
 
 		if (!auth) return { refusal: refuse('unauthenticated') }
 
-		if (!threadId || !(await options.ownsThread!(threadId, auth))) {
-			return { refusal: refuse('not_found') }
-		}
+		if (!threadId) return { refusal: refuse('not_found') }
 
-		return { threadId }
+		const owns = await options.ownsThread!(threadId, auth)
+
+		if (owns === false) return { refusal: refuse('not_found') }
+
+		return { threadId, exists: owns === true }
 	}
 
 	app.get(`${options.path}/:threadId/stream`, async (c) => {
-		const { refusal, threadId } = await owned(c)
+		const { refusal, threadId, exists } = await owned(c)
 
 		if (refusal) return refusal
+
+		if (!exists) return new Response(null, { status: 204 })
 
 		keepConnectionOpen(c)
 
@@ -126,11 +135,11 @@ export function createChatRoute<
 	})
 
 	app.post(`${options.path}/:threadId/stop`, async (c) => {
-		const { refusal, threadId } = await owned(c)
+		const { refusal, threadId, exists } = await owned(c)
 
 		if (refusal) return refusal
 
-		return c.json({ stopped: await resumable.stop(threadId) })
+		return c.json({ stopped: exists && (await resumable.stop(threadId)) })
 	})
 
 	return app

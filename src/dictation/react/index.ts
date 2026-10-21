@@ -22,8 +22,11 @@ import {
 /** Where the dictation is: asking for the microphone and a key, listening, or waiting for the last words. */
 export type DictationPhase = 'idle' | 'starting' | 'listening' | 'finishing'
 
-/** Why the last dictation gave no text: the microphone was refused, or dictation failed. */
-export type DictationNotice = 'permission_denied' | 'unavailable'
+/** Why the last dictation gave no text: the microphone was refused or is missing, or dictation failed. */
+export type DictationNotice =
+	| 'permission_denied'
+	| 'no_microphone'
+	| 'unavailable'
 
 /** The live text, published per token. */
 export interface DictationTranscriptChannel {
@@ -36,6 +39,8 @@ export interface UseDictationOptions
 	/** The text, when a dictation that heard something stops or fails; never mid-way and never after `cancel`. */
 	readonly onDictated?: (text: string) => void
 	readonly onEnd?: (end: DictationEnd) => void
+	/** The notice, once, when a dictation gives no text for one of its reasons: show a toast here. */
+	readonly onNotice?: (notice: DictationNotice) => void
 }
 
 export function useDictation(options: UseDictationOptions) {
@@ -90,6 +95,8 @@ export function useDictation(options: UseDictationOptions) {
 				latest.current.onEnd?.(end)
 				setPhase('idle')
 				setNotice(end.kind === 'failed' ? 'unavailable' : undefined)
+
+				if (end.kind === 'failed') latest.current.onNotice?.('unavailable')
 			}
 		})
 		starting.current = undefined
@@ -103,7 +110,13 @@ export function useDictation(options: UseDictationOptions) {
 		}
 
 		setPhase('idle')
-		setNotice(started.kind === 'cancelled' ? undefined : started.kind)
+
+		if (started.kind === 'cancelled') {
+			setNotice(undefined)
+		} else {
+			setNotice(started.kind)
+			latest.current.onNotice?.(started.kind)
+		}
 	}, [transcript])
 
 	useEffect(() => cancel, [cancel])

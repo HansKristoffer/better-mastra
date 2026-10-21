@@ -89,6 +89,7 @@ Options:
   --model <string>...     Model to run on; several print a comparison
   --[no-]judge            Score runs with the config judge (default: true)
   --compare <string>      Baseline report to compare with
+  --output <string>       Report file to write; several models add -<model>
   --verbose               Keep app console logs
   -h, --help              Show help
 `)

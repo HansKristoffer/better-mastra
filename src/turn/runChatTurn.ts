@@ -34,11 +34,13 @@ import { sendReplySuggestions } from './replySuggestions.js'
 import {
 	TURN_ERROR_SENTENCE,
 	type TurnStreamEnding,
+	USER_MESSAGE_PART,
 	toUserFacingMessage,
 	toUserFacingStream
 } from './stream.js'
 import { deriveThreadTitle, persistThreadMetadata } from './title.js'
 import {
+	type AnyRequestContext,
 	type ChatRefusal,
 	type ChatTurnBody,
 	type ChatTurnPlan,
@@ -72,8 +74,8 @@ export type ChatTurnResult =
 
 /** What `prepare` returns for one turn. */
 export interface PreparedChatTurn {
-	/** The run's request context; `defineRequestContext().create()` builds one. */
-	readonly requestContext: RequestContext
+	/** The run's request context, typed or not; `defineRequestContext().create()` builds one. */
+	readonly requestContext: AnyRequestContext
 	readonly plan: ChatTurnPlan
 	/** The messages Mastra gets, when the app transforms them (attachments). */
 	readonly messages?: readonly UIMessage[]
@@ -165,6 +167,12 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 	prepare(input: {
 		readonly scope: TScope
 		readonly body: TBody
+		/**
+		 * The body's messages as the turn hands them to Mastra: user-facing
+		 * parts only, a client tool's error as a result the model can read.
+		 * Return transformed ones as `messages` (attachments).
+		 */
+		readonly messages: readonly UIMessage[]
 		readonly threadKey: ThreadKey
 		/** The stored thread; null before its first turn. Its metadata holds the model arm. */
 		readonly thread: StorageThreadType | null
@@ -192,7 +200,7 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 	readonly replySuggestions?: {
 		readonly agentId: string
 		readonly timeoutMs?: number
-		readonly requestContext?: (scope: TScope) => RequestContext
+		readonly requestContext?: (scope: TScope) => AnyRequestContext
 	}
 	/** The only error text the client receives. */
 	readonly errorSentence?: string
@@ -202,6 +210,9 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 	readonly logger?: ChatTurnLogger
 	readonly now?: () => number
 }
+
+/** How far back a regenerated answer's user message is looked for. */
+const RECENT_MESSAGES = 50
 
 class ChatTurnStageError extends Error {
 	constructor(
@@ -326,6 +337,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		deps.prepare({
 			scope,
 			body: request.body,
+			messages: turn.messages,
 			threadKey,
 			thread: turn.thread,
 			signal: request.signal
@@ -351,6 +363,12 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	if (changes.kind === 'expired') {
 		await turn.release()
 		return refused('change_expired')
+	}
+
+	if (request.body.trigger === 'regenerate-message') {
+		await atStage('thread', () =>
+			forgetAnswerAfter(deps.memory, threadKey, turn.messages.at(-1))
+		)
 	}
 
 	const modelId =
@@ -426,8 +444,9 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		return refused('change_expired')
 	}
 
-	const newMessageText =
-		turn.messages.at(-1)?.role === 'user' ? textOf(turn.messages.at(-1)) : ''
+	const newMessage =
+		turn.messages.at(-1)?.role === 'user' ? turn.messages.at(-1) : undefined
+	const newMessageText = newMessage ? textOf(newMessage) : ''
 	const deriveTitle = deps.deriveTitle ?? deriveThreadTitle
 
 	const close = async (ending: TurnStreamEnding) => {
@@ -499,12 +518,49 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		threadKey,
 		stream: toUserFacingStream(started, {
 			observe: (chunk) => observer.observe(chunk),
+			...(newMessage && {
+				afterStart: {
+					type: USER_MESSAGE_PART,
+					data: { message: newMessage },
+					transient: true
+				} as UIMessageChunk
+			}),
 			close,
 			...(epilogue && { epilogue }),
 			...(deps.errorSentence && { errorSentence: deps.errorSentence }),
 			onInternalError: (error) =>
 				logger.error('[better-mastra] the turn stream failed', { error })
 		})
+	}
+}
+
+/**
+ * The client sends only the message the answer is written again for; the
+ * thread still holds the answer it replaces, which the model would read and
+ * the thread would keep beside the new one.
+ */
+async function forgetAnswerAfter(
+	memory: MastraMemory,
+	threadKey: ThreadKey,
+	message: UIMessage | undefined
+): Promise<void> {
+	if (message?.role !== 'user') return
+
+	// ponytail: the newest page only; an answer longer than it keeps its older messages.
+	const { messages: stored } = await memory.recall({
+		threadId: threadKey.threadId,
+		resourceId: threadKey.resourceId,
+		perPage: RECENT_MESSAGES,
+		hideSignals: false,
+		includeTotal: false
+	})
+	const index = stored.findIndex(
+		(storedMessage) => storedMessage.id === message.id
+	)
+	const answer = index === -1 ? [] : stored.slice(index + 1)
+
+	if (answer.length > 0) {
+		await memory.deleteMessages(answer.map((storedMessage) => storedMessage.id))
 	}
 }
 

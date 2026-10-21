@@ -1,3 +1,4 @@
+import { isDryRun } from '../tools/dryRun.js'
 import { describe, expect, test } from 'bun:test'
 import { simulateReadableStream, type UIMessageChunk } from 'ai'
 import type { EvalCase } from './case.js'
@@ -87,6 +88,8 @@ describe('running an eval case', () => {
 		])
 		expect(calls[2]?.page).toEqual({ path: '/deals' })
 		expect(calls[0]?.requestContext.get(EVAL_DRY_RUN_KEY)).toBe(true)
+		// Tools of better-mastra/tools see the same run as dry.
+		expect(isDryRun(calls[0]?.requestContext)).toBe(true)
 		// A resubmit sends the answered client action back.
 		expect(calls[1]?.messages[1]?.parts).toContainEqual(
 			expect.objectContaining({

@@ -24,7 +24,8 @@ import { CACHE_MARKER, withConversationCache } from './promptCache.js'
 import {
 	type ChatTurnPlan,
 	findTurnPlan,
-	type LanguageModelObject
+	type LanguageModelObject,
+	type ProviderOptions
 } from './types.js'
 
 export interface CreateChatAgentOptions {
@@ -174,7 +175,10 @@ function defaultOptionsFor(
 	return {
 		...options,
 		maxSteps: plan.maxSteps,
-		...(plan.providerOptions && { providerOptions: plan.providerOptions }),
+		// Mastra types each provider's options; the AI SDK's are the same record, untyped.
+		...(plan.providerOptions && {
+			providerOptions: plan.providerOptions as ProviderOptions
+		}),
 		...(plan.clientTools && { clientTools: plan.clientTools }),
 		modelSettings: {
 			...(plan.maxOutputTokens && { maxOutputTokens: plan.maxOutputTokens }),

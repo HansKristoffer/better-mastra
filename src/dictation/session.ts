@@ -90,6 +90,8 @@ export interface DictationSession {
 export type DictationStart =
 	| { readonly kind: 'started'; readonly session: DictationSession }
 	| { readonly kind: 'permission_denied' }
+	/** The device has no microphone at all (`NotFoundError`). */
+	| { readonly kind: 'no_microphone' }
 	| { readonly kind: 'unavailable' }
 	| { readonly kind: 'cancelled' }
 
@@ -116,24 +118,35 @@ export const DICTATION_FINISH_TIMEOUT_MS = 4_000
 /** The empty text frame that tells Soniox the audio is complete. */
 const END_OF_AUDIO = ''
 
-/** Starts one dictation: permission, key, socket, microphone. */
+/** Starts one dictation: permission and key at once, then socket and microphone. */
 export async function startDictation(
 	options: DictationOptions
 ): Promise<DictationStart> {
 	const { microphone, signal } = options
-	// A refusal is false; a throw (no microphone at all) is unavailable.
-	const granted = await microphone.requestPermission().catch(() => undefined)
+
+	if (signal?.aborted) return { kind: 'cancelled' }
+
+	// Asked for while the permission prompt is open, so a start waits for one round trip, not two.
+	const firstKey = options.requestKey().catch(() => undefined)
+	// A refusal is false; a throw is no microphone (`NotFoundError`) or a broken one.
+	const granted = await microphone
+		.requestPermission()
+		.catch((error: unknown) =>
+			isNoMicrophone(error) ? ('no_microphone' as const) : undefined
+		)
 
 	if (granted !== true) {
 		await microphone.stop().catch(() => {})
 		return granted === false
 			? { kind: 'permission_denied' }
-			: { kind: 'unavailable' }
+			: granted === 'no_microphone'
+				? { kind: 'no_microphone' }
+				: { kind: 'unavailable' }
 	}
 
 	const key = signal?.aborted
 		? undefined
-		: await options.requestKey().catch(() => undefined)
+		: await freshKey(await firstKey, options)
 
 	if (key === undefined || signal?.aborted) {
 		await microphone.stop().catch(() => {})
@@ -152,6 +165,26 @@ export async function startDictation(
 	}
 
 	return { kind: 'started', session }
+}
+
+/** The key asked for beside the permission prompt, or a new one when the prompt outlasted it. */
+async function freshKey(
+	key: DictationKey | undefined,
+	options: Pick<DictationOptions, 'requestKey'>
+): Promise<DictationKey | undefined> {
+	const expired =
+		key?.expiresAt !== undefined && Date.parse(key.expiresAt) <= Date.now()
+
+	return key && !expired
+		? key
+		: await options.requestKey().catch(() => undefined)
+}
+
+/** `getUserMedia` rejects this way when the device has no microphone, or none that fits. */
+function isNoMicrophone(error: unknown): boolean {
+	const name = (error as { name?: unknown } | null)?.name
+
+	return name === 'NotFoundError' || name === 'OverconstrainedError'
 }
 
 /**

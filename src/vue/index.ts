@@ -54,6 +54,7 @@ export interface ChatSessionRefs
 		| 'send'
 		| 'stop'
 		| 'tryAgain'
+		| 'regenerate'
 		| 'answerApproval'
 		| 'resumeRun'
 		| 'clearRestoredDraft'
@@ -119,6 +120,7 @@ export function useChatSession(
 		send: session.send,
 		stop: session.stop,
 		tryAgain: session.tryAgain,
+		regenerate: session.regenerate,
 		answerApproval: session.answerApproval,
 		resumeRun: session.resumeRun,
 		clearRestoredDraft: session.clearRestoredDraft,

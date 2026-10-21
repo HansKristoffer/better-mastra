@@ -470,6 +470,63 @@ describe('createChatSession', () => {
 		expect(texts(chat.chat.messages)).toEqual(['Fra serveren'])
 	})
 
+	test('with resume, a reattached answer shows the question the thread had not stored yet', async () => {
+		const question: UIMessage = {
+			id: 'question-2',
+			role: 'user',
+			parts: [{ type: 'text', text: 'Og i går?' }]
+		}
+		const [start, ...rest] = answer('I går: 3', 'answer-2')
+		const server = fakeServer([
+			stream([
+				start!,
+				{
+					type: 'data-user-message',
+					data: { message: question },
+					transient: true
+				} as UIMessageChunk,
+				...rest
+			])
+		])
+		const chat = session(server, {
+			resume: true,
+			messages: [
+				{ id: 'q1', role: 'user', parts: [{ type: 'text', text: 'Hej' }] },
+				{ id: 'a1', role: 'assistant', parts: [{ type: 'text', text: 'Hej!' }] }
+			]
+		})
+
+		chat.resumeStream()
+		await settled(chat)
+
+		expect(texts(chat.chat.messages)).toEqual([
+			'Hej',
+			'Hej!',
+			'Og i går?',
+			'I går: 3'
+		])
+	})
+
+	test('regenerate writes the newest answer again from the user message, once nothing runs', async () => {
+		const server = fakeServer([
+			stream(answer('Hej!')),
+			stream(answer('Hej igen!', 'answer-2'))
+		])
+		const chat = session(server)
+
+		chat.send('Hej')
+		await settled(chat)
+		chat.regenerate()
+		await settled(chat)
+
+		expect(server.requests[1]?.body).toMatchObject({
+			trigger: 'regenerate-message',
+			messages: [{ role: 'user', parts: [{ type: 'text', text: 'Hej' }] }]
+		})
+		expect(texts(chat.chat.messages)).toEqual(['Hej', 'Hej igen!'])
+		expect(chat.getSnapshot().turn).toEqual({ kind: 'idle' })
+	})
+
 	test('waits for an approval and sends the answer only for the turn that waits', async () => {
 		const server = fakeServer([
 			stream([

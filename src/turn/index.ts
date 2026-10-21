@@ -68,10 +68,12 @@ export {
 	type TurnStreamEnding,
 	toUserFacingMessage,
 	toUserFacingStream,
+	USER_MESSAGE_PART,
 	type UserFacingStreamHandlers
 } from './stream.js'
 export {
 	type AnswerRating,
+	type AnswerRatingStore,
 	createThreadHandlers,
 	type DeleteThreadResult,
 	deleteThreadEverywhere,
@@ -90,6 +92,7 @@ export {
 export { type PromptVersionTool, promptVersion } from './promptVersion.js'
 export { deriveThreadTitle, persistThreadMetadata } from './title.js'
 export {
+	type AnyRequestContext,
 	type ChatErrorCode,
 	type ChatRefusal,
 	type ChatResume,

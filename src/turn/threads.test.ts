@@ -2,7 +2,11 @@ import { describe, expect, spyOn, test } from 'bun:test'
 import type { MastraDBMessage } from '@mastra/core/memory'
 import { getToolName, isToolUIPart } from 'ai'
 
-import { createThreadHandlers, sweepOldThreads } from './threads.js'
+import {
+	type AnswerRating,
+	createThreadHandlers,
+	sweepOldThreads
+} from './threads.js'
 import {
 	createHarness,
 	DELETE_TOOL,
@@ -212,6 +216,49 @@ describe('createThreadHandlers', () => {
 		})
 
 		expect(rated).toBe(false)
+	})
+
+	test("should keep ratings in the app's own store, without observability", async () => {
+		// Given an answered turn and a rating store of the app's
+		const harness = createHarness({ replies: [textReply('Hej!')] })
+		await readTurn(await harness.run({ messages: [userMessage('Hej')] }))
+		const stored = new Map<string, AnswerRating>()
+		const threads = createThreadHandlers<Scope>({
+			memory: harness.memory,
+			resourceId: (scope) => `${scope.organizationId}:${scope.userId}`,
+			userId: (scope) => scope.userId,
+			ratings: {
+				read: async (_scope, _thread, answerIds) =>
+					Object.fromEntries(
+						answerIds.flatMap((id) => {
+							const rating = stored.get(id)
+							return rating ? [[id, rating]] : []
+						})
+					),
+				write: async (_scope, _thread, input) => {
+					stored.set(input.messageId, {
+						rating: input.rating,
+						reason: input.reason
+					})
+				}
+			}
+		})
+		const { threadId } = harness.threadKey
+		const answer = (await threads.get(SCOPE, { threadId }))?.messages.at(-1)
+
+		// When the caller rates the answer
+		const rated = await threads.rate(SCOPE, {
+			threadId,
+			messageId: answer?.id ?? '',
+			rating: 'down',
+			reason: 'Too long'
+		})
+
+		// Then the next read of the thread shows it
+		expect(rated).toBe(true)
+		expect((await threads.get(SCOPE, { threadId }))?.ratings).toEqual({
+			[answer?.id ?? '']: { rating: 'down', reason: 'Too long' }
+		})
 	})
 })
 

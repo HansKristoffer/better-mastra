@@ -44,7 +44,9 @@ function appWith(options: {
 			...(options.resumable && {
 				resumable: options.resumable,
 				ownsThread: async (threadId, auth) =>
-					threadId === 'thread-1' && auth === 'user'
+					threadId === 'new-thread'
+						? undefined
+						: threadId === 'thread-1' && auth === 'user'
 			})
 		})
 	)
@@ -120,6 +122,34 @@ describe('createChatRoute', () => {
 		expect(await stopped.json()).toEqual({ stopped: true })
 		expect(seen[0]?.signal.aborted).toBe(true)
 		expect((await app.request('/chat/thread-2/stream', auth)).status).toBe(404)
+	})
+
+	test('should answer a thread that does not exist yet with nothing to resume, not a refusal', async () => {
+		const asked: string[] = []
+		const resumable: ResumableStreams = {
+			start: async ({ stream }) => stream,
+			reconnect: async (threadKey) => {
+				asked.push(threadKey)
+				return null
+			},
+			stop: async (threadKey) => {
+				asked.push(threadKey)
+				return true
+			},
+			close: async () => {}
+		}
+		const app = appWith({ resumable })
+		const auth = { headers: { authorization: 'user' } }
+
+		const reconnected = await app.request('/chat/new-thread/stream', auth)
+		const stopped = await app.request('/chat/new-thread/stop', {
+			method: 'POST',
+			...auth
+		})
+
+		expect(reconnected.status).toBe(204)
+		expect(await stopped.json()).toEqual({ stopped: false })
+		expect(asked).toEqual([])
 	})
 
 	test("should answer the route's own refusals in the app's codes", async () => {

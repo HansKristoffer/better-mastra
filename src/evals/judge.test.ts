@@ -112,6 +112,28 @@ describe('a judge', () => {
 		expect(result).toEqual(expect.objectContaining({ score: 0.5 }))
 		expect(scorer.id).toBe('judge-test-v1')
 	})
+
+	test('judges through the app generate hook, which needs no model', async () => {
+		const requests: { system: string; prompt: string }[] = []
+		const judge = defineJudge({
+			version: 'test-v1',
+			system: 'Judge.',
+			generate: async (request) => {
+				requests.push({ system: request.system, prompt: request.prompt })
+				return { ...verdict, outcome: 'done' as const }
+			}
+		})
+
+		const judged = await judge.judge({
+			turns: [{ userText: 'How many?', replyText: 'Two.', toolCalls: [] }]
+		})
+
+		expect(judged.outcome).toBe('done')
+		expect(requests).toEqual([
+			{ system: 'Judge.', prompt: expect.stringContaining('User: How many?') }
+		])
+		expect(() => judge.scorer()).toThrow('has no model')
+	})
 })
 
 test('a transcript clips long tool payloads and shows errors', () => {

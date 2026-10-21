@@ -139,17 +139,35 @@ export function outcomeScore(verdict: { outcome?: string }) {
 	return verdict.outcome === 'done' ? 1 : verdict.outcome === 'partly' ? 0.5 : 0
 }
 
+/** One judge call, for an app that makes it through its own metered generation. */
+export type JudgeRequest<S extends z.ZodType> = {
+	system: string
+	prompt: string
+	schema: S
+}
+
 export type DefineJudgeOptions<S extends z.ZodType> = {
 	/**
 	 * Bump when the rubric or the evidence the judge sees changes, so scores
 	 * from different rubrics are never compared as one series.
 	 */
 	version: string
-	model: LanguageModel
 	system: string
 	schema?: S
 	renderTranscript?: (turns: readonly JudgeTurn[]) => string
-}
+} & (
+	| {
+			/** `judge()` calls it with `generateText`; `scorer()` hands it to Mastra. */
+			model: LanguageModel
+			/** Makes `judge()`'s call instead, e.g. so its cost lands on the app's usage ledger. */
+			generate?: (request: JudgeRequest<S>) => Promise<z.infer<S>>
+	  }
+	| {
+			/** Only `scorer()` needs it; without it `scorer()` throws. */
+			model?: LanguageModel
+			generate: (request: JudgeRequest<S>) => Promise<z.infer<S>>
+	  }
+)
 
 /**
  * A versioned LLM judge, used directly on a trace (`judge`) or as a Mastra
@@ -168,10 +186,14 @@ export function defineJudge<S extends z.ZodType = typeof judgeVerdictSchema>(
 		schema,
 		prompt,
 		async judge(input: JudgeInput): Promise<z.infer<S>> {
+			const request = { system: options.system, prompt: prompt(input), schema }
+
+			if (options.generate) return options.generate(request)
+
 			const { output } = await generateText({
-				model: options.model,
-				system: options.system,
-				prompt: prompt(input),
+				model: requireModel(options.model, options.version),
+				system: request.system,
+				prompt: request.prompt,
 				output: Output.object({ schema }),
 				temperature: 0
 			})
@@ -196,7 +218,7 @@ export function defineJudge<S extends z.ZodType = typeof judgeVerdictSchema>(
 				description: `LLM judge ${options.version}`,
 				type: 'agent',
 				judge: {
-					model: options.model as never,
+					model: requireModel(options.model, options.version) as never,
 					instructions: options.system
 				}
 			})
@@ -217,6 +239,16 @@ export function defineJudge<S extends z.ZodType = typeof judgeVerdictSchema>(
 				)
 		}
 	}
+}
+
+function requireModel(model: LanguageModel | undefined, version: string) {
+	if (!model) {
+		throw new Error(
+			`The judge ${version} has no model; pass one to use it as a scorer.`
+		)
+	}
+
+	return model
 }
 
 /** A scorer run as one judged turn: the last user message, the answers and the tool calls. */
