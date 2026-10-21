@@ -85,13 +85,13 @@ export interface RestoredDraft {
 }
 
 /** Everything one request carries, before `prepareBody` shapes it. */
-export interface ChatRequest {
+export interface ChatRequest<TResumeData = unknown> {
 	readonly threadId: string
 	/** The messages `selectRequestMessages` picked. */
 	readonly messages: UIMessage[]
 	readonly trigger: 'submit-message' | 'regenerate-message'
 	/** What a resumed suspended run continues with. */
-	readonly resume: RunResume | undefined
+	readonly resume: RunResume<TResumeData> | undefined
 	/** The client actions this request offers, as definitions. */
 	readonly clientTools: readonly ClientToolDef[]
 }
@@ -107,7 +107,8 @@ export interface ChatFailureReport {
 /** A signal that the app may have missed a running answer: it came to the foreground, the network returned. */
 export type ResumeSignal = (resume: () => void) => () => void
 
-export interface ChatSessionOptions {
+/** `TResumeData` types what `resumeRun` takes and `prepareBody` reads back. */
+export interface ChatSessionOptions<TResumeData = unknown> {
 	/** The thread; the chat's id, and the `:threadId` of the stream and stop routes. */
 	readonly threadId: string
 	readonly transport: {
@@ -120,7 +121,9 @@ export interface ChatSessionOptions {
 	/** Messages to start with, such as the thread's stored page. */
 	readonly messages?: UIMessage[]
 	/** The JSON body of one request; the request as it is when left out. */
-	readonly prepareBody?: (request: ChatRequest) => object | Promise<object>
+	readonly prepareBody?: (
+		request: ChatRequest<TResumeData>
+	) => object | Promise<object>
 	/** The client actions requests offer and the session carries out, read per request: the screen on top may change. */
 	readonly clientActions?:
 		| readonly ClientAction[]
@@ -152,7 +155,7 @@ export interface ApprovalAnswer {
 	readonly reason?: string
 }
 
-export interface ChatSession {
+export interface ChatSession<TResumeData = unknown> {
 	readonly threadId: string
 	readonly chat: ObservableChat
 	readonly getSnapshot: () => ChatSessionSnapshot
@@ -167,7 +170,7 @@ export interface ChatSession {
 	/** Answers an approval the user turn waits for; any other approval is left alone. */
 	readonly answerApproval: (answer: ApprovalAnswer) => void
 	/** Resumes a suspended run the user turn waits for, once. */
-	readonly resumeRun: (resume: RunResume) => void
+	resumeRun(resume: RunResume<TResumeData>): void
 	/** The composer has put the restored message in its input; it is not handed back again. */
 	readonly clearRestoredDraft: (sequence: number) => void
 	/**
@@ -215,7 +218,9 @@ const NO_ACTIONS: readonly ClientAction[] = []
 // FUNCTIONS
 
 /** A conversation for one thread. */
-export function createChatSession(options: ChatSessionOptions): ChatSession {
+export function createChatSession<TResumeData = unknown>(
+	options: ChatSessionOptions<TResumeData>
+): ChatSession<TResumeData> {
 	const { threadId } = options
 	const classifyError = options.classifyError ?? classifyChatError
 	const isUserFacing = options.isUserFacingPart ?? isUserFacingPart
@@ -276,11 +281,12 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
 			// The server's stream route replays the run from its start.
 			resumeStreamIsReplay: true,
 			prepareSendMessagesRequest: async ({ messages, trigger }) => {
-				const request: ChatRequest = {
+				const request: ChatRequest<TResumeData> = {
 					threadId,
 					messages: selectRequestMessages(messages, { isClientResult }),
 					trigger,
-					resume: pendingResume,
+					// The session only stores what `resumeRun` was given.
+					resume: pendingResume as RunResume<TResumeData> | undefined,
 					clientTools: toClientToolDefs(clientActions())
 				}
 

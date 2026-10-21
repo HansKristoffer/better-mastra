@@ -178,6 +178,25 @@ describe('createChatSession', () => {
 		])
 	})
 
+	test('types the resume data prepareBody reads and resumeRun takes', () => {
+		type Answer = { readonly answer: 'yes' | 'no' }
+		const typed = createChatSession<Answer>({
+			threadId: 'thread-1',
+			transport: { api: '/chat' },
+			prepareBody: ({ messages, resume }) => ({
+				messages,
+				...(resume ? { runId: resume.runId, answer: resume.data.answer } : {})
+			})
+		})
+		// A typed session is still a session for the React and Vue bindings.
+		const plain: ChatSession = typed
+
+		typed.resumeRun({ runId: 'run-1', data: { answer: 'yes' } })
+		// @ts-expect-error data must be the session's resume type
+		typed.resumeRun({ runId: 'run-1', data: { answer: 'maybe' } })
+		plain.dispose()
+	})
+
 	test('carries out a client action when its request ends and sends its result as the follow-up', async () => {
 		const opened: string[] = []
 		const openScreen = defineClientAction({

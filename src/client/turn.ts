@@ -28,9 +28,9 @@ const NO_EFFECTS: readonly ChatTurnEffect[] = []
 // TYPES
 
 /** What Apply on a suspended run sends: the run and the data it resumes with. */
-export interface RunResume {
+export interface RunResume<TData = unknown> {
 	readonly runId: string
-	readonly data: unknown
+	readonly data: TData
 }
 
 /** A refusal the chat route answered, as the session's `classifyError` reads it. */
