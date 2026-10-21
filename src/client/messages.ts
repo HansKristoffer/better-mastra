@@ -161,32 +161,41 @@ export function currentUserTurn(messages: readonly UIMessage[]): UIMessage[] {
 	return trailing === undefined ? [] : [trailing]
 }
 
-/**
- * The stored messages, oldest first, then the live ones. A message in both
- * shows once, as the live copy, which is the one still changing. An answer
- * resumed after a client action's result shows as one answer: Mastra stores
- * the continuation as its own message.
- */
-export function mergeThreadMessages<M extends UIMessage>(
-	stored: readonly M[],
-	live: readonly M[]
-): M[] {
-	const liveIds = new Set(live.map((message) => message.id))
-	const merged = [
-		...stored.filter((message) => !liveIds.has(message.id)),
-		...live
-	]
+/** Which parts an answer resumes after: Mastra stores the continuation as a message of its own. */
+export type ResumePointOptions = {
+	/** Default `isToolResultPart`: after any tool's result. */
+	readonly isResumePoint?: (part: MessagePart) => boolean
+}
 
-	return merged.reduce<M[]>((joined, message) => {
+/** A tool call with its output or error, the default resume point. */
+export function isToolResultPart(part: MessagePart): boolean {
+	return (
+		isToolUIPart(part) &&
+		(part.state === 'output-available' || part.state === 'output-error')
+	)
+}
+
+/**
+ * Joins an assistant message into the assistant message before it when that
+ * one ends at a resume point. Mastra stores the text a run wrote after
+ * resuming from a client tool's result as a new message, while the client
+ * streamed it into the message that holds the call; joining keeps that
+ * message and its id.
+ */
+export function joinResumedAnswers<M extends UIMessage>(
+	messages: readonly M[],
+	options: ResumePointOptions = {}
+): M[] {
+	const isResumePoint = options.isResumePoint ?? isToolResultPart
+
+	return messages.reduce<M[]>((joined, message) => {
 		const previous = joined.at(-1)
 		const lastPart = previous?.parts.at(-1)
 		const resumesPrevious =
 			message.role === 'assistant' &&
 			previous?.role === 'assistant' &&
 			lastPart !== undefined &&
-			isToolUIPart(lastPart) &&
-			(lastPart.state === 'output-available' ||
-				lastPart.state === 'output-error')
+			isResumePoint(lastPart)
 
 		if (previous !== undefined && resumesPrevious) {
 			joined[joined.length - 1] = {
@@ -199,6 +208,25 @@ export function mergeThreadMessages<M extends UIMessage>(
 
 		return joined
 	}, [])
+}
+
+/**
+ * The stored messages, oldest first, then the live ones. A message in both
+ * shows once, as the live copy, which is the one still changing. An answer
+ * resumed after a client action's result shows as one answer (see
+ * `joinResumedAnswers`).
+ */
+export function mergeThreadMessages<M extends UIMessage>(
+	stored: readonly M[],
+	live: readonly M[],
+	options: ResumePointOptions = {}
+): M[] {
+	const liveIds = new Set(live.map((message) => message.id))
+
+	return joinResumedAnswers(
+		[...stored.filter((message) => !liveIds.has(message.id)), ...live],
+		options
+	)
 }
 
 /**
