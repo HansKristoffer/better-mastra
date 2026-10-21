@@ -1,10 +1,13 @@
 import { afterEach, expect, test } from 'bun:test'
+import { Redis } from '@upstash/redis'
 import type { UIMessageChunk } from 'ai'
 import {
 	createResumableStreams,
 	type ResumableRedis,
 	type ResumableStreams,
-	type StreamEntry
+	type StreamEntry,
+	type UpstashRedisLike,
+	upstashRedis
 } from './index'
 
 /** Shared in-memory Redis; each `client()` is one replica's connection with its own op counter. */
@@ -323,4 +326,147 @@ test('close() waits for active turns', async () => {
 	await expect(
 		a.streams.start({ threadKey: 'x', ...source() })
 	).rejects.toThrow()
+})
+
+test('locator hook: the locator lives in the app lock value and dies with it', async () => {
+	// The app's per-thread lock holds `token|locator`; releasing the lock drops the locator.
+	const locks = new Map<string, string>()
+	const locator = {
+		read: async (threadKey: string) =>
+			locks.get(threadKey)?.split('|')[1] ?? null,
+		write: async (threadKey: string, value: string) => {
+			const held = locks.get(threadKey)
+			if (held) locks.set(threadKey, `${held.split('|')[0]}|${value}`)
+		}
+	}
+	const { fake, a, b } = setup({ locator })
+	locks.set('t', 'token-1')
+	const turn = source()
+	const response = await a.streams.start({ threadKey: 't', ...turn })
+	turn.begin()
+	turn.text('Hello')
+	await tick()
+	expect(locks.get('t')).toStartWith('token-1|{')
+	const resumed = await b.streams.reconnect('t')
+	turn.text(' there')
+	turn.end()
+	expect(textOf(await collect(resumed))).toBe('Hello there')
+	await collect(response)
+	expect([...fake.values.keys()].some((key) => key.includes('loc:'))).toBe(
+		false
+	)
+	locks.delete('t') // the turn releases its lock
+	expect(await b.streams.reconnect('t')).toBeNull()
+})
+
+/** `@upstash/redis` with its default `automaticDeserialization`: JSON values come back parsed. */
+function fakeUpstash() {
+	const values = new Map<string, string>()
+	const streams = new Map<string, [string, string[]][]>()
+	const channels = new Map<string, Set<(message: unknown) => void>>()
+	let seq = 0
+	let xreads = 0
+	const parsed = (value: string): unknown => {
+		try {
+			return JSON.parse(value)
+		} catch {
+			return value
+		}
+	}
+	const client = (): UpstashRedisLike => ({
+		get: async (key) => {
+			const value = values.get(key)
+			return value === undefined ? null : parsed(value)
+		},
+		set: async (key, value) => void values.set(key, value),
+		del: async (key) => void values.delete(key),
+		pexpire: async () => 1,
+		expire: async () => 1,
+		publish: async (channel, message) => {
+			for (const handler of channels.get(channel) ?? [])
+				queueMicrotask(() => handler(parsed(message)))
+		},
+		subscribe: (channel) => {
+			const handlers = channels.get(channel) ?? new Set()
+			channels.set(channel, handlers)
+			let handler: ((message: unknown) => void) | undefined
+			return {
+				on: (_type, listener) => {
+					handler = (message) => listener({ channel, message })
+					handlers.add(handler)
+				},
+				unsubscribe: async () => void (handler && handlers.delete(handler))
+			}
+		},
+		xadd: async (key, _id, entries) => {
+			streams.set(key, [
+				...(streams.get(key) ?? []),
+				[`${++seq}-0`, ['d', entries.d ?? '']]
+			])
+		},
+		xread: async (key, id) => {
+			xreads++
+			const after = Number(id.split('-')[0])
+			const entries = (streams.get(key) ?? [])
+				.filter(([entryId]) => Number(entryId.split('-')[0]) > after)
+				.map(([entryId, [field, value]]) => [
+					entryId,
+					[field, parsed(value ?? '')]
+				])
+			return entries.length ? [[key, entries]] : []
+		}
+	})
+	return { client, xreads: () => xreads }
+}
+
+test('upstashRedis takes an @upstash/redis client as is', () => {
+	// Constructing the client sends nothing; this pins the structural type.
+	expect(
+		upstashRedis(new Redis({ url: 'https://example.invalid', token: 't' }))
+	).toBeDefined()
+})
+
+test('upstashRedis: cross-replica reconnect and stop by polling', async () => {
+	const upstash = fakeUpstash()
+	let created = 0
+	const replica = (replicaId: string) => {
+		const streams = createResumableStreams({
+			redis: upstashRedis(
+				() => {
+					created++
+					return upstash.client()
+				},
+				{ pollMs: 5 }
+			),
+			replicaId,
+			logger: { warn() {} }
+		})
+		open.push(streams)
+		return streams
+	}
+	const a = replica('a')
+	const b = replica('b')
+	expect(created).toBe(0) // the client is created on first use
+	const turn = source()
+	const response = await a.start({ threadKey: 't', ...turn })
+	turn.begin()
+	turn.text('Hel')
+	await tick()
+	const reading = collect(await b.reconnect('t'))
+	const pollsBefore = upstash.xreads()
+	await tick(30)
+	expect(upstash.xreads()).toBeGreaterThan(pollsBefore + 2) // no blocking XREAD: it polls
+	turn.text('lo')
+	turn.end()
+	const chunks = await reading
+	expect(textOf(chunks)).toBe('Hello')
+	expect(chunks.at(-1)?.type).toBe('finish')
+	await collect(response)
+
+	const second = source()
+	const running = await a.start({ threadKey: 'u', ...second })
+	second.begin()
+	await tick()
+	expect(await b.stop('u')).toBe(true)
+	expect((await collect(running)).at(-1)?.type).toBe('abort')
 })

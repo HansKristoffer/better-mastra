@@ -51,6 +51,21 @@ await resumable.close()
 
 Use `ioRedis(client)` for ioredis. Both adapters open extra connections with `duplicate()`: one subscriber per replica, and one per cross-replica reader (for `XREAD BLOCK`).
 
+Use `upstashRedis(client)` for `@upstash/redis`. Upstash has no blocking `XREAD`, so a cross-replica reader polls every `pollMs` (200 ms); pass `() => Redis.fromEnv()` to create the client on first use.
+
+An app that already holds a per-thread lock can keep the locator in the lock's value with `locator: { read, write, expire }`. The locator then lives exactly as long as the lock. `expire` renews it while the turn runs and shortens it to `graceMs` after; leave it out when the lock renews itself:
+
+```ts
+createResumableStreams({
+	redis: upstashRedis(() => Redis.fromEnv()),
+	locator: {
+		read: (threadId) => readLockValue(threadId), // what follows the lock token
+		write: (threadId, locator, ttlMs) => writeLockValue(threadId, locator, ttlMs),
+		expire: (threadId, ttlMs) => redis.pexpire(lockKey(threadId), ttlMs)
+	}
+})
+```
+
 How it works: chunks are buffered in memory (consecutive `text-delta`s merged) and fanned out to subscribers. A per-thread locator `{ streamId, owner }` in Redis says which replica owns the turn. Reconnecting to the owner is served from memory. Reconnecting to another replica publishes a spill request on the owner's control channel; the owner writes its buffer in one `XADD`, then mirrors new chunks in 50 ms batches (first one immediate) until a terminal marker, and the reader follows with `XREAD BLOCK`.
 
 Redis ops for a ~1,500-chunk turn:

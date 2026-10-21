@@ -216,6 +216,7 @@
 		"@types/pg": "^8.23.1",
 		"@types/react": "^19.3.0",
 		"@types/react-dom": "^19.3.0",
+		"@upstash/redis": "^1.39.0",
 		"ai": "^7.0.143",
 		"hono": "^4.12.32",
 		"ioredis": "^5.11.1",

@@ -1,8 +1,13 @@
 import type { UIMessageChunk } from 'ai'
 import type { BlockingReader, ResumableRedis, StreamEntry } from './redis.js'
 
-export { bunRedis, ioRedis } from './redis.js'
-export type { BlockingReader, ResumableRedis, StreamEntry } from './redis.js'
+export { bunRedis, ioRedis, upstashRedis } from './redis.js'
+export type {
+	BlockingReader,
+	ResumableRedis,
+	StreamEntry,
+	UpstashRedisLike
+} from './redis.js'
 
 export interface ResumableStreams {
 	/** Takes over the model stream and returns the response stream for the request that started the turn. */
@@ -26,8 +31,28 @@ export interface ResumableLogger {
 	warn(message: string, attributes?: Record<string, unknown>): void
 }
 
+/**
+ * Where a thread's locator lives (which replica runs its turn), as an opaque
+ * string. Defaults to a key of its own in `redis`. An app with its own
+ * per-thread lock can keep the locator in the lock's value instead, so it
+ * lives exactly as long as the lock and costs no extra key.
+ */
+export interface ResumableLocator {
+	read(threadKey: string): Promise<string | null>
+	/** Called when a turn starts, with `locatorTtlMs`. */
+	write(threadKey: string, locator: string, ttlMs: number): Promise<void>
+	/**
+	 * Renews the locator while the turn runs (every third of `locatorTtlMs`),
+	 * then shortens it to `graceMs` when the turn ends. Leave it out when the
+	 * app's lock owns the lifetime: the locator is gone when the lock is released.
+	 */
+	expire?(threadKey: string, ttlMs: number): Promise<void>
+}
+
 export interface ResumableStreamsOptions {
 	redis: ResumableRedis
+	/** Where the thread locator is kept. Default: `${keyPrefix}loc:<threadKey>` in `redis`. */
+	locator?: ResumableLocator
 	/** How long a finished turn stays resumable. Default 30 s. */
 	graceMs?: number
 	/** Above this the turn keeps running but new reconnects get 204. Default 2 MB. */
@@ -137,6 +162,12 @@ export function createResumableStreams(
 	const runs = new Map<string, LiveRun>()
 	const readers = new Set<BlockingReader>()
 	const locatorKey = (threadKey: string) => `${keyPrefix}loc:${threadKey}`
+	const locatorStore: ResumableLocator = options.locator ?? {
+		read: (threadKey) => redis.get(locatorKey(threadKey)),
+		write: (threadKey, locator, ttlMs) =>
+			redis.set(locatorKey(threadKey), locator, ttlMs),
+		expire: (threadKey, ttlMs) => redis.pexpire(locatorKey(threadKey), ttlMs)
+	}
 	const controlChannel = (owner: string) => `${keyPrefix}ctl:${owner}`
 	let unsubscribe: Promise<(() => Promise<void>) | undefined> | undefined
 	let closed = false
@@ -223,7 +254,8 @@ export function createResumableStreams(
 		run.spillKeys = []
 		for (const listener of run.listeners) listener(null)
 		run.listeners.clear()
-		void soft('pexpire', redis.pexpire(locatorKey(run.threadKey), graceMs))
+		if (locatorStore.expire)
+			void soft('pexpire', locatorStore.expire(run.threadKey, graceMs))
 		run.evictTimer = setTimeout(() => {
 			if (runs.get(run.threadKey) === run) runs.delete(run.threadKey)
 		}, graceMs)
@@ -313,9 +345,7 @@ export function createResumableStreams(
 					while (!entries.length) {
 						entries = await reader.xread(key, lastId, idleTimeoutMs)
 						if (entries.length) break
-						const current = parse<Locator>(
-							await redis.get(locatorKey(threadKey))
-						)
+						const current = parse<Locator>(await locatorStore.read(threadKey))
 						if (current?.streamId === locator.streamId) continue
 						controller.enqueue(ownerGone)
 						throw new Error('owner gone')
@@ -363,17 +393,16 @@ export function createResumableStreams(
 			const locator: Locator = { streamId: run.streamId, owner: replicaId }
 			void soft(
 				'set',
-				redis.set(locatorKey(threadKey), JSON.stringify(locator), locatorTtlMs)
+				locatorStore.write(threadKey, JSON.stringify(locator), locatorTtlMs)
 			)
-			run.renewTimer = setInterval(
-				() =>
-					void soft(
-						'pexpire',
-						redis.pexpire(locatorKey(threadKey), locatorTtlMs)
-					),
-				locatorTtlMs / 3
-			)
-			run.renewTimer.unref?.()
+			const { expire } = locatorStore
+			if (expire) {
+				run.renewTimer = setInterval(
+					() => void soft('pexpire', expire(threadKey, locatorTtlMs)),
+					locatorTtlMs / 3
+				)
+				run.renewTimer.unref?.()
+			}
 			const response = local(run)!
 			void pump(run, stream)
 			return response
@@ -383,7 +412,7 @@ export function createResumableStreams(
 			const run = runs.get(threadKey)
 			// Active turn on this replica: memory only, zero Redis ops.
 			if (run && !run.done) return local(run, signal)
-			const raw = await soft('get', redis.get(locatorKey(threadKey)))
+			const raw = await soft('get', locatorStore.read(threadKey))
 			if (raw === undefined) return run ? local(run, signal) : null
 			const locator = parse<Locator>(raw)
 			// A finished turn in grace is only current if no newer turn took the thread.
@@ -400,7 +429,7 @@ export function createResumableStreams(
 				return true
 			}
 			const locator = parse<Locator>(
-				await soft('get', redis.get(locatorKey(threadKey)))
+				await soft('get', locatorStore.read(threadKey))
 			)
 			if (!locator || locator.owner === replicaId) return false
 			const abort: Control = { type: 'abort', streamId: locator.streamId }
