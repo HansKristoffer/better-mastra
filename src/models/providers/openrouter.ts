@@ -7,11 +7,17 @@ import {
 	thoughtSignatureRecovery
 } from '../openrouter-compat.js'
 import {
+	defaultOpenRouterRouting,
 	extractOpenRouterCostUsd,
 	openRouterReasoningOptions,
 	type OpenRouterRouting
 } from '../openrouter.js'
-import { type Logger, type LlmRoute, reportedCost } from '../route.js'
+import {
+	type Logger,
+	type LlmRoute,
+	reportedCost,
+	silentLogger
+} from '../route.js'
 
 /** Call options that would replace our routing, model or usage reporting in the request body. */
 const ROUTING_OVERRIDES: ReadonlySet<string> = new Set([
@@ -25,13 +31,16 @@ const ROUTING_OVERRIDES: ReadonlySet<string> = new Set([
  * OpenRouter with usage accounting on every call, upstream routing from
  * `routing`, and the Batch API as a second transport. Call-level options that
  * would leave the routing are dropped, so no caller can leave a pinned
- * (zero-data-retention) upstream.
+ * (zero-data-retention) upstream. Synchronous, so an app can build its
+ * models at import time: `openRouterRoute({ apiKey }).model('vendor/model')`.
  */
 export function openRouterRoute(input: {
 	apiKey: string
-	routing: OpenRouterRouting
-	logger: Logger
+	/** Defaults to `defaultOpenRouterRouting`. */
+	routing?: OpenRouterRouting
+	logger?: Logger
 }): LlmRoute {
+	const routing = input.routing ?? defaultOpenRouterRouting
 	const direct = createOpenRouter({
 		apiKey: input.apiKey,
 		compatibility: 'strict'
@@ -39,14 +48,17 @@ export function openRouterRoute(input: {
 	const batch = createOpenRouter({
 		apiKey: input.apiKey,
 		compatibility: 'strict',
-		fetch: createBatchFetch(input)
+		fetch: createBatchFetch({
+			apiKey: input.apiKey,
+			logger: input.logger ?? silentLogger
+		})
 	})
 
 	const build = (provider: typeof direct, modelId: string) => {
-		const routing = input.routing(modelId)
+		const upstream = routing(modelId)
 		const model = provider(modelId, {
 			usage: { include: true },
-			...(routing ? { provider: routing } : {})
+			...(upstream ? { provider: upstream } : {})
 		})
 		return wrapLanguageModel({
 			model,
