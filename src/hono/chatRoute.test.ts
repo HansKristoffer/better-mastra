@@ -5,7 +5,7 @@ import { Hono } from 'hono'
 import type { ChatTurnRequest } from '../turn/runChatTurn.js'
 import { refused } from '../turn/runChatTurn.js'
 import type { ChatTurnBody } from '../turn/types.js'
-import { createChatRoute } from './chatRoute.js'
+import { type ChatRouteOptions, createChatRoute } from './chatRoute.js'
 import type { ResumableStreams } from './types.js'
 
 const THREAD = { threadId: 'thread-1', resourceId: 'org:user' }
@@ -23,6 +23,7 @@ function answer(): ReadableStream<UIMessageChunk> {
 function appWith(options: {
 	readonly resumable?: ResumableStreams
 	readonly seen?: ChatTurnRequest<string, ChatTurnBody>[]
+	readonly refusals?: ChatRouteOptions<string, ChatTurnBody>['refusals']
 }) {
 	return new Hono().route(
 		'/',
@@ -39,6 +40,7 @@ function appWith(options: {
 					? refused('turn_in_progress')
 					: { kind: 'stream', threadKey: THREAD, stream: answer() }
 			},
+			...(options.refusals && { refusals: options.refusals }),
 			...(options.resumable && {
 				resumable: options.resumable,
 				ownsThread: async (threadId, auth) =>
@@ -118,5 +120,41 @@ describe('createChatRoute', () => {
 		expect(await stopped.json()).toEqual({ stopped: true })
 		expect(seen[0]?.signal.aborted).toBe(true)
 		expect((await app.request('/chat/thread-2/stream', auth)).status).toBe(404)
+	})
+
+	test("should answer the route's own refusals in the app's codes", async () => {
+		const resumable: ResumableStreams = {
+			start: async ({ stream }) => stream,
+			reconnect: async () => null,
+			stop: async () => false,
+			close: async () => {}
+		}
+		const app = appWith({
+			resumable,
+			refusals: {
+				not_found: { code: 'workspace_forbidden', status: 403 },
+				invalid_request: { code: 'bad_body', status: 422 }
+			}
+		})
+		const auth = { headers: { authorization: 'user' } }
+
+		const stranger = await app.request('/chat/thread-2/stream', auth)
+		const badBody = await app.request(post({ nope: true }))
+		const noCaller = await app.request(
+			new Request('http://test/chat', { method: 'POST' })
+		)
+
+		expect([stranger.status, await stranger.json()]).toEqual([
+			403,
+			{ error: 'workspace_forbidden' }
+		])
+		expect([badBody.status, await badBody.json()]).toEqual([
+			422,
+			{ error: 'bad_body' }
+		])
+		expect([noCaller.status, await noCaller.json()]).toEqual([
+			401,
+			{ error: 'unauthenticated' }
+		])
 	})
 })
