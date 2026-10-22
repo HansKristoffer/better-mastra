@@ -1,3 +1,4 @@
+import { promiseTimeout, safeJsonParse } from 'hanzio'
 /**
  * The chat's fetch: the platform's fetch (`expo/fetch` on React Native, which
  * streams a body) with the headers the app adds, one connect retry for a
@@ -100,7 +101,7 @@ export class ChatConnectionLostError extends TypeError {
 export function createChatFetch(options: ChatFetchOptions = {}): ChatFetch {
 	const baseFetch: ChatFetch =
 		options.fetch ?? ((input, init) => globalThis.fetch(input, init))
-	const delay = options.delay ?? waitFor
+	const delay = options.delay ?? ((ms: number) => promiseTimeout(ms))
 	const connectDelay = options.retry?.connect ?? CHAT_CONNECT_RETRY_DELAY_MS
 	const drainingDelay = options.retry?.draining ?? CHAT_DRAINING_RETRY_DELAY_MS
 
@@ -137,7 +138,8 @@ export function createChatFetch(options: ChatFetchOptions = {}): ChatFetch {
 		}
 
 		const text = await readText(response)
-		const body = parseJson(text)
+		const parsed = safeJsonParse(text)
+		const body = parsed.ok ? parsed.data : undefined
 
 		if (
 			retries === 0 &&
@@ -267,14 +269,6 @@ async function readText(response: Response): Promise<string> {
 	}
 }
 
-function parseJson(text: string): unknown {
-	try {
-		return JSON.parse(text)
-	} catch {
-		return undefined
-	}
-}
-
 function isAbort(error: unknown, signal: SignalLike): boolean {
 	return (
 		signal?.aborted === true ||
@@ -292,8 +286,4 @@ function throwIfAborted(signal: SignalLike): void {
 	error.name = 'AbortError'
 
 	throw error
-}
-
-function waitFor(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms))
 }

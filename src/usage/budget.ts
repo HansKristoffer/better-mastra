@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { isBatchingModelCalls } from '../models/openrouter-batch.js'
+import { anySignal } from 'hanzio'
 
 /**
  * Shared capacity for one provider lane, usually across a fleet (a Redis
@@ -181,9 +182,7 @@ export function createModelBudget(
 		}
 		const metrics = stats
 		const limit = limitFor(call.provider)
-		const signal = call.signal
-			? AbortSignal.any([scope.signal, call.signal])
-			: scope.signal
+		const signal = anySignal(scope.signal, call.signal)
 		return runModelCall(() =>
 			limit(async () => {
 				const executingAt = performance.now()

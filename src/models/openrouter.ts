@@ -1,6 +1,6 @@
 import type { SharedV4ProviderOptions } from '@ai-sdk/provider'
 import type { LlmEffort } from './effort.js'
-import { isRecord } from './route.js'
+import { isRecord } from 'hanzio'
 
 /** OpenRouter's `provider` request field: which upstreams may serve a model. */
 export type OpenRouterProviderRouting = {

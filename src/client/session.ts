@@ -29,7 +29,7 @@ import {
 	lastAssistantMessageIsCompleteWithApprovalResponses,
 	type UIMessage
 } from 'ai'
-import { typedSwitch } from 'hanzio'
+import { typedSwitch, toError } from 'hanzio'
 
 import {
 	type ClientAction,
@@ -1003,8 +1003,4 @@ async function settle(posting: void | PromiseLike<void> | null): Promise<void> {
 	} catch {
 		// The server reads the call as unanswered.
 	}
-}
-
-function toError(reason: unknown): Error {
-	return reason instanceof Error ? reason : new Error(String(reason))
 }

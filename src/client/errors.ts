@@ -8,6 +8,7 @@ import { APICallError } from 'ai'
 
 import { type ChatErrorResponse, ChatConnectionLostError } from './fetch.js'
 import type { ChatRefusal } from './turn.js'
+import { safeJsonParse } from 'hanzio'
 
 // TYPES
 
@@ -60,16 +61,11 @@ export function readErrorResponse(
 		return undefined
 	}
 
-	let body: unknown
-
-	try {
-		body =
-			error.responseBody === undefined
-				? undefined
-				: JSON.parse(error.responseBody)
-	} catch {
-		body = undefined
-	}
+	const parsed =
+		error.responseBody === undefined
+			? undefined
+			: safeJsonParse(error.responseBody)
+	const body = parsed?.ok ? parsed.data : undefined
 
 	return { status: error.statusCode, body }
 }

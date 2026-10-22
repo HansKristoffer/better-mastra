@@ -12,7 +12,7 @@ import type {
 	SharedV4ProviderOptions
 } from '@ai-sdk/provider'
 import { wrapLanguageModel } from 'ai'
-import { isRecord } from './route.js'
+import { isRecord } from 'hanzio'
 
 /** Which provider-options key carries the cache marker. */
 export type CacheProvider = 'anthropic' | 'openrouter'

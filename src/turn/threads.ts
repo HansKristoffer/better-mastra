@@ -33,6 +33,7 @@ import {
 import { listPendingChanges, type PendingChange } from './changes.js'
 import { toUserFacingMessage } from './stream.js'
 import type { ThreadKey } from './types.js'
+import { safeJsonParse } from 'hanzio'
 
 export interface ThreadSummary {
 	readonly id: string
@@ -538,11 +539,10 @@ function toAbandonedRun(run: WorkflowRun): AbandonedRun {
 function parseSnapshot(
 	snapshot: string
 ): Parameters<typeof getSnapshotMemoryInfo>[0] {
-	try {
-		return JSON.parse(snapshot)
-	} catch {
-		return undefined
-	}
+	const parsed =
+		safeJsonParse<Parameters<typeof getSnapshotMemoryInfo>[0]>(snapshot)
+
+	return parsed.ok ? parsed.data : undefined
 }
 
 function toUiMessages(

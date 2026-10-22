@@ -1,5 +1,6 @@
 import type { UIMessageChunk } from 'ai'
 import type { BlockingReader, ResumableRedis, StreamEntry } from './redis.js'
+import { getErrorMessage, safeJsonParse } from 'hanzio'
 
 export { bunRedis, ioRedis, upstashRedis } from './redis.js'
 export type {
@@ -133,12 +134,7 @@ function closeQuietly(
 }
 
 function parse<T>(raw: string | null | undefined): T | null {
-	if (!raw) return null
-	try {
-		return JSON.parse(raw) as T
-	} catch {
-		return null
-	}
+	return raw ? safeJsonParse<T>(raw).data : null
 }
 
 export function createResumableStreams(
@@ -275,7 +271,7 @@ export function createResumableStreams(
 			if (!run.abort.signal.aborted)
 				push(run, {
 					type: 'error',
-					errorText: error instanceof Error ? error.message : String(error)
+					errorText: getErrorMessage(error)
 				})
 		} finally {
 			finish(run)

@@ -51,10 +51,6 @@ export function reportedCost(extract: (step: unknown) => number | undefined) {
 	}
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 /** The logger the library writes to; anything with `info` and `warn` fits (pino, console). */
 export type Logger = {
 	info: (message: string, attributes?: Record<string, unknown>) => void

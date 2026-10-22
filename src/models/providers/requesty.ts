@@ -3,7 +3,8 @@ import {
 	type MetadataExtractor
 } from '@ai-sdk/openai-compatible'
 import type { LlmEffort } from '../effort.js'
-import { isRecord, type LlmRoute, reportedCost } from '../route.js'
+import { type LlmRoute, reportedCost } from '../route.js'
+import { isRecord } from 'hanzio'
 
 export function requestyRoute(apiKey: string): LlmRoute {
 	const provider = createOpenAICompatible({

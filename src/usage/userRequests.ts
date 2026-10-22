@@ -5,6 +5,7 @@
  */
 
 import { createHmac } from 'node:crypto'
+import { raceAbort } from 'hanzio'
 
 /** One counting window: at most `limit` requests in `seconds`. */
 export interface UserRequestWindow {
@@ -74,19 +75,15 @@ export async function admitUserRequest(input: {
 
 	try {
 		// The deadline holds even for a client that ignores the signal.
-		const result = await Promise.race([
+		const result = await raceAbort(
 			input.runScript(
 				USER_REQUEST_ADMISSION_SCRIPT,
 				input.windows.map((window) => `${prefix}:${window.name}`),
 				input.windows.flatMap((window) => [window.limit, window.seconds]),
 				signal
 			),
-			new Promise<never>((_, reject) =>
-				signal.addEventListener('abort', () => reject(signal.reason), {
-					once: true
-				})
-			)
-		])
+			signal
+		)
 
 		return result === 1
 			? { kind: 'admitted' }

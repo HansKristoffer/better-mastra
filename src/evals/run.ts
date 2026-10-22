@@ -16,6 +16,7 @@ import {
 	type EvalTurn
 } from './case.js'
 import { DRY_RUN_KEY, dryRunResult } from '../tools/dryRun.js'
+import { getErrorMessage } from 'hanzio'
 
 /**
  * Request-context key an eval run sets: write tools wrapped in
@@ -227,9 +228,7 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 				} catch (error) {
 					turn.error = abort.signal.aborted
 						? `timed out after ${timeoutMs / 1000}s`
-						: error instanceof Error
-							? error.message
-							: String(error)
+						: getErrorMessage(error)
 				} finally {
 					clearTimeout(timeout)
 				}

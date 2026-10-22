@@ -1,3 +1,4 @@
+import { isRecord, safeJsonParse } from 'hanzio'
 /**
  * Soniox's real-time transcription protocol as a dictation speaks it: the
  * start request, float samples as 16-bit PCM, and folding each response into
@@ -128,17 +129,9 @@ export function applySonioxResponse(
 }
 
 function parseJsonObject(message: string): Record<string, unknown> | undefined {
-	try {
-		const parsed: unknown = JSON.parse(message)
+	const parsed = safeJsonParse(message)
 
-		return typeof parsed === 'object' &&
-			parsed !== null &&
-			!Array.isArray(parsed)
-			? (parsed as Record<string, unknown>)
-			: undefined
-	} catch {
-		return undefined
-	}
+	return parsed.ok && isRecord(parsed.data) ? parsed.data : undefined
 }
 
 function toToken(token: unknown): SonioxToken[] {

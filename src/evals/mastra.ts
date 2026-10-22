@@ -24,7 +24,7 @@ import type {
 	DatasetItemPayload,
 	DatasetItemToolMock
 } from '@mastra/core/storage'
-import { typedSwitch } from 'hanzio'
+import { isRecord, typedSwitch } from 'hanzio'
 import type { EvalCase, EvalToolCall, EvalTrace } from './case.js'
 import { checkTrace, type EvalCheckOptions } from './checks.js'
 
@@ -455,12 +455,7 @@ export function replayRecordedTools<T extends Record<string, Executable>>(
 	const matcher = new ToolMockMatcher(
 		reads.map((read) => ({
 			toolName: read.toolName,
-			args:
-				typeof read.input === 'object' &&
-				read.input !== null &&
-				!Array.isArray(read.input)
-					? (read.input as Record<string, unknown>)
-					: {},
+			args: isRecord(read.input) ? read.input : {},
 			output: read.output,
 			matchArgs
 		})),
@@ -468,12 +463,15 @@ export function replayRecordedTools<T extends Record<string, Executable>>(
 	)
 	const unmatched: { toolName: string; input: unknown; code: string }[] = []
 	const serve = (toolName: string) => async (input: unknown) => {
-		const resolution = matcher.resolve(toolName, input)
-		if (resolution.kind === 'serve') return resolution.output
-		const code =
-			resolution.kind === 'fail' ? resolution.code : 'TOOL_MOCK_NOT_DECLARED'
-		unmatched.push({ toolName, input, code })
-		return { error: `No recorded read matches this call (${code}).` }
+		const unmatchedRead = (code: string) => {
+			unmatched.push({ toolName, input, code })
+			return { error: `No recorded read matches this call (${code}).` }
+		}
+		return typedSwitch(matcher.resolve(toolName, input), 'kind', {
+			serve: (serve) => serve.output,
+			fail: (fail) => unmatchedRead(fail.code),
+			live: () => unmatchedRead('TOOL_MOCK_NOT_DECLARED')
+		})
 	}
 	return {
 		// A copy with the same prototype and fields, so the real tool stays as it was.

@@ -23,6 +23,7 @@ import {
 	type RunUsage,
 	type StreamTextUsage
 } from './stream.js'
+import { timeoutSignal } from 'hanzio'
 
 /** One metered model run, handed to the app's sink with the caller's context. */
 export type UsageRecord<TContext> = StreamTextUsage & {
@@ -105,8 +106,7 @@ function isCutOffAnswer(error: unknown) {
 /** The caller's signal, bounded by `timeoutMs` when set. Each attempt gets the full budget. */
 function callSignal(signal: AbortSignal | undefined, timeoutMs?: number) {
 	if (!timeoutMs) return signal
-	const timeout = AbortSignal.timeout(timeoutMs)
-	return signal ? AbortSignal.any([signal, timeout]) : timeout
+	return timeoutSignal(timeoutMs, signal)
 }
 
 type CallOptions<TContext> = {

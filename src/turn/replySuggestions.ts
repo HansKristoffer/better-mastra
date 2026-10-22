@@ -14,6 +14,7 @@ import type { LanguageModel, UIMessageChunk } from 'ai'
 import { z } from 'zod'
 
 import { asAgentModel } from './agent.js'
+import { timeoutSignal } from 'hanzio'
 
 /** The data part's type on the answer's stream. */
 export const REPLY_SUGGESTIONS_PART = 'data-reply-suggestions'
@@ -92,10 +93,7 @@ export async function sendReplySuggestions(input: {
 	readonly send: (chunk: UIMessageChunk) => void
 	readonly onError?: (error: unknown) => void
 }): Promise<void> {
-	const abortSignal = AbortSignal.any([
-		input.signal,
-		AbortSignal.timeout(input.timeoutMs ?? 6_000)
-	])
+	const abortSignal = timeoutSignal(input.timeoutMs ?? 6_000, input.signal)
 
 	try {
 		const stream = await input.mastra.getAgentById(input.agentId).stream(
