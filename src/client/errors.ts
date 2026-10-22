@@ -5,10 +5,10 @@
  */
 
 import { APICallError } from 'ai'
+import { safeJsonParse } from 'hanzio'
 
 import { type ChatErrorResponse, ChatConnectionLostError } from './fetch.js'
 import type { ChatRefusal } from './turn.js'
-import { safeJsonParse } from 'hanzio'
 
 // TYPES
 

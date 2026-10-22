@@ -8,6 +8,7 @@ import {
 	type UIMessage,
 	type UIMessageChunk
 } from 'ai'
+import { getErrorMessage, pMap } from 'hanzio'
 import {
 	caseTurn,
 	type EvalCase,
@@ -16,7 +17,6 @@ import {
 	type EvalTurn
 } from './case.js'
 import { DRY_RUN_KEY, dryRunResult } from '../tools/dryRun.js'
-import { getErrorMessage, pMap } from 'hanzio'
 
 /**
  * Request-context key an eval run sets: write tools wrapped in

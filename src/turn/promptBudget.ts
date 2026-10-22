@@ -7,9 +7,9 @@
 
 import type { ToolsInput } from '@mastra/core/agent'
 import { makeCoreToolV5 } from '@mastra/core/utils'
+import { sumBy } from 'hanzio'
 
 import type { ChatTurnPlan } from './types.js'
-import { sumBy } from 'hanzio'
 
 export interface PromptBudget {
 	readonly instructionsChars: number

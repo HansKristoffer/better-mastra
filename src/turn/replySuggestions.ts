@@ -12,9 +12,9 @@ import type { Mastra } from '@mastra/core/mastra'
 import { RequestContext } from '@mastra/core/request-context'
 import type { LanguageModel, UIMessageChunk } from 'ai'
 import { z } from 'zod'
+import { timeoutSignal } from 'hanzio'
 
 import { asAgentModel } from './agent.js'
-import { timeoutSignal } from 'hanzio'
 
 /** The data part's type on the answer's stream. */
 export const REPLY_SUGGESTIONS_PART = 'data-reply-suggestions'

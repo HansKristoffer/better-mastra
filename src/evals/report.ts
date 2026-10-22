@@ -1,6 +1,7 @@
+import { groupBy, mapValues, recordFromKeys, sumBy } from 'hanzio'
+
 import type { EvalTrace } from './case.js'
 import type { EvalCheck } from './checks.js'
-import { groupBy, mapValues, recordFromKeys, sumBy } from 'hanzio'
 
 export type EvalRun<Verdict = unknown> = {
 	trace: EvalTrace

@@ -3,8 +3,8 @@ import type {
 	RetentionConfig
 } from '@mastra/core/storage'
 import type { Pool, PoolConfig } from 'pg'
-import type { Logger } from '../models/route.js'
 import { retry } from 'hanzio'
+import type { Logger } from '../models/route.js'
 
 /** A Mastra store with the calls a process needs around it. */
 export type MastraStorage = {

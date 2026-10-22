@@ -6,6 +6,7 @@ import {
 	NoObjectGeneratedError
 } from 'ai'
 import type { z } from 'zod'
+import { startTimer, timeoutSignal } from 'hanzio'
 import { anthropicSafeZodSchema } from '../models/anthropic-safe-schema.js'
 import {
 	type AiBillingError,
@@ -23,7 +24,6 @@ import {
 	type RunUsage,
 	type StreamTextUsage
 } from './stream.js'
-import { startTimer, timeoutSignal } from 'hanzio'
 
 /** One metered model run, handed to the app's sink with the caller's context. */
 export type UsageRecord<TContext> = StreamTextUsage & {

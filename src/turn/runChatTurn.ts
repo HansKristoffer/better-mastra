@@ -16,6 +16,7 @@ import {
 	type RequestContext
 } from '@mastra/core/request-context'
 import type { UIMessage, UIMessageChunk } from 'ai'
+import { once } from 'hanzio'
 
 import {
 	classifyTurnChanges,
@@ -47,7 +48,6 @@ import {
 	rememberTurnPlan,
 	type ThreadKey
 } from './types.js'
-import { once } from 'hanzio'
 
 export interface ChatTurnRequest<TAuth, TBody extends ChatTurnBody> {
 	readonly auth: TAuth

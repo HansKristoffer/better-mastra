@@ -1,8 +1,8 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { wrapLanguageModel } from 'ai'
+import { clamp } from 'hanzio'
 import type { LlmEffort } from '../effort.js'
 import type { LlmRoute } from '../route.js'
-import { clamp } from 'hanzio'
 
 /**
  * Inception's Mercury diffusion models over their OpenAI-compatible chat API.

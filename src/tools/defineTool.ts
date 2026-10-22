@@ -9,10 +9,10 @@
 
 import type { RequestContext } from '@mastra/core/request-context'
 import { createTool, type Tool } from '@mastra/core/tools'
+import { omit } from 'hanzio'
 
 import { dryRunResult, isDryRun, isDryRunResult } from './dryRun.js'
 import { withHiddenInputs } from './toolInputSchema.js'
-import { omit } from 'hanzio'
 
 type CreateToolOptions = Parameters<typeof createTool>[0]
 

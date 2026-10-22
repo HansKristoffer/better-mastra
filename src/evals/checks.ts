@@ -1,3 +1,5 @@
+import { sortBy, sumBy } from 'hanzio'
+
 import {
 	caseTurn,
 	type EvalCase,
@@ -5,7 +7,6 @@ import {
 	type EvalTrace,
 	type EvalTurn
 } from './case.js'
-import { sortBy, sumBy } from 'hanzio'
 
 export type EvalCheck = {
 	check: string

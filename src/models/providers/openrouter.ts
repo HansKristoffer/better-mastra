@@ -1,6 +1,7 @@
 import type { LanguageModelV4CallOptions } from '@ai-sdk/provider'
 import { createOpenRouter } from '@openrouter/ai-sdk-provider'
 import { wrapLanguageModel } from 'ai'
+import { omit } from 'hanzio'
 import { createBatchFetch } from '../openrouter-batch.js'
 import {
 	openRouterAnthropicCompatMiddleware,
@@ -18,7 +19,6 @@ import {
 	reportedCost,
 	silentLogger
 } from '../route.js'
-import { omit } from 'hanzio'
 
 /** Call options that would replace our routing, model or usage reporting in the request body. */
 const ROUTING_OVERRIDES = ['model', 'models', 'provider', 'usage']

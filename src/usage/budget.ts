@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { isBatchingModelCalls } from '../models/openrouter-batch.js'
 import { anySignal, startTimer } from 'hanzio'
+import { isBatchingModelCalls } from '../models/openrouter-batch.js'
 
 /**
  * Shared capacity for one provider lane, usually across a fleet (a Redis

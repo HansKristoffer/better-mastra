@@ -1,8 +1,8 @@
 import type { MastraMemory } from '@mastra/core/memory'
 import type { UIMessage } from 'ai'
+import { normalizeWhitespace } from 'hanzio'
 
 import type { ThreadKey } from './types.js'
-import { normalizeWhitespace } from 'hanzio'
 
 const TITLE_MAX_WORDS = 6
 const TITLE_MAX_LENGTH = 64

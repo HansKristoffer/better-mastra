@@ -1,6 +1,7 @@
 import type { LanguageModelV4 } from '@ai-sdk/provider'
 import type { MastraLanguageModel } from '@mastra/core/agent'
 import { wrapLanguageModel } from 'ai'
+import { must } from 'hanzio'
 import { type ReasoningEffort, splitModelEffort } from './effort.js'
 import {
 	defaultOpenRouterRouting,
@@ -20,7 +21,6 @@ import {
 	type LlmRoute,
 	silentLogger
 } from './route.js'
-import { must } from 'hanzio'
 
 export const BUILT_IN_ROUTES = [
 	'vertex-eu',

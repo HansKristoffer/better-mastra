@@ -1,8 +1,9 @@
+import { getErrorMessage } from 'hanzio'
+
 import type { EvalCase, EvalTrace } from './case.js'
 import { checkTrace, type EvalCheck } from './checks.js'
 import type { EvalCaseResult, EvalReport, EvalRun } from './report.js'
 import { mapWithConcurrency } from './run.js'
-import { getErrorMessage } from 'hanzio'
 
 /** What `better-mastra-evals` loads from the app's `evals.config.ts` default export. */
 export type EvalConfig<C extends EvalCase<unknown> = EvalCase<unknown>> = {
