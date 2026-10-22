@@ -10,6 +10,7 @@
 
 import { createTool, type Tool } from '@mastra/core/tools'
 import { z } from 'zod'
+import { sortBy } from 'hanzio'
 
 // biome-ignore lint/suspicious/noExplicitAny: any Mastra tool, whatever its schemas.
 type AnyTool = Tool<any, any, any, any, any, any, any>
@@ -63,7 +64,7 @@ export function rankToolsByName(topK = 5): DeferredToolRanking {
 	return (query, entries) => {
 		const wanted = new Set(words(query))
 
-		return entries
+		const scored = entries
 			.map((entry) => {
 				const name = new Set(words(entry.name))
 				const description = new Set(words(entry.tool.description ?? ''))
@@ -77,7 +78,8 @@ export function rankToolsByName(topK = 5): DeferredToolRanking {
 				return { name: entry.name, score }
 			})
 			.filter(({ score }) => score > 0)
-			.sort((a, b) => b.score - a.score)
+
+		return sortBy(scored, { by: 'score', order: 'desc' })
 			.slice(0, topK)
 			.map(({ name }) => name)
 	}

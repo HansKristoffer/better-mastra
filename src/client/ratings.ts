@@ -1,3 +1,4 @@
+import { createEmitter } from 'hanzio'
 /**
  * The thumbs on answers: the stored ratings with the user's own on top. A
  * rating shows at once; one the server did not take goes back to the stored
@@ -29,7 +30,7 @@ export interface OptimisticRatings<R extends AnswerRating> {
 export function createOptimisticRatings<R extends AnswerRating>(
 	submit: (rating: R) => Promise<unknown>
 ): OptimisticRatings<R> {
-	const listeners = new Set<() => void>()
+	const changes = createEmitter<{ change: undefined }>()
 	let own: ReadonlyMap<string, R> = new Map()
 	let cache:
 		| {
@@ -42,9 +43,7 @@ export function createOptimisticRatings<R extends AnswerRating>(
 	const commit = (next: ReadonlyMap<string, R>) => {
 		own = next
 
-		for (const listener of listeners) {
-			listener()
-		}
+		changes.emit('change')
 	}
 
 	return {
@@ -75,12 +74,6 @@ export function createOptimisticRatings<R extends AnswerRating>(
 				}
 			}, rollBack)
 		},
-		subscribe: (listener) => {
-			listeners.add(listener)
-
-			return () => {
-				listeners.delete(listener)
-			}
-		}
+		subscribe: (listener) => changes.on('change', listener)
 	}
 }

@@ -1,5 +1,6 @@
 import type { MastraMemory } from '@mastra/core/memory'
 import type { UIMessage } from 'ai'
+import { normalizeWhitespace } from 'hanzio'
 
 import type { ThreadKey } from './types.js'
 
@@ -10,12 +11,10 @@ const TITLE_MAX_LENGTH = 64
 export function deriveThreadTitle(
 	messages: readonly UIMessage[]
 ): string | null {
-	const text = messages
+	const parts = messages
 		.find((message) => message.role === 'user')
 		?.parts.flatMap((part) => (part.type === 'text' ? [part.text] : []))
-		.join(' ')
-		.replace(/\s+/g, ' ')
-		.trim()
+	const text = parts && normalizeWhitespace(parts.join(' '))
 
 	if (!text) return null
 

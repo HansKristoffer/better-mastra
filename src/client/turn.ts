@@ -8,6 +8,7 @@
  */
 
 import type { FileUIPart } from 'ai'
+import { typedSwitch, typedSwitchGroup } from 'hanzio'
 
 import type { PendingChange } from './pending.js'
 
@@ -176,50 +177,37 @@ export function reduceChatTurn(
 		return unchanged(state)
 	}
 
-	switch (state.kind) {
-		case 'idle':
-			return reduceIdle(state, event)
-		case 'requesting':
-			return reduceRequesting(state, event)
-		case 'streaming':
-			return reduceStreaming(state, event)
-		case 'continuing':
-			return reduceContinuing(state, event)
-		case 'stopping':
-			return reduceStopping(state, event)
-		case 'waiting':
-			return reduceWaiting(state, event)
-		case 'failed':
-			return reduceFailed(state, event)
-	}
+	return typedSwitch(state, 'kind', {
+		idle: (idle) => reduceIdle(idle, event),
+		requesting: (requesting) => reduceRequesting(requesting, event),
+		streaming: (streaming) => reduceStreaming(streaming, event),
+		continuing: (continuing) => reduceContinuing(continuing, event),
+		stopping: (stopping) => reduceStopping(stopping, event),
+		waiting: (waiting) => reduceWaiting(waiting, event),
+		failed: (failed) => reduceFailed(failed, event)
+	})
 }
 
 /** Whether Try again is offered for a failure. The reducer ignores Try again when it is not. */
 export function canTryAgain(failure: ChatTurnFailure): boolean {
-	switch (failure.kind) {
-		case 'refused':
-			return failure.refusal.canTryAgain
-		case 'server-error':
-		case 'connection-lost':
-			return true
-		case 'follow-up-budget-exhausted':
-			return false
-	}
+	return typedSwitch(failure, 'kind', {
+		refused: (refused) => refused.refusal.canTryAgain,
+		'server-error': () => true,
+		'connection-lost': () => true,
+		'follow-up-budget-exhausted': () => false
+	})
 }
 
 /** Whether a user turn is running: Stop is offered and a new message queues. */
 export function isChatTurnBusy(state: ChatTurnState): boolean {
-	switch (state.kind) {
-		case 'requesting':
-		case 'streaming':
-		case 'continuing':
-		case 'stopping':
-			return true
-		case 'idle':
-		case 'waiting':
-		case 'failed':
-			return false
-	}
+	return typedSwitch(state.kind, {
+		...typedSwitchGroup(
+			state.kind,
+			['requesting', 'streaming', 'continuing', 'stopping'],
+			() => true
+		),
+		...typedSwitchGroup(state.kind, ['idle', 'waiting', 'failed'], () => false)
+	})
 }
 
 /**
@@ -231,28 +219,29 @@ function reduceIdle(
 	state: Extract<ChatTurnState, { kind: 'idle' }>,
 	event: ChatTurnEvent
 ): ChatTurnTransition {
-	switch (event.kind) {
-		case 'message-submitted':
-			return startUserTurn(event)
-		case 'changes-waiting':
-			return waitForUser(newUserTurn(), event.changes)
-		case 'approval-sent':
-			return refuseUnaskedRequest(state)
-		case 'stream-watched':
-			return watchStream('idle')
-		case 'regenerate-pressed':
-			return regenerate()
-		case 'content-shown':
-		case 'request-finished':
-		case 'error-response':
-		case 'connection-lost':
-		case 'follow-up-ready':
-		case 'stop-pressed':
-		case 'try-again-pressed':
-		case 'resume-pressed':
-		case 'nothing-to-resume':
-			return unchanged(state)
-	}
+	return typedSwitch(event, 'kind', {
+		'message-submitted': (message) => startUserTurn(message),
+		'changes-waiting': (waiting) => waitForUser(newUserTurn(), waiting.changes),
+		'approval-sent': () => refuseUnaskedRequest(state),
+		'stream-watched': () => watchStream('idle'),
+		'regenerate-pressed': () => regenerate(),
+		...typedSwitchGroup(
+			event,
+			'kind',
+			[
+				'content-shown',
+				'request-finished',
+				'error-response',
+				'connection-lost',
+				'follow-up-ready',
+				'stop-pressed',
+				'try-again-pressed',
+				'resume-pressed',
+				'nothing-to-resume'
+			],
+			() => unchanged(state)
+		)
+	})
 }
 
 function reduceRequesting(
@@ -261,47 +250,50 @@ function reduceRequesting(
 ): ChatTurnTransition {
 	const { userTurn } = state
 
-	switch (event.kind) {
-		case 'message-submitted':
-			return queueMessage(state, event)
-		case 'content-shown':
-			return {
-				state: {
-					kind: 'streaming',
-					userTurn: { ...userTurn, watching: false }
-				},
-				effects: NO_EFFECTS
-			}
-		case 'request-finished':
-			return finishRequest(userTurn, event.continues)
-		case 'changes-waiting':
-			return waitForUser(userTurn, event.changes)
-		case 'connection-lost':
+	return typedSwitch(event, 'kind', {
+		'message-submitted': (message) => queueMessage(state, message),
+		'content-shown': (): ChatTurnTransition => ({
+			state: {
+				kind: 'streaming',
+				userTurn: { ...userTurn, watching: false }
+			},
+			effects: NO_EFFECTS
+		}),
+		'request-finished': (finished) =>
+			finishRequest(userTurn, finished.continues),
+		'changes-waiting': (waiting) => waitForUser(userTurn, waiting.changes),
+		'connection-lost': (lost) => {
 			if (userTurn.watching !== false) {
 				return stopWatching(userTurn)
 			}
 
 			return userTurn.retried
 				? failUserTurn(userTurn, { kind: 'connection-lost' })
-				: retryRequest(state, event.resumable)
-		case 'error-response':
-			return userTurn.watching === false
-				? failUserTurn(userTurn, failureOf(event))
-				: stopWatching(userTurn)
-		case 'nothing-to-resume':
-			return userTurn.watching === false
+				: retryRequest(state, lost.resumable)
+		},
+		'error-response': (response) =>
+			userTurn.watching === false
+				? failUserTurn(userTurn, failureOf(response))
+				: stopWatching(userTurn),
+		'nothing-to-resume': () =>
+			userTurn.watching === false
 				? failUserTurn(userTurn, { kind: 'connection-lost' })
-				: stopWatching(userTurn)
-		case 'stop-pressed':
-			return abortRequest(userTurn)
-		case 'follow-up-ready':
-		case 'try-again-pressed':
-		case 'regenerate-pressed':
-		case 'approval-sent':
-		case 'resume-pressed':
-		case 'stream-watched':
-			return unchanged(state)
-	}
+				: stopWatching(userTurn),
+		'stop-pressed': () => abortRequest(userTurn),
+		...typedSwitchGroup(
+			event,
+			'kind',
+			[
+				'follow-up-ready',
+				'try-again-pressed',
+				'regenerate-pressed',
+				'approval-sent',
+				'resume-pressed',
+				'stream-watched'
+			],
+			() => unchanged(state)
+		)
+	})
 }
 
 /**
@@ -314,32 +306,34 @@ function reduceStreaming(
 ): ChatTurnTransition {
 	const { userTurn } = state
 
-	switch (event.kind) {
-		case 'message-submitted':
-			return queueMessage(state, event)
-		case 'request-finished':
-			return finishRequest(userTurn, event.continues)
-		case 'changes-waiting':
-			return waitForUser(userTurn, event.changes)
-		case 'connection-lost':
-			return event.resumable && !userTurn.retried
+	return typedSwitch(event, 'kind', {
+		'message-submitted': (message) => queueMessage(state, message),
+		'request-finished': (finished) =>
+			finishRequest(userTurn, finished.continues),
+		'changes-waiting': (waiting) => waitForUser(userTurn, waiting.changes),
+		'connection-lost': (lost) =>
+			lost.resumable && !userTurn.retried
 				? retryRequest(state, true)
-				: failUserTurn(userTurn, { kind: 'connection-lost' })
-		case 'nothing-to-resume':
-			return failUserTurn(userTurn, { kind: 'connection-lost' })
-		case 'error-response':
-			return failUserTurn(userTurn, failureOf(event))
-		case 'stop-pressed':
-			return abortRequest(userTurn)
-		case 'content-shown':
-		case 'follow-up-ready':
-		case 'try-again-pressed':
-		case 'regenerate-pressed':
-		case 'approval-sent':
-		case 'resume-pressed':
-		case 'stream-watched':
-			return unchanged(state)
-	}
+				: failUserTurn(userTurn, { kind: 'connection-lost' }),
+		'nothing-to-resume': () =>
+			failUserTurn(userTurn, { kind: 'connection-lost' }),
+		'error-response': (response) => failUserTurn(userTurn, failureOf(response)),
+		'stop-pressed': () => abortRequest(userTurn),
+		...typedSwitchGroup(
+			event,
+			'kind',
+			[
+				'content-shown',
+				'follow-up-ready',
+				'try-again-pressed',
+				'regenerate-pressed',
+				'approval-sent',
+				'resume-pressed',
+				'stream-watched'
+			],
+			() => unchanged(state)
+		)
+	})
 }
 
 /** Between two requests, while the session carries out client actions. No request is in flight. */
@@ -349,28 +343,32 @@ function reduceContinuing(
 ): ChatTurnTransition {
 	const { userTurn } = state
 
-	switch (event.kind) {
-		case 'message-submitted':
-			return queueMessage(state, event)
-		case 'follow-up-ready':
-			return userTurn.followUps < CHAT_FOLLOW_UP_BUDGET
+	return typedSwitch(event, 'kind', {
+		'message-submitted': (message) => queueMessage(state, message),
+		'follow-up-ready': () =>
+			userTurn.followUps < CHAT_FOLLOW_UP_BUDGET
 				? sendFollowUp(userTurn)
-				: failUserTurn(userTurn, { kind: 'follow-up-budget-exhausted' })
-		case 'stop-pressed':
-			return endUserTurn(userTurn)
-		case 'content-shown':
-		case 'request-finished':
-		case 'error-response':
-		case 'connection-lost':
-		case 'try-again-pressed':
-		case 'regenerate-pressed':
-		case 'changes-waiting':
-		case 'approval-sent':
-		case 'resume-pressed':
-		case 'stream-watched':
-		case 'nothing-to-resume':
-			return unchanged(state)
-	}
+				: failUserTurn(userTurn, { kind: 'follow-up-budget-exhausted' }),
+		'stop-pressed': () => endUserTurn(userTurn),
+		...typedSwitchGroup(
+			event,
+			'kind',
+			[
+				'content-shown',
+				'request-finished',
+				'error-response',
+				'connection-lost',
+				'try-again-pressed',
+				'regenerate-pressed',
+				'changes-waiting',
+				'approval-sent',
+				'resume-pressed',
+				'stream-watched',
+				'nothing-to-resume'
+			],
+			() => unchanged(state)
+		)
+	})
 }
 
 /** Stop was pressed: however the request in flight settles, the user turn ends. */
@@ -378,25 +376,36 @@ function reduceStopping(
 	state: Extract<ChatTurnState, { kind: 'stopping' }>,
 	event: ChatTurnEvent
 ): ChatTurnTransition {
-	switch (event.kind) {
-		case 'message-submitted':
-			return queueMessage(state, event)
-		case 'request-finished':
-		case 'connection-lost':
-		case 'error-response':
-		case 'changes-waiting':
-		case 'nothing-to-resume':
-			return endUserTurn(state.userTurn)
-		case 'content-shown':
-		case 'follow-up-ready':
-		case 'stop-pressed':
-		case 'try-again-pressed':
-		case 'regenerate-pressed':
-		case 'approval-sent':
-		case 'resume-pressed':
-		case 'stream-watched':
-			return unchanged(state)
-	}
+	return typedSwitch(event, 'kind', {
+		'message-submitted': (message) => queueMessage(state, message),
+		...typedSwitchGroup(
+			event,
+			'kind',
+			[
+				'request-finished',
+				'connection-lost',
+				'error-response',
+				'changes-waiting',
+				'nothing-to-resume'
+			],
+			() => endUserTurn(state.userTurn)
+		),
+		...typedSwitchGroup(
+			event,
+			'kind',
+			[
+				'content-shown',
+				'follow-up-ready',
+				'stop-pressed',
+				'try-again-pressed',
+				'regenerate-pressed',
+				'approval-sent',
+				'resume-pressed',
+				'stream-watched'
+			],
+			() => unchanged(state)
+		)
+	})
 }
 
 /**
@@ -409,60 +418,63 @@ function reduceWaiting(
 	state: Extract<ChatTurnState, { kind: 'waiting' }>,
 	event: ChatTurnEvent
 ): ChatTurnTransition {
-	switch (event.kind) {
-		case 'message-submitted':
-			return moveOn(state.changes, event)
-		case 'approval-sent':
-			return sendApprovalAnswers(state)
-		case 'resume-pressed':
-			return resumeRun(state, event.resume)
-		case 'content-shown':
-		case 'request-finished':
-		case 'error-response':
-		case 'connection-lost':
-		case 'follow-up-ready':
-		case 'stop-pressed':
-		case 'try-again-pressed':
-		case 'regenerate-pressed':
-		case 'changes-waiting':
-		case 'stream-watched':
-		case 'nothing-to-resume':
-			return unchanged(state)
-	}
+	return typedSwitch(event, 'kind', {
+		'message-submitted': (message) => moveOn(state.changes, message),
+		'approval-sent': () => sendApprovalAnswers(state),
+		'resume-pressed': (pressed) => resumeRun(state, pressed.resume),
+		...typedSwitchGroup(
+			event,
+			'kind',
+			[
+				'content-shown',
+				'request-finished',
+				'error-response',
+				'connection-lost',
+				'follow-up-ready',
+				'stop-pressed',
+				'try-again-pressed',
+				'regenerate-pressed',
+				'changes-waiting',
+				'stream-watched',
+				'nothing-to-resume'
+			],
+			() => unchanged(state)
+		)
+	})
 }
 
 function reduceFailed(
 	state: Extract<ChatTurnState, { kind: 'failed' }>,
 	event: ChatTurnEvent
 ): ChatTurnTransition {
-	switch (event.kind) {
-		case 'message-submitted':
-			return startUserTurn(event)
-		case 'try-again-pressed':
-			return canTryAgain(state.failure)
-				? tryAgain(state.resume)
-				: unchanged(state)
-		case 'regenerate-pressed':
-			return regenerate()
-		case 'changes-waiting':
-			return waitForUser(newUserTurn(), event.changes)
-		case 'approval-sent':
-			return refuseUnaskedRequest(state)
-		case 'stream-watched':
-			// Only a dropped connection leaves a run on the server to reattach to.
-			return state.failure.kind === 'connection-lost'
+	return typedSwitch(event, 'kind', {
+		'message-submitted': (message) => startUserTurn(message),
+		'try-again-pressed': () =>
+			canTryAgain(state.failure) ? tryAgain(state.resume) : unchanged(state),
+		'regenerate-pressed': () => regenerate(),
+		'changes-waiting': (waiting) => waitForUser(newUserTurn(), waiting.changes),
+		'approval-sent': () => refuseUnaskedRequest(state),
+		// Only a dropped connection leaves a run on the server to reattach to.
+		'stream-watched': () =>
+			state.failure.kind === 'connection-lost'
 				? watchStream('failed')
-				: unchanged(state)
-		case 'content-shown':
-		case 'request-finished':
-		case 'error-response':
-		case 'connection-lost':
-		case 'follow-up-ready':
-		case 'stop-pressed':
-		case 'resume-pressed':
-		case 'nothing-to-resume':
-			return unchanged(state)
-	}
+				: unchanged(state),
+		...typedSwitchGroup(
+			event,
+			'kind',
+			[
+				'content-shown',
+				'request-finished',
+				'error-response',
+				'connection-lost',
+				'follow-up-ready',
+				'stop-pressed',
+				'resume-pressed',
+				'nothing-to-resume'
+			],
+			() => unchanged(state)
+		)
+	})
 }
 
 function isBlank(event: Extract<ChatTurnEvent, { kind: 'message-submitted' }>) {

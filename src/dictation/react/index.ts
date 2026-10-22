@@ -11,6 +11,7 @@ import {
 	useState,
 	useSyncExternalStore
 } from 'react'
+import { createEmitter } from 'hanzio'
 import {
 	type DictationEnd,
 	type DictationOptions,
@@ -130,24 +131,16 @@ export function useDictationText(channel: DictationTranscriptChannel): string {
 }
 
 function createTranscriptChannel() {
-	const listeners = new Set<() => void>()
+	const changes = createEmitter<{ change: undefined }>()
 	let text = ''
 
 	return {
-		subscribe: (listener: () => void) => {
-			listeners.add(listener)
-
-			return () => {
-				listeners.delete(listener)
-			}
-		},
+		subscribe: (listener: () => void) => changes.on('change', listener),
 		read: () => text,
 		publish: (next: string) => {
 			text = next
 
-			for (const listener of listeners) {
-				listener()
-			}
+			changes.emit('change')
 		}
 	}
 }

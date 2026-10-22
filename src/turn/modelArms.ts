@@ -1,3 +1,4 @@
+import { hasKey } from 'hanzio'
 /**
  * Model experiments by thread. A thread gets its arm at its first turn, the
  * arm is stored in the thread's metadata, and the thread keeps it for its
@@ -47,9 +48,7 @@ export function defineModelArms<
 	) => {
 		const name = metadata?.[metadataKey]
 
-		return typeof name === 'string' && Object.hasOwn(options.arms, name)
-			? (name as keyof TArms & string)
-			: null
+		return typeof name === 'string' && hasKey(options.arms, name) ? name : null
 	}
 
 	return {

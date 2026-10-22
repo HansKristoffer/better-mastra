@@ -16,6 +16,7 @@ import {
 	type RequestContext
 } from '@mastra/core/request-context'
 import type { UIMessage, UIMessageChunk } from 'ai'
+import { once } from 'hanzio'
 
 import {
 	classifyTurnChanges,
@@ -677,13 +678,9 @@ function releaseOnce(
 	release: () => Promise<void>,
 	logger: ChatTurnLogger
 ): () => Promise<void> {
-	let released: Promise<void> | undefined
-
-	return () => {
-		released ??= release().catch((error: unknown) =>
+	return once(() =>
+		release().catch((error: unknown) =>
 			logger.error('[better-mastra] the thread lock release failed', { error })
 		)
-
-		return released
-	}
+	)
 }

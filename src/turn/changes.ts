@@ -10,6 +10,7 @@
 import type { Agent, AgentRun, AgentRunToolCall } from '@mastra/core/agent'
 import type { RequestContext } from '@mastra/core/request-context'
 import { isToolUIPart, type UIMessage } from 'ai'
+import { sortBy, typedSwitch } from 'hanzio'
 
 import type { ChatResume, ThreadKey } from './types.js'
 
@@ -62,11 +63,9 @@ export async function listPendingChanges(
 		resourceId: key.resourceId
 	})
 
-	return [...runs]
-		.sort((a, b) => a.suspendedAt.getTime() - b.suspendedAt.getTime())
-		.flatMap((run) =>
-			run.toolCalls.flatMap((call) => toPendingChange(run, call))
-		)
+	return sortBy(runs, (run) => run.suspendedAt.getTime()).flatMap((run) =>
+		run.toolCalls.flatMap((call) => toPendingChange(run, call))
+	)
 }
 
 /**
@@ -136,18 +135,24 @@ export async function moveOnFromWaitingChanges(
 
 	for (const change of waiting) {
 		try {
-			const output =
-				change.kind === 'approval'
-					? await run.agent.declineToolCall({
+			const output = await typedSwitch(change, 'kind', {
+				approval: (approval) =>
+					run.agent.declineToolCall({
+						...options,
+						runId: approval.runId,
+						toolCallId: approval.toolCallId,
+						reason: MOVED_ON_REASON
+					}),
+				suspended: (suspended) =>
+					run.agent.resumeStream(
+						run.movedOnData?.(suspended) ?? { kind: 'movedOn' },
+						{
 							...options,
-							runId: change.runId,
-							toolCallId: change.toolCallId,
-							reason: MOVED_ON_REASON
-						})
-					: await run.agent.resumeStream(
-							run.movedOnData?.(change) ?? { kind: 'movedOn' },
-							{ ...options, runId: change.runId, toolCallId: change.toolCallId }
-						)
+							runId: suspended.runId,
+							toolCallId: suspended.toolCallId
+						}
+					)
+			})
 
 			await output.consumeStream()
 		} catch (error) {

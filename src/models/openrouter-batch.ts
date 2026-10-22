@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
+import { promiseTimeout } from 'hanzio'
 import { errorAttributes, type Logger } from './route.js'
 
 // OpenRouter's Batch API as a transport for background generation.
@@ -362,7 +362,7 @@ export function createBatchFetch(input: {
 			// answers after this is still billed.
 			if (left <= 0)
 				throw new BatchUnanswered(`Batch ${batch.id} outlived the batch window`)
-			await sleep(Math.min(POLL_MS, left), undefined, { signal: scope.signal })
+			await promiseTimeout(Math.min(POLL_MS, left), { signal: scope.signal })
 			batch = (await readBatch(batch.id, scope.signal)) ?? batch
 		}
 		return batch

@@ -1,4 +1,5 @@
 import type { LanguageModelV4, SharedV4ProviderOptions } from '@ai-sdk/provider'
+import { getErrorMessage } from 'hanzio'
 import type { LlmEffort } from './effort.js'
 import type { LlmUsageTotals } from './pricing.js'
 
@@ -51,10 +52,6 @@ export function reportedCost(extract: (step: unknown) => number | undefined) {
 	}
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 /** The logger the library writes to; anything with `info` and `warn` fits (pino, console). */
 export type Logger = {
 	info: (message: string, attributes?: Record<string, unknown>) => void
@@ -66,7 +63,7 @@ export const silentLogger: Logger = { info: () => {}, warn: () => {} }
 export function errorAttributes(error: unknown) {
 	return error instanceof Error
 		? { error_name: error.name, error_message: error.message }
-		: { error_message: String(error) }
+		: { error_message: getErrorMessage(error) }
 }
 
 /** Drops `temperature` for models that refuse any sampling control. */

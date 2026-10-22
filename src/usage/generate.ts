@@ -6,6 +6,7 @@ import {
 	NoObjectGeneratedError
 } from 'ai'
 import type { z } from 'zod'
+import { startTimer, timeoutSignal, tryCatch } from 'hanzio'
 import { anthropicSafeZodSchema } from '../models/anthropic-safe-schema.js'
 import {
 	type AiBillingError,
@@ -105,8 +106,7 @@ function isCutOffAnswer(error: unknown) {
 /** The caller's signal, bounded by `timeoutMs` when set. Each attempt gets the full budget. */
 function callSignal(signal: AbortSignal | undefined, timeoutMs?: number) {
 	if (!timeoutMs) return signal
-	const timeout = AbortSignal.timeout(timeoutMs)
-	return signal ? AbortSignal.any([signal, timeout]) : timeout
+	return timeoutSignal(timeoutMs, signal)
 }
 
 type CallOptions<TContext> = {
@@ -294,7 +294,7 @@ export function withUsage<TContext>(input: {
 						experimental_repairText: repairObjectText
 					})
 			})
-		const startedAt = performance.now()
+		const elapsed = startTimer()
 		const { result, batched } = await call()
 			.catch((error: unknown) =>
 				isCutOffAnswer(error) ? call(true) : Promise.reject(error)
@@ -302,14 +302,10 @@ export function withUsage<TContext>(input: {
 			.catch((error: unknown) =>
 				rethrowAiFailure(withNoObjectDetails(error), context)
 			)
-		reportGenerate(
-			context,
-			model,
-			result,
-			performance.now() - startedAt,
-			batched,
-			{ promptVersion, metadata }
-		)
+		reportGenerate(context, model, result, elapsed(), batched, {
+			promptVersion,
+			metadata
+		})
 		return result
 	}
 
@@ -333,7 +329,7 @@ export function withUsage<TContext>(input: {
 			metadata,
 			...rest
 		} = options
-		const startedAt = performance.now()
+		const elapsed = startTimer()
 		const { result, batched } = await generate({
 			model,
 			reasoning,
@@ -350,14 +346,10 @@ export function withUsage<TContext>(input: {
 					...(messages !== undefined ? { messages } : { prompt: prompt ?? '' })
 				})
 		}).catch((error: unknown) => rethrowAiFailure(error, context))
-		reportGenerate(
-			context,
-			model,
-			result,
-			performance.now() - startedAt,
-			batched,
-			{ promptVersion, metadata }
-		)
+		reportGenerate(context, model, result, elapsed(), batched, {
+			promptVersion,
+			metadata
+		})
 		return result
 	}
 
@@ -399,9 +391,5 @@ export function withUsage<TContext>(input: {
 
 /** Null rather than throwing: the tokens are known, and losing the row would cost money. */
 async function settledSteps(steps: PromiseLike<readonly unknown[]>) {
-	try {
-		return await steps
-	} catch {
-		return null
-	}
+	return (await tryCatch(async () => steps)).data
 }

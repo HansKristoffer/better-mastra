@@ -16,6 +16,7 @@ import {
 	type Processor,
 	StreamErrorRetryProcessor
 } from '@mastra/core/processors'
+import { must } from 'hanzio'
 
 import { findTurnPlan } from './types.js'
 
@@ -143,16 +144,14 @@ function hasStreamedAnswerText(messageList: MessageList): boolean {
 }
 
 function defaultStreamErrorRetry(): StreamErrorRetryProcessor {
-	const retry = defaultStabilityErrorProcessors().find(
-		(processor): processor is StreamErrorRetryProcessor =>
-			processor instanceof StreamErrorRetryProcessor
+	return must(
+		defaultStabilityErrorProcessors().find(
+			(processor): processor is StreamErrorRetryProcessor =>
+				processor instanceof StreamErrorRetryProcessor
+		),
+		() =>
+			new Error(
+				"Mastra's default error processors no longer include its stream error retry."
+			)
 	)
-
-	if (!retry) {
-		throw new Error(
-			"Mastra's default error processors no longer include its stream error retry."
-		)
-	}
-
-	return retry
 }

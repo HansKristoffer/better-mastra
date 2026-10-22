@@ -9,6 +9,7 @@
 import { createTool } from '@mastra/core/tools'
 import type { JSONSchema7 } from 'json-schema'
 import { z } from 'zod'
+import { keyBy, mapValues } from 'hanzio'
 
 export const clientToolDefSchema = z.object({
 	name: z.string().min(1),
@@ -29,18 +30,15 @@ const PERMISSIVE_OBJECT_SCHEMA: JSONSchema7 = {
 export function buildClientActionTools(
 	definitions: readonly ClientToolDef[]
 ): Record<string, ReturnType<typeof createTool>> {
-	return Object.fromEntries(
-		definitions.map((definition) => [
-			definition.name,
-			createTool({
-				id: definition.name,
-				description: definition.description,
-				inputSchema:
-					Object.keys(definition.jsonSchema).length > 0
-						? (definition.jsonSchema as JSONSchema7)
-						: PERMISSIVE_OBJECT_SCHEMA,
-				requireApproval: definition.requiresApproval === true
-			})
-		])
+	return mapValues(keyBy(definitions, 'name'), (definition) =>
+		createTool({
+			id: definition.name,
+			description: definition.description,
+			inputSchema:
+				Object.keys(definition.jsonSchema).length > 0
+					? (definition.jsonSchema as JSONSchema7)
+					: PERMISSIVE_OBJECT_SCHEMA,
+			requireApproval: definition.requiresApproval === true
+		})
 	)
 }

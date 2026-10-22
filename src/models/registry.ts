@@ -1,6 +1,7 @@
 import type { LanguageModelV4 } from '@ai-sdk/provider'
 import type { MastraLanguageModel } from '@mastra/core/agent'
 import { wrapLanguageModel } from 'ai'
+import { must } from 'hanzio'
 import { type ReasoningEffort, splitModelEffort } from './effort.js'
 import {
 	defaultOpenRouterRouting,
@@ -168,12 +169,13 @@ export async function createLlmRegistry(options: LlmRegistryOptions) {
 
 	function routeFor(modelId: string) {
 		const parsed = parseModelId(modelId)
-		const adapter = routes[parsed.route]
-		if (!adapter) {
-			throw new Error(
-				`Model route "${parsed.route}" is not configured (${modelId}): pass its key to createLlmRegistry`
-			)
-		}
+		const adapter = must(
+			routes[parsed.route],
+			() =>
+				new Error(
+					`Model route "${parsed.route}" is not configured (${modelId}): pass its key to createLlmRegistry`
+				)
+		)
 		return { ...parsed, adapter }
 	}
 

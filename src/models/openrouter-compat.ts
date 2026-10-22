@@ -12,7 +12,7 @@ import type {
 	LanguageModelV4Middleware,
 	LanguageModelV4Prompt
 } from '@ai-sdk/provider'
-import { isRecord } from './route.js'
+import { getErrorMessage, isRecord } from 'hanzio'
 
 /**
  * True for OpenRouter-hosted Anthropic models, the only ones that need the
@@ -136,7 +136,7 @@ export function dropTrailingAssistantPrefill(
  * vendor's text.
  */
 export function isPrefillError(error: unknown): boolean {
-	const message = error instanceof Error ? error.message : String(error ?? '')
+	const message = getErrorMessage(error)
 	return /thinking|reasoning|prefill|final assistant|last assistant|was modified/i.test(
 		message
 	)
@@ -202,7 +202,7 @@ function promptWithoutSignatures(
 	error: unknown,
 	prompt: LanguageModelV4Prompt
 ) {
-	const message = error instanceof Error ? error.message : String(error ?? '')
+	const message = getErrorMessage(error)
 	if (!UNREADABLE_THOUGHT_SIGNATURE.test(message)) return undefined
 	return stripReasoningFromPrompt(prompt)
 }

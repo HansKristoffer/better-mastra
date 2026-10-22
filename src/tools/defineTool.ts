@@ -9,6 +9,7 @@
 
 import type { RequestContext } from '@mastra/core/request-context'
 import { createTool, type Tool } from '@mastra/core/tools'
+import { keyBy, mapValues, omit } from 'hanzio'
 
 import { dryRunResult, isDryRun, isDryRunResult } from './dryRun.js'
 import { withHiddenInputs } from './toolInputSchema.js'
@@ -144,13 +145,11 @@ export function toToolSet(definitions: readonly DefinedTool[]): {
 	readonly tools: Record<string, AnyTool>
 	readonly toolTiers: Record<string, string>
 } {
+	const byName = keyBy(definitions, 'name')
+
 	return {
-		tools: Object.fromEntries(
-			definitions.map((tool) => [tool.name, tool.tool])
-		),
-		toolTiers: Object.fromEntries(
-			definitions.map((tool) => [tool.name, tool.tier])
-		)
+		tools: mapValues(byName, (tool) => tool.tool),
+		toolTiers: mapValues(byName, (tool) => tool.tier)
 	}
 }
 
@@ -172,11 +171,7 @@ function fillHiddenInputs(
 		throw new Error('A tool with hidden inputs ran without a request context.')
 	}
 
-	const visible = Object.fromEntries(
-		Object.entries((input ?? {}) as Record<string, unknown>).filter(
-			([key]) => !names.includes(key)
-		)
-	)
+	const visible = omit((input ?? {}) as Record<string, unknown>, names)
 	const filled = Object.fromEntries(
 		names.flatMap((name) => {
 			const value = hidden[name]?.(requestContext)

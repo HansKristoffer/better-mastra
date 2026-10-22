@@ -6,6 +6,7 @@
  */
 
 import { getToolName, isToolUIPart, type UIMessage } from 'ai'
+import { isRecord, typedSwitch } from 'hanzio'
 
 // TYPES
 
@@ -55,11 +56,10 @@ export function readSuspendedRun(
 		return undefined
 	}
 
-	const data = part.data as Record<string, unknown> | null
+	const { data } = part
 
 	if (
-		typeof data !== 'object' ||
-		data === null ||
+		!isRecord(data) ||
 		typeof data.runId !== 'string' ||
 		typeof data.toolCallId !== 'string' ||
 		typeof data.toolName !== 'string' ||
@@ -188,18 +188,16 @@ function restoreParts(
 }
 
 function restorePart(part: ToolPart, pending: PendingChange): MessagePart[] {
-	switch (pending.kind) {
-		case 'approval':
-			return [
-				{
-					...part,
-					state: 'approval-requested',
-					approval: { id: pending.approvalId }
-				} as MessagePart
-			]
-		case 'suspended':
-			return [part, toSuspendedPart(pending)]
-	}
+	return typedSwitch(pending, 'kind', {
+		approval: (approval) => [
+			{
+				...part,
+				state: 'approval-requested',
+				approval: { id: approval.approvalId }
+			} as MessagePart
+		],
+		suspended: (suspended) => [part, toSuspendedPart(suspended)]
+	})
 }
 
 /** The part as `@mastra/ai-sdk` streams it while the run waits. */
@@ -229,14 +227,11 @@ function isPendingChangeOf(change: PendingChange, part: ToolPart): boolean {
 		return false
 	}
 
-	switch (change.kind) {
-		case 'approval':
-			return (
-				part.approval === undefined || part.approval.id === change.approvalId
-			)
-		case 'suspended':
-			return getToolName(part) === change.toolName
-	}
+	return typedSwitch(change, 'kind', {
+		approval: (approval) =>
+			part.approval === undefined || part.approval.id === approval.approvalId,
+		suspended: (suspended) => getToolName(part) === suspended.toolName
+	})
 }
 
 function isPendingRunPart(

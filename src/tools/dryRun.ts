@@ -1,4 +1,5 @@
 import type { RequestContext } from '@mastra/core/request-context'
+import { isRecord } from 'hanzio'
 
 /**
  * The request-context key an eval run sets: every tool that is not tier
@@ -32,9 +33,5 @@ export function dryRunResult(tool: string): DryRunResult {
 }
 
 export function isDryRunResult(value: unknown): value is DryRunResult {
-	return (
-		typeof value === 'object' &&
-		value !== null &&
-		(value as { dryRun?: unknown }).dryRun === true
-	)
+	return isRecord(value) && value.dryRun === true
 }

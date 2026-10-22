@@ -24,6 +24,7 @@ import type {
 	DatasetItemPayload,
 	DatasetItemToolMock
 } from '@mastra/core/storage'
+import { isRecord, mapValues, stableStringify, typedSwitch } from 'hanzio'
 import type { EvalCase, EvalToolCall, EvalTrace } from './case.js'
 import { checkTrace, type EvalCheckOptions } from './checks.js'
 
@@ -80,10 +81,7 @@ function answerText(message: MastraDBMessage): string {
 
 function textOf(value: unknown): string {
 	if (typeof value === 'string') return value
-	const text =
-		typeof value === 'object' && value !== null && 'value' in value
-			? value.value
-			: undefined
+	const text = isRecord(value) ? value.value : undefined
 	return typeof text === 'string' ? text : JSON.stringify(value)
 }
 
@@ -258,11 +256,7 @@ export async function findOrCreateDataset(
 	try {
 		return await mastra.datasets.get({ id: definition.id })
 	} catch (error) {
-		const notFound =
-			typeof error === 'object' &&
-			error !== null &&
-			'id' in error &&
-			error.id === 'DATASET_NOT_FOUND'
+		const notFound = isRecord(error) && error.id === 'DATASET_NOT_FOUND'
 		if (!notFound) throw error
 		return mastra.datasets.create({ ...definition, targetType: 'agent' })
 	}
@@ -275,23 +269,10 @@ export async function listDatasetItems(dataset: Dataset) {
 	return Array.isArray(items) ? items : items.items
 }
 
-/** The value with every object's keys in one order: Postgres hands JSON back reordered. */
-function withSortedKeys(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(withSortedKeys)
-	if (typeof value !== 'object' || value === null) return value
-	return Object.fromEntries(
-		Object.entries(value)
-			.sort(([a], [b]) => a.localeCompare(b))
-			.map(([key, field]) => [key, withSortedKeys(field)])
-	)
-}
-
+/** Keys sorted, because Postgres hands JSON back reordered. */
 const comparable = (
 	item: Pick<DatasetItem, 'input' | 'groundTruth' | 'metadata'>
-) =>
-	JSON.stringify(
-		withSortedKeys([item.input, item.groundTruth, item.metadata ?? null])
-	)
+) => stableStringify([item.input, item.groundTruth, item.metadata ?? null])
 
 /** The changes that make the stored items match: new ones added, changed ones updated, the rest deleted. */
 export function planDatasetSync(
@@ -425,14 +406,11 @@ export function toolMockOptions(matcher: ToolMockMatcher) {
 }
 
 function hookResult(resolution: ToolMockResolution) {
-	switch (resolution.kind) {
-		case 'serve':
-			return { proceed: false, output: resolution.output }
-		case 'fail':
-			return { proceed: false, output: { error: resolution.code } }
-		case 'live':
-			return undefined
-	}
+	return typedSwitch(resolution, 'kind', {
+		serve: (serve) => ({ proceed: false, output: serve.output }),
+		fail: (fail) => ({ proceed: false, output: { error: fail.code } }),
+		live: () => undefined
+	})
 }
 
 export type RecordedToolRead = {
@@ -457,12 +435,7 @@ export function replayRecordedTools<T extends Record<string, Executable>>(
 	const matcher = new ToolMockMatcher(
 		reads.map((read) => ({
 			toolName: read.toolName,
-			args:
-				typeof read.input === 'object' &&
-				read.input !== null &&
-				!Array.isArray(read.input)
-					? (read.input as Record<string, unknown>)
-					: {},
+			args: isRecord(read.input) ? read.input : {},
 			output: read.output,
 			matchArgs
 		})),
@@ -470,22 +443,22 @@ export function replayRecordedTools<T extends Record<string, Executable>>(
 	)
 	const unmatched: { toolName: string; input: unknown; code: string }[] = []
 	const serve = (toolName: string) => async (input: unknown) => {
-		const resolution = matcher.resolve(toolName, input)
-		if (resolution.kind === 'serve') return resolution.output
-		const code =
-			resolution.kind === 'fail' ? resolution.code : 'TOOL_MOCK_NOT_DECLARED'
-		unmatched.push({ toolName, input, code })
-		return { error: `No recorded read matches this call (${code}).` }
+		const unmatchedRead = (code: string) => {
+			unmatched.push({ toolName, input, code })
+			return { error: `No recorded read matches this call (${code}).` }
+		}
+		return typedSwitch(matcher.resolve(toolName, input), 'kind', {
+			serve: (serve) => serve.output,
+			fail: (fail) => unmatchedRead(fail.code),
+			live: () => unmatchedRead('TOOL_MOCK_NOT_DECLARED')
+		})
 	}
 	return {
 		// A copy with the same prototype and fields, so the real tool stays as it was.
-		tools: Object.fromEntries(
-			Object.entries(tools).map(([name, tool]) => [
-				name,
-				Object.assign(Object.create(Object.getPrototypeOf(tool)), tool, {
-					execute: serve(name)
-				})
-			])
+		tools: mapValues(tools, (tool, name) =>
+			Object.assign(Object.create(Object.getPrototypeOf(tool)), tool, {
+				execute: serve(name)
+			})
 		) as T,
 		unmatchedCalls: () => [...unmatched]
 	}

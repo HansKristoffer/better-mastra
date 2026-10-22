@@ -24,6 +24,7 @@ import {
 	type WorkflowsStorage
 } from '@mastra/core/storage'
 import type { UIMessage } from 'ai'
+import { compact, invariant, must, safeJsonParse } from 'hanzio'
 
 import {
 	joinResumedAnswers,
@@ -279,9 +280,10 @@ export function createThreadHandlers<TScope>(
 				})
 			}
 
-			if (!mastra.observability.addFeedback) {
-				throw new Error('The Mastra observability cannot record feedback.')
-			}
+			invariant(
+				mastra.observability.addFeedback,
+				() => new Error('The Mastra observability cannot record feedback.')
+			)
 
 			await mastra.observability.addFeedback({
 				traceId,
@@ -343,7 +345,7 @@ export function createThreadHandlers<TScope>(
 			})
 		)
 
-		return Object.fromEntries(ratings.filter((entry) => entry !== undefined))
+		return Object.fromEntries(compact(ratings))
 	}
 }
 
@@ -538,11 +540,10 @@ function toAbandonedRun(run: WorkflowRun): AbandonedRun {
 function parseSnapshot(
 	snapshot: string
 ): Parameters<typeof getSnapshotMemoryInfo>[0] {
-	try {
-		return JSON.parse(snapshot)
-	} catch {
-		return undefined
-	}
+	const parsed =
+		safeJsonParse<Parameters<typeof getSnapshotMemoryInfo>[0]>(snapshot)
+
+	return parsed.ok ? parsed.data : undefined
 }
 
 function toUiMessages(
@@ -579,11 +580,10 @@ function readTraceId(message: MastraDBMessage): string | undefined {
 }
 
 async function listThumbs(mastra: Mastra, traceId: string, userId: string) {
-	const store = await mastra.getStorage()?.getStore('observability')
-
-	if (!store) {
-		throw new Error('The Mastra instance has no observability storage.')
-	}
+	const store = must(
+		await mastra.getStorage()?.getStore('observability'),
+		() => new Error('The Mastra instance has no observability storage.')
+	)
 
 	const { feedback } = await store.listFeedback({
 		filters: {
@@ -610,17 +610,15 @@ async function listThumbs(mastra: Mastra, traceId: string, userId: string) {
 }
 
 function requireMastra(mastra: Mastra | undefined): Mastra {
-	if (!mastra) {
-		throw new Error('Rating answers needs the Mastra instance.')
-	}
-
-	return mastra
+	return must(
+		mastra,
+		() => new Error('Rating answers needs the Mastra instance.')
+	)
 }
 
 async function memoryStore(memory: MastraMemory): Promise<MemoryStorage> {
-	const store = await memory.storage.getStore('memory')
-
-	if (!store) throw new Error('The memory storage has no memory domain.')
-
-	return store
+	return must(
+		await memory.storage.getStore('memory'),
+		() => new Error('The memory storage has no memory domain.')
+	)
 }

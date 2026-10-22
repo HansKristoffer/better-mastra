@@ -7,6 +7,7 @@
 
 import type { ToolsInput } from '@mastra/core/agent'
 import { makeCoreToolV5 } from '@mastra/core/utils'
+import { sumBy } from 'hanzio'
 
 import type { ChatTurnPlan } from './types.js'
 
@@ -27,7 +28,7 @@ export async function measurePromptBudget(
 	>
 ): Promise<PromptBudget> {
 	const toolChars = await measureToolSchemas(plan.tools ?? {})
-	const toolSchemaChars = Object.values(toolChars).reduce((a, b) => a + b, 0)
+	const toolSchemaChars = sumBy(Object.values(toolChars), (chars) => chars)
 
 	return {
 		instructionsChars: plan.instructions.length,

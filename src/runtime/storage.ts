@@ -3,6 +3,7 @@ import type {
 	RetentionConfig
 } from '@mastra/core/storage'
 import type { Pool, PoolConfig } from 'pg'
+import { retry } from 'hanzio'
 import type { Logger } from '../models/route.js'
 
 /** A Mastra store with the calls a process needs around it. */
@@ -79,15 +80,12 @@ export function initWithRetry(
 	retryDelayMs = 1000
 ): () => Promise<void> {
 	let running: Promise<void> | undefined
-	const attempt = async () => {
-		try {
-			await init()
-		} catch (error) {
-			if (!isConcurrentDdlError(error)) throw error
-			await new Promise((resolve) => setTimeout(resolve, retryDelayMs))
-			await init()
-		}
-	}
+	const attempt = () =>
+		retry(init, {
+			retries: 1,
+			delayMs: retryDelayMs,
+			shouldRetry: isConcurrentDdlError
+		})
 	return () => {
 		running ??= attempt().finally(() => {
 			running = undefined

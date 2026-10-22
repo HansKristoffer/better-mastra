@@ -12,6 +12,7 @@ import type { Mastra } from '@mastra/core/mastra'
 import { RequestContext } from '@mastra/core/request-context'
 import type { LanguageModel, UIMessageChunk } from 'ai'
 import { z } from 'zod'
+import { timeoutSignal } from 'hanzio'
 
 import { asAgentModel } from './agent.js'
 
@@ -92,10 +93,7 @@ export async function sendReplySuggestions(input: {
 	readonly send: (chunk: UIMessageChunk) => void
 	readonly onError?: (error: unknown) => void
 }): Promise<void> {
-	const abortSignal = AbortSignal.any([
-		input.signal,
-		AbortSignal.timeout(input.timeoutMs ?? 6_000)
-	])
+	const abortSignal = timeoutSignal(input.timeoutMs ?? 6_000, input.signal)
 
 	try {
 		const stream = await input.mastra.getAgentById(input.agentId).stream(

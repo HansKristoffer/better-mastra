@@ -12,6 +12,7 @@ import {
 	type ChatStatus,
 	type UIMessage
 } from 'ai'
+import { createEmitter, throttle } from 'hanzio'
 
 // TYPES
 
@@ -29,7 +30,7 @@ class ObservableChatState<M extends UIMessage> implements ChatState<M> {
 	#status: ChatStatus = 'ready'
 	#error: Error | undefined = undefined
 	#snapshot: ChatSnapshot<M> | undefined
-	readonly #listeners = new Set<() => void>()
+	readonly #changes = createEmitter<{ change: undefined }>()
 
 	constructor(messages: M[] = []) {
 		this.#messages = messages
@@ -105,20 +106,12 @@ class ObservableChatState<M extends UIMessage> implements ChatState<M> {
 		return this.#snapshot
 	}
 
-	subscribe = (listener: () => void): (() => void) => {
-		this.#listeners.add(listener)
-
-		return () => {
-			this.#listeners.delete(listener)
-		}
-	}
+	subscribe = (listener: () => void): (() => void) =>
+		this.#changes.on('change', listener)
 
 	#notify(): void {
 		this.#snapshot = undefined
-
-		for (const listener of this.#listeners) {
-			listener()
-		}
+		this.#changes.emit('change')
 	}
 }
 
@@ -155,32 +148,11 @@ export function throttleSubscribe(
 	}
 
 	return (listener) => {
-		let timer: ReturnType<typeof setTimeout> | undefined
-		let pending = false
-
-		const flush = () => {
-			timer = undefined
-
-			if (pending) {
-				pending = false
-				listener()
-				timer = setTimeout(flush, ms)
-			}
-		}
-
-		const unsubscribe = subscribe(() => {
-			if (timer !== undefined) {
-				pending = true
-
-				return
-			}
-
-			listener()
-			timer = setTimeout(flush, ms)
-		})
+		const throttled = throttle(listener, ms)
+		const unsubscribe = subscribe(() => throttled())
 
 		return () => {
-			clearTimeout(timer)
+			throttled.cancel()
 			unsubscribe()
 		}
 	}

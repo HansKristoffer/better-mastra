@@ -1,3 +1,4 @@
+import { clamp, getUniqueValues, isRecord, safeJsonParse } from 'hanzio'
 /**
  * Soniox's real-time transcription protocol as a dictation speaks it: the
  * start request, float samples as 16-bit PCM, and folding each response into
@@ -51,7 +52,7 @@ export function sonioxLanguageHints(
 ): string[] {
 	const language = (locale.split(/[-_]/)[0] ?? locale).toLowerCase()
 
-	return [...new Set([language, ...languages])]
+	return getUniqueValues([language, ...languages])
 }
 
 /**
@@ -78,7 +79,7 @@ export function toS16le(samples: Float32Array): ArrayBuffer {
 	const view = new DataView(buffer)
 
 	samples.forEach((sample, index) => {
-		const clamped = Math.max(-1, Math.min(1, sample))
+		const clamped = clamp(sample, -1, 1)
 		const scaled =
 			clamped < 0 ? clamped * INT16_MIN_MAGNITUDE : clamped * INT16_MAX
 
@@ -128,25 +129,17 @@ export function applySonioxResponse(
 }
 
 function parseJsonObject(message: string): Record<string, unknown> | undefined {
-	try {
-		const parsed: unknown = JSON.parse(message)
+	const parsed = safeJsonParse(message)
 
-		return typeof parsed === 'object' &&
-			parsed !== null &&
-			!Array.isArray(parsed)
-			? (parsed as Record<string, unknown>)
-			: undefined
-	} catch {
-		return undefined
-	}
+	return parsed.ok && isRecord(parsed.data) ? parsed.data : undefined
 }
 
 function toToken(token: unknown): SonioxToken[] {
-	if (typeof token !== 'object' || token === null) {
+	if (!isRecord(token)) {
 		return []
 	}
 
-	const { text, is_final: isFinal } = token as Record<string, unknown>
+	const { text, is_final: isFinal } = token
 
 	return typeof text === 'string' ? [{ text, isFinal: isFinal === true }] : []
 }

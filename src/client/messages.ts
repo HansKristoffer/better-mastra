@@ -12,6 +12,7 @@ import {
 	isToolUIPart,
 	type UIMessage
 } from 'ai'
+import { typedSwitch } from 'hanzio'
 
 import { readSuspendedRun } from './pending.js'
 
@@ -136,10 +137,9 @@ export function selectRequestMessages(
 		return []
 	}
 
-	switch (lastMessage.role) {
-		case 'user':
-			return [lastMessage]
-		case 'assistant':
+	return typedSwitch(lastMessage.role, {
+		user: () => [lastMessage],
+		assistant: () => {
 			if (
 				lastMessage.parts.some((part) => readSuspendedRun(part) !== undefined)
 			) {
@@ -149,9 +149,9 @@ export function selectRequestMessages(
 			return carriesClientResults(lastMessage, options)
 				? currentUserTurn(messages)
 				: lastUserMessage(messages)
-		case 'system':
-			return lastUserMessage(messages)
-	}
+		},
+		system: () => lastUserMessage(messages)
+	})
 }
 
 /** From the last user message to the end; the trailing message alone when there is no user message. */

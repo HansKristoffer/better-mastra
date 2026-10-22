@@ -1,3 +1,5 @@
+import { getUniqueValues, sortBy, stableStringify, sumBy } from 'hanzio'
+
 import {
 	caseTurn,
 	type EvalCase,
@@ -52,9 +54,9 @@ export function detectReplyLanguage(
 				(list.letters?.test(text) ? 2 : 0)
 		}
 	})
-	const total = scores.reduce((sum, { score }) => sum + score, 0)
+	const total = sumBy(scores, 'score')
 	if (total < 3) return 'unknown'
-	const [best, second] = [...scores].sort((a, b) => b.score - a.score)
+	const [best, second] = sortBy(scores, { by: 'score', order: 'desc' })
 	return best && best.score > (second?.score ?? 0) ? best.language : 'unknown'
 }
 
@@ -77,7 +79,7 @@ export function inventedLinkIds(
 			// An id has digits; a path word like `knowledge-hub` does not.
 			.filter((token) => /\d/.test(token))
 	)
-	return [...new Set(ids)].filter((id) => !seen.includes(id))
+	return getUniqueValues(ids).filter((id) => !seen.includes(id))
 }
 
 /** How the app names and sorts its tools; every field is optional. */
@@ -138,7 +140,7 @@ export function expectationChecks(
 			check: 'changes nothing',
 			pass: writes.length === 0,
 			...(writes.length
-				? { detail: `wrote with ${[...new Set(writes)].join(', ')}` }
+				? { detail: `wrote with ${getUniqueValues(writes).join(', ')}` }
 				: {})
 		})
 	}
@@ -222,7 +224,7 @@ export function answerRuleChecks(
 			return turn.toolCalls
 				.filter((call) => isClientAction(call.name))
 				.flatMap((call) => {
-					const key = `${call.name}:${JSON.stringify(call.input)}`
+					const key = `${call.name}:${stableStringify(call.input)}`
 					if (seen.has(key)) return [call.name]
 					seen.add(key)
 					return []

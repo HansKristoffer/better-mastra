@@ -8,6 +8,7 @@ import {
 	type UIMessage,
 	type UIMessageChunk
 } from 'ai'
+import { getErrorMessage, pMap, timeoutSignal } from 'hanzio'
 import {
 	caseTurn,
 	type EvalCase,
@@ -191,8 +192,7 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 
 			for (let round = 0; round <= maxResubmits; round += 1) {
 				const usage: EvalUsage[] = []
-				const abort = new AbortController()
-				const timeout = setTimeout(() => abort.abort(), timeoutMs)
+				const abortSignal = timeoutSignal(timeoutMs)
 				const resuming = round > 0
 				const startedAt = performance.now()
 				let firstTextAt: number | null = null
@@ -204,7 +204,7 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 						resuming,
 						page: page as EvalTurnInput<C>['page'],
 						requestContext,
-						abortSignal: abort.signal,
+						abortSignal,
 						reportUsage: (record) => usage.push(record)
 					})
 					const observed = stream.pipeThrough(
@@ -225,13 +225,9 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 						assistant = snapshot
 					}
 				} catch (error) {
-					turn.error = abort.signal.aborted
+					turn.error = abortSignal.aborted
 						? `timed out after ${timeoutMs / 1000}s`
-						: error instanceof Error
-							? error.message
-							: String(error)
-				} finally {
-					clearTimeout(timeout)
+						: getErrorMessage(error)
 				}
 
 				// A turn that opens with a client action shows its first words in a
@@ -299,14 +295,5 @@ export async function mapWithConcurrency<T, R>(
 	limit: number,
 	work: (item: T, index: number) => Promise<R>
 ): Promise<R[]> {
-	const results: R[] = new Array(items.length)
-	// The workers share one iterator, so each item is taken by exactly one of them.
-	const queue = items.entries()
-	const worker = async () => {
-		for (const [index, item] of queue) results[index] = await work(item, index)
-	}
-	await Promise.all(
-		Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker)
-	)
-	return results
+	return pMap(items, work, { concurrency: Math.max(1, limit) })
 }

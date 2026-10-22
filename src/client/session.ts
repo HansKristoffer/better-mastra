@@ -29,6 +29,14 @@ import {
 	lastAssistantMessageIsCompleteWithApprovalResponses,
 	type UIMessage
 } from 'ai'
+import {
+	createEmitter,
+	isOneOf,
+	toError,
+	trimTrailingSlash,
+	tryCatch,
+	typedSwitch
+} from 'hanzio'
 
 import {
 	type ClientAction,
@@ -232,7 +240,7 @@ export function createChatSession<TResumeData = unknown>(
 	const classifyError = options.classifyError ?? classifyChatError
 	const isUserFacing = options.isUserFacingPart ?? isUserFacingPart
 	const resumable = options.resume === true
-	const listeners = new Set<() => void>()
+	const changes = createEmitter<{ change: undefined }>()
 	let snapshot: ChatSessionSnapshot = {
 		turn: initialChatTurnState,
 		restoredDraft: undefined,
@@ -377,51 +385,49 @@ export function createChatSession<TResumeData = unknown>(
 	}
 
 	function runEffect(effect: ChatTurnEffect): void {
-		switch (effect.kind) {
-			case 'send-message':
+		typedSwitch(effect, 'kind', {
+			'send-message': (send) => {
 				if (focused) {
 					shownPartsBefore = 0
 					startRequest('send', () =>
 						chat.sendMessage(
-							effect.files === undefined
-								? { text: effect.text }
-								: { text: effect.text, files: [...effect.files] }
+							send.files === undefined
+								? { text: send.text }
+								: { text: send.text, files: [...send.files] }
 						)
 					)
 				} else {
-					restoreDraft(effect.text)
+					restoreDraft(send.text)
 					endUnsentRequest()
 				}
-				return
-			case 'request':
+			},
+			request: () => {
 				if (focused) {
 					startNextRequest()
 				} else {
 					endUnsentRequest()
 				}
-				return
-			case 'resume-stream':
+			},
+			'resume-stream': () => {
 				startRequest('resume', () => chat.resumeStream())
-				return
-			case 'abort-request':
+			},
+			'abort-request': () => {
 				void chat.stop()
-				return
-			case 'restore-draft':
-				restoreDraft(effect.text)
-				return
-			case 'resume-run':
+			},
+			'restore-draft': (restore) => {
+				restoreDraft(restore.text)
+			},
+			'resume-run': (resume) => {
 				if (focused) {
-					sendResume(effect.resume)
+					sendResume(resume.resume)
 				} else {
 					endUnsentRequest()
 				}
-				return
-			case 'mark-changes':
-				markChanges(effect.mark, effect.changes)
-				return
-		}
-
-		effect satisfies never
+			},
+			'mark-changes': (mark) => {
+				markChanges(mark.mark, mark.changes)
+			}
+		})
 	}
 
 	/**
@@ -741,9 +747,7 @@ export function createChatSession<TResumeData = unknown>(
 	function publish(next: ChatSessionSnapshot): void {
 		snapshot = next
 
-		for (const listener of listeners) {
-			listener()
-		}
+		changes.emit('change')
 	}
 
 	/** Stop pressed: the request is aborted, and a server that keeps runs going is told to stop. */
@@ -762,7 +766,7 @@ export function createChatSession<TResumeData = unknown>(
 		const send =
 			options.transport.fetch ??
 			((input, init) => globalThis.fetch(input, init))
-		const url = `${options.transport.api.replace(/\/$/, '')}/${encodeURIComponent(threadId)}/stop`
+		const url = `${trimTrailingSlash(options.transport.api)}/${encodeURIComponent(threadId)}/stop`
 
 		try {
 			await send(url, {
@@ -780,8 +784,7 @@ export function createChatSession<TResumeData = unknown>(
 		if (
 			!resumable ||
 			!focused ||
-			chat.status === 'submitted' ||
-			chat.status === 'streaming'
+			isOneOf(['submitted', 'streaming'], chat.status)
 		) {
 			return
 		}
@@ -798,13 +801,7 @@ export function createChatSession<TResumeData = unknown>(
 		threadId,
 		chat,
 		getSnapshot: () => snapshot,
-		subscribe: (listener) => {
-			listeners.add(listener)
-
-			return () => {
-				listeners.delete(listener)
-			}
-		},
+		subscribe: (listener) => changes.on('change', listener),
 		send: (text, sendOptions) => {
 			const before = snapshot.turn
 			const files = sendOptions?.files ?? []
@@ -978,31 +975,27 @@ function failureCodeOf(
 	event: ChatTurnEvent,
 	end: RequestEnd
 ): string | undefined {
-	switch (event.kind) {
-		case 'connection-lost':
-			return 'network'
-		case 'error-response':
-			if (event.refusal !== undefined) {
-				return event.refusal.code
-			}
+	return typedSwitch(
+		event,
+		'kind',
+		{
+			'connection-lost': () => 'network',
+			'error-response': (response) => {
+				if (response.refusal !== undefined) {
+					return response.refusal.code
+				}
 
-			return readErrorResponse(end.error) === undefined
-				? 'stream_error'
-				: 'server_error'
-		default:
-			return undefined
-	}
+				return readErrorResponse(end.error) === undefined
+					? 'stream_error'
+					: 'server_error'
+			}
+		},
+		() => undefined
+	)
 }
 
 /** Waits for a result to be posted; one that fails to post still lets the turn go on. */
 async function settle(posting: void | PromiseLike<void> | null): Promise<void> {
-	try {
-		await posting
-	} catch {
-		// The server reads the call as unanswered.
-	}
-}
-
-function toError(reason: unknown): Error {
-	return reason instanceof Error ? reason : new Error(String(reason))
+	// A failure leaves the call unanswered, which the server reads as such.
+	await tryCatch(async () => posting)
 }

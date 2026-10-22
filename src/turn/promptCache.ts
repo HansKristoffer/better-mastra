@@ -7,6 +7,7 @@
  */
 
 import { type LanguageModelMiddleware, wrapLanguageModel } from 'ai'
+import { typedSwitch, typedSwitchGroup } from 'hanzio'
 
 import type { LanguageModelObject } from './types.js'
 
@@ -67,17 +68,18 @@ export function markConversationForCache(
 }
 
 function withMarker(message: PromptMessage): PromptMessage {
-	switch (message.role) {
-		case 'system':
-		case 'user':
-		case 'assistant':
-			return {
-				...message,
-				providerOptions: withCacheControl(message.providerOptions)
-			}
-		case 'tool':
-			return withMarkerOnLastResult(message)
-	}
+	return typedSwitch(message, 'role', {
+		...typedSwitchGroup(
+			message,
+			'role',
+			['system', 'user', 'assistant'],
+			(other): PromptMessage => ({
+				...other,
+				providerOptions: withCacheControl(other.providerOptions)
+			})
+		),
+		tool: (tool) => withMarkerOnLastResult(tool)
+	})
 }
 
 function withMarkerOnLastResult(message: ToolMessage): ToolMessage {
