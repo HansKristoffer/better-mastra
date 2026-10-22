@@ -98,8 +98,7 @@ export type ChatErrorCode = (typeof chatErrorCodes)[number]
 
 /** A built-in code, or an app's own code with its status. */
 export type ChatRefusal =
-	| ChatErrorCode
-	| { readonly code: string; readonly status: number }
+	ChatErrorCode | { readonly code: string; readonly status: number }
 
 const plans = new WeakMap<object, ChatTurnPlan>()
 

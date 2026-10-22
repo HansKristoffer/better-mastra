@@ -136,8 +136,7 @@ export interface ChatSessionOptions<TResumeData = unknown> {
 	) => object | Promise<object>
 	/** The client actions requests offer and the session carries out, read per request: the screen on top may change. */
 	readonly clientActions?:
-		| readonly ClientAction[]
-		| (() => readonly ClientAction[])
+		readonly ClientAction[] | (() => readonly ClientAction[])
 	/** Reads a refusal from a response that is not OK. */
 	readonly classifyError?: ClassifyChatError
 	/** Which parts count as shown; observational memory's never do. */

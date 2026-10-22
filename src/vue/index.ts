@@ -48,19 +48,18 @@ export interface UseChatSessionOptions {
 	readonly throttleMs?: number
 }
 
-export interface ChatSessionRefs
-	extends Pick<
-		ChatSession,
-		| 'send'
-		| 'stop'
-		| 'tryAgain'
-		| 'regenerate'
-		| 'answerApproval'
-		| 'resumeRun'
-		| 'clearRestoredDraft'
-		| 'showStored'
-		| 'resumeStream'
-	> {
+export interface ChatSessionRefs extends Pick<
+	ChatSession,
+	| 'send'
+	| 'stop'
+	| 'tryAgain'
+	| 'regenerate'
+	| 'answerApproval'
+	| 'resumeRun'
+	| 'clearRestoredDraft'
+	| 'showStored'
+	| 'resumeStream'
+> {
 	readonly messages: ComputedRef<ChatSnapshot['messages']>
 	readonly status: ComputedRef<ChatSnapshot['status']>
 	readonly error: ComputedRef<ChatSnapshot['error']>

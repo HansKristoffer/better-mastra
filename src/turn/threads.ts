@@ -364,10 +364,9 @@ export async function deleteThreadEverywhere(
 		: []
 
 	await memory.deleteThread(key.threadId)
-	await (await memoryStore(memory)).clearObservationalMemory(
-		key.threadId,
-		key.resourceId
-	)
+	await (
+		await memoryStore(memory)
+	).clearObservationalMemory(key.threadId, key.resourceId)
 
 	if (runs.length === 0) return
 
@@ -563,7 +562,9 @@ async function findAnswers(
 	threadId: string,
 	messageIds: readonly string[]
 ): Promise<MastraDBMessage[]> {
-	const { messages } = await (await memoryStore(memory)).listMessagesById({
+	const { messages } = await (
+		await memoryStore(memory)
+	).listMessagesById({
 		messageIds: [...messageIds]
 	})
 

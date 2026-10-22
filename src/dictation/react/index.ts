@@ -25,9 +25,7 @@ export type DictationPhase = 'idle' | 'starting' | 'listening' | 'finishing'
 
 /** Why the last dictation gave no text: the microphone was refused or is missing, or dictation failed. */
 export type DictationNotice =
-	| 'permission_denied'
-	| 'no_microphone'
-	| 'unavailable'
+	'permission_denied' | 'no_microphone' | 'unavailable'
 
 /** The live text, published per token. */
 export interface DictationTranscriptChannel {
@@ -35,8 +33,10 @@ export interface DictationTranscriptChannel {
 	readonly read: () => string
 }
 
-export interface UseDictationOptions
-	extends Omit<DictationOptions, 'signal' | 'onEnd'> {
+export interface UseDictationOptions extends Omit<
+	DictationOptions,
+	'signal' | 'onEnd'
+> {
 	/** The text, when a dictation that heard something stops or fails; never mid-way and never after `cancel`. */
 	readonly onDictated?: (text: string) => void
 	readonly onEnd?: (end: DictationEnd) => void

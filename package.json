@@ -112,9 +112,10 @@
 	"scripts": {
 		"build": "bun scripts/build.ts",
 		"test": "bun test",
-		"typecheck": "tsc --noEmit",
-		"lint": "bun run typecheck && biome check",
-		"lint:write": "bun run typecheck && biome check --write",
+		"typecheck": "bun check",
+		"fmt": "bun fmt --no-script '**/*.ts'",
+		"lint": "bun run typecheck && bun fmt --no-script --check '**/*.ts' && biome check",
+		"lint:write": "bun run typecheck && biome check --write && bun run fmt",
 		"attw": "attw --pack . --profile esm-only",
 		"publint": "publint",
 		"verify:package": "node scripts/verify-package.mjs"
@@ -230,5 +231,5 @@
 		"vue": "^3.5.44",
 		"zod": "^4.6.7"
 	},
-	"packageManager": "bun@1.4.2"
+	"packageManager": "bun@1.4.4"
 }

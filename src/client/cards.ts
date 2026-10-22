@@ -18,9 +18,7 @@ export type CardSchemas = Readonly<Record<string, z.ZodType>>
 
 /** Which card a tool draws: a typed card, the generic row, or nothing. */
 export type CardKindOf<S extends CardSchemas> =
-	| (keyof S & string)
-	| 'generic'
-	| 'silent'
+	(keyof S & string) | 'generic' | 'silent'
 
 /** What a client draws for one tool part. */
 export type Card<S extends CardSchemas> =

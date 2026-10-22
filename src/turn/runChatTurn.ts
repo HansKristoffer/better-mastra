@@ -195,8 +195,7 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 	onFirstText?(elapsedMs: number, scope: TScope): void
 	/** The thread's title from its messages, written once; `false` writes none. */
 	readonly deriveTitle?:
-		| false
-		| ((messages: readonly UIMessage[]) => string | null)
+		false | ((messages: readonly UIMessage[]) => string | null)
 	/** Replies offered after an answer, from this agent. */
 	readonly replySuggestions?: {
 		readonly agentId: string

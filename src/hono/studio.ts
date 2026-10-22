@@ -185,8 +185,7 @@ async function readStudioForm(c: Context): Promise<Record<string, unknown>> {
 
 function bunRemoteAddress(c: Context): string | undefined {
 	const server = c.env as
-		| { requestIP?: (request: Request) => { address: string } | null }
-		| undefined
+		{ requestIP?: (request: Request) => { address: string } | null } | undefined
 
 	return server?.requestIP?.(c.req.raw)?.address
 }
