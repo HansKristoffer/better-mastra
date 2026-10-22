@@ -25,7 +25,11 @@
 			},
 			"correctness": {
 				"noUnusedFunctionParameters": "warn",
-				"noUnusedVariables": "warn"
+				"noUnusedVariables": "warn",
+				"useImportExtensions": {
+					"level": "error",
+					"options": { "forceJsExtensions": true }
+				}
 			}
 		}
 	},
@@ -54,6 +58,9 @@
 					"suspicious": {
 						"noExplicitAny": "off",
 						"noConsole": "off"
+					},
+					"correctness": {
+						"useImportExtensions": "off"
 					}
 				}
 			}

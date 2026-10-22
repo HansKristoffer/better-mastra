@@ -6,8 +6,11 @@
 		"emitDeclarationOnly": false,
 		"outDir": "dist",
 		"rootDir": "src",
-		"module": "NodeNext",
-		"moduleResolution": "NodeNext",
+		// Bundler, not NodeNext: hanzio's root types re-export extensionless
+		// paths that NodeNext cannot follow. The emitted JS is the same, and
+		// Biome's useImportExtensions keeps our own imports Node-valid.
+		"module": "ESNext",
+		"moduleResolution": "Bundler",
 		"target": "ES2022",
 		"lib": [
 			"ES2022"
