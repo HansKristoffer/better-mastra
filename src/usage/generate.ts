@@ -23,7 +23,7 @@ import {
 	type RunUsage,
 	type StreamTextUsage
 } from './stream.js'
-import { timeoutSignal } from 'hanzio'
+import { startTimer, timeoutSignal } from 'hanzio'
 
 /** One metered model run, handed to the app's sink with the caller's context. */
 export type UsageRecord<TContext> = StreamTextUsage & {
@@ -294,7 +294,7 @@ export function withUsage<TContext>(input: {
 						experimental_repairText: repairObjectText
 					})
 			})
-		const startedAt = performance.now()
+		const elapsed = startTimer()
 		const { result, batched } = await call()
 			.catch((error: unknown) =>
 				isCutOffAnswer(error) ? call(true) : Promise.reject(error)
@@ -302,14 +302,10 @@ export function withUsage<TContext>(input: {
 			.catch((error: unknown) =>
 				rethrowAiFailure(withNoObjectDetails(error), context)
 			)
-		reportGenerate(
-			context,
-			model,
-			result,
-			performance.now() - startedAt,
-			batched,
-			{ promptVersion, metadata }
-		)
+		reportGenerate(context, model, result, elapsed(), batched, {
+			promptVersion,
+			metadata
+		})
 		return result
 	}
 
@@ -333,7 +329,7 @@ export function withUsage<TContext>(input: {
 			metadata,
 			...rest
 		} = options
-		const startedAt = performance.now()
+		const elapsed = startTimer()
 		const { result, batched } = await generate({
 			model,
 			reasoning,
@@ -350,14 +346,10 @@ export function withUsage<TContext>(input: {
 					...(messages !== undefined ? { messages } : { prompt: prompt ?? '' })
 				})
 		}).catch((error: unknown) => rethrowAiFailure(error, context))
-		reportGenerate(
-			context,
-			model,
-			result,
-			performance.now() - startedAt,
-			batched,
-			{ promptVersion, metadata }
-		)
+		reportGenerate(context, model, result, elapsed(), batched, {
+			promptVersion,
+			metadata
+		})
 		return result
 	}
 

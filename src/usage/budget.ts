@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { isBatchingModelCalls } from '../models/openrouter-batch.js'
-import { anySignal } from 'hanzio'
+import { anySignal, startTimer } from 'hanzio'
 
 /**
  * Shared capacity for one provider lane, usually across a fleet (a Redis
@@ -165,7 +165,7 @@ export function createModelBudget(
 	) {
 		const scope = scopes.getStore()
 		if (!scope) return request()
-		const startedAt = performance.now()
+		const admission = startTimer()
 		let stats = scope.metrics.get(call.provider)
 		if (!stats) {
 			stats = {
@@ -185,8 +185,8 @@ export function createModelBudget(
 		const signal = anySignal(scope.signal, call.signal)
 		return runModelCall(() =>
 			limit(async () => {
-				const executingAt = performance.now()
-				metrics.admissionMs += Math.round(executingAt - startedAt)
+				metrics.admissionMs += Math.round(admission())
+				const execution = startTimer()
 				metrics.calls++
 				if (call.retry) metrics.retries++
 				const rateLimited = async (retryAfter: string | null | undefined) => {
@@ -215,7 +215,7 @@ export function createModelBudget(
 					else metrics.failed++
 					throw error
 				} finally {
-					const duration = Math.round(performance.now() - executingAt)
+					const duration = Math.round(execution())
 					metrics.executionMs += duration
 					if (metrics.durations.length < 10_000)
 						metrics.durations.push(duration)
