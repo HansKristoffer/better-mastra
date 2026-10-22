@@ -4,6 +4,8 @@
  * itself, so a client bundle never imports server code.
  */
 
+import { isRecord, keyBy, mapValues } from 'hanzio'
+
 import type { DefinedTool, ToolKind } from './defineTool.js'
 
 export interface ToolManifestEntry<TKind extends string = ToolKind> {
@@ -26,18 +28,13 @@ export function buildToolManifest<TKind extends string = ToolKind>(
 	definitions: readonly DefinedTool[],
 	options: { readonly kind?: (definition: DefinedTool) => TKind } = {}
 ): ToolManifest<TKind> {
-	return Object.fromEntries(
-		definitions.map((definition) => [
-			definition.name,
-			{
-				...definition.manifest,
-				kind: options.kind?.(definition) ?? (definition.kind as TKind),
-				tier: definition.tier,
-				card: definition.card,
-				invalidates: definition.invalidates
-			}
-		])
-	)
+	return mapValues(keyBy(definitions, 'name'), (definition) => ({
+		...definition.manifest,
+		kind: options.kind?.(definition) ?? (definition.kind as TKind),
+		tier: definition.tier,
+		card: definition.card,
+		invalidates: definition.invalidates
+	}))
 }
 
 /**
@@ -83,9 +80,7 @@ const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 function renderValue(value: unknown, depth: number, used: number): string {
 	if (Array.isArray(value)) return renderArray(value, depth, used)
 
-	if (typeof value === 'object' && value !== null) {
-		return renderObject(value as Record<string, unknown>, depth)
-	}
+	if (isRecord(value)) return renderObject(value, depth)
 
 	return typeof value === 'string' ? quote(value) : String(value ?? 'undefined')
 }

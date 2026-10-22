@@ -1,4 +1,4 @@
-import { sortBy, sumBy } from 'hanzio'
+import { getUniqueValues, sortBy, stableStringify, sumBy } from 'hanzio'
 
 import {
 	caseTurn,
@@ -79,7 +79,7 @@ export function inventedLinkIds(
 			// An id has digits; a path word like `knowledge-hub` does not.
 			.filter((token) => /\d/.test(token))
 	)
-	return [...new Set(ids)].filter((id) => !seen.includes(id))
+	return getUniqueValues(ids).filter((id) => !seen.includes(id))
 }
 
 /** How the app names and sorts its tools; every field is optional. */
@@ -140,7 +140,7 @@ export function expectationChecks(
 			check: 'changes nothing',
 			pass: writes.length === 0,
 			...(writes.length
-				? { detail: `wrote with ${[...new Set(writes)].join(', ')}` }
+				? { detail: `wrote with ${getUniqueValues(writes).join(', ')}` }
 				: {})
 		})
 	}
@@ -224,7 +224,7 @@ export function answerRuleChecks(
 			return turn.toolCalls
 				.filter((call) => isClientAction(call.name))
 				.flatMap((call) => {
-					const key = `${call.name}:${JSON.stringify(call.input)}`
+					const key = `${call.name}:${stableStringify(call.input)}`
 					if (seen.has(key)) return [call.name]
 					seen.add(key)
 					return []

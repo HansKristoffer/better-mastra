@@ -9,7 +9,7 @@
 
 import type { RequestContext } from '@mastra/core/request-context'
 import { createTool, type Tool } from '@mastra/core/tools'
-import { omit } from 'hanzio'
+import { keyBy, mapValues, omit } from 'hanzio'
 
 import { dryRunResult, isDryRun, isDryRunResult } from './dryRun.js'
 import { withHiddenInputs } from './toolInputSchema.js'
@@ -145,13 +145,11 @@ export function toToolSet(definitions: readonly DefinedTool[]): {
 	readonly tools: Record<string, AnyTool>
 	readonly toolTiers: Record<string, string>
 } {
+	const byName = keyBy(definitions, 'name')
+
 	return {
-		tools: Object.fromEntries(
-			definitions.map((tool) => [tool.name, tool.tool])
-		),
-		toolTiers: Object.fromEntries(
-			definitions.map((tool) => [tool.name, tool.tier])
-		)
+		tools: mapValues(byName, (tool) => tool.tool),
+		toolTiers: mapValues(byName, (tool) => tool.tier)
 	}
 }
 

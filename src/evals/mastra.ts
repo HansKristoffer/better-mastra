@@ -24,7 +24,7 @@ import type {
 	DatasetItemPayload,
 	DatasetItemToolMock
 } from '@mastra/core/storage'
-import { isRecord, stableStringify, typedSwitch } from 'hanzio'
+import { isRecord, mapValues, stableStringify, typedSwitch } from 'hanzio'
 import type { EvalCase, EvalToolCall, EvalTrace } from './case.js'
 import { checkTrace, type EvalCheckOptions } from './checks.js'
 
@@ -81,10 +81,7 @@ function answerText(message: MastraDBMessage): string {
 
 function textOf(value: unknown): string {
 	if (typeof value === 'string') return value
-	const text =
-		typeof value === 'object' && value !== null && 'value' in value
-			? value.value
-			: undefined
+	const text = isRecord(value) ? value.value : undefined
 	return typeof text === 'string' ? text : JSON.stringify(value)
 }
 
@@ -259,11 +256,7 @@ export async function findOrCreateDataset(
 	try {
 		return await mastra.datasets.get({ id: definition.id })
 	} catch (error) {
-		const notFound =
-			typeof error === 'object' &&
-			error !== null &&
-			'id' in error &&
-			error.id === 'DATASET_NOT_FOUND'
+		const notFound = isRecord(error) && error.id === 'DATASET_NOT_FOUND'
 		if (!notFound) throw error
 		return mastra.datasets.create({ ...definition, targetType: 'agent' })
 	}
@@ -462,13 +455,10 @@ export function replayRecordedTools<T extends Record<string, Executable>>(
 	}
 	return {
 		// A copy with the same prototype and fields, so the real tool stays as it was.
-		tools: Object.fromEntries(
-			Object.entries(tools).map(([name, tool]) => [
-				name,
-				Object.assign(Object.create(Object.getPrototypeOf(tool)), tool, {
-					execute: serve(name)
-				})
-			])
+		tools: mapValues(tools, (tool, name) =>
+			Object.assign(Object.create(Object.getPrototypeOf(tool)), tool, {
+				execute: serve(name)
+			})
 		) as T,
 		unmatchedCalls: () => [...unmatched]
 	}

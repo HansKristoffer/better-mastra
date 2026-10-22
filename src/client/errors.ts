@@ -5,7 +5,7 @@
  */
 
 import { APICallError } from 'ai'
-import { safeJsonParse } from 'hanzio'
+import { isOneOf, safeJsonParse } from 'hanzio'
 
 import { type ChatErrorResponse, ChatConnectionLostError } from './fetch.js'
 import type { ChatRefusal } from './turn.js'
@@ -20,12 +20,12 @@ export type ClassifyChatError = (
 // CONSTANTS
 
 /** Refusals worth trying again: the cause passes (a turn ends, a limit resets, consent is given). */
-const RETRYABLE_CODES = new Set([
+const RETRYABLE_CODES = [
 	'turn_in_progress',
 	'temporarily_unavailable',
 	'usage_limited',
 	'consent_required'
-])
+]
 
 /** The refusal of a request that answers an approval or suspended run the server no longer has waiting. */
 const EXPIRED_CODE = 'change_expired'
@@ -46,7 +46,7 @@ export const classifyChatError: ClassifyChatError = ({ status, body }) => {
 	return {
 		code,
 		canTryAgain:
-			RETRYABLE_CODES.has(code) ||
+			isOneOf(RETRYABLE_CODES, code) ||
 			(code !== EXPIRED_CODE &&
 				(status === 409 || status === 429 || status >= 500)),
 		expired: code === EXPIRED_CODE

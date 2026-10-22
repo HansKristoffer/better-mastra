@@ -24,7 +24,7 @@ import {
 	type WorkflowsStorage
 } from '@mastra/core/storage'
 import type { UIMessage } from 'ai'
-import { invariant, must, safeJsonParse } from 'hanzio'
+import { compact, invariant, must, safeJsonParse } from 'hanzio'
 
 import {
 	joinResumedAnswers,
@@ -345,7 +345,7 @@ export function createThreadHandlers<TScope>(
 			})
 		)
 
-		return Object.fromEntries(ratings.filter((entry) => entry !== undefined))
+		return Object.fromEntries(compact(ratings))
 	}
 }
 

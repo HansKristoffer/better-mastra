@@ -1,4 +1,4 @@
-import { promiseTimeout, safeJsonParse } from 'hanzio'
+import { promiseTimeout, safeJsonParse, tryCatch } from 'hanzio'
 /**
  * The chat's fetch: the platform's fetch (`expo/fetch` on React Native, which
  * streams a body) with the headers the app adds, one connect retry for a
@@ -262,11 +262,7 @@ function isDraining(status: number, body: unknown): boolean {
 }
 
 async function readText(response: Response): Promise<string> {
-	try {
-		return await response.text()
-	} catch {
-		return ''
-	}
+	return (await tryCatch(() => response.text())).data ?? ''
 }
 
 function isAbort(error: unknown, signal: SignalLike): boolean {

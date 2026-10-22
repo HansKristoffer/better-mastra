@@ -5,6 +5,8 @@
  * loads no native module. Every ending, asked for or not, releases the
  * microphone and the socket once.
  */
+import { isOneOf } from 'hanzio'
+
 import { webSocketFactory } from './adapters.js'
 import {
 	applySonioxResponse,
@@ -184,7 +186,7 @@ async function freshKey(
 function isNoMicrophone(error: unknown): boolean {
 	const name = (error as { name?: unknown } | null)?.name
 
-	return name === 'NotFoundError' || name === 'OverconstrainedError'
+	return isOneOf(['NotFoundError', 'OverconstrainedError'], name)
 }
 
 /**

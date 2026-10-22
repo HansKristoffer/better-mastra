@@ -7,7 +7,12 @@
 
 import type { UIMessage } from 'ai'
 import { getToolName, isToolUIPart } from 'ai'
-import { isRecord, typedSwitch, typedSwitchGroup } from 'hanzio'
+import {
+	isRecord,
+	stableStringify,
+	typedSwitch,
+	typedSwitchGroup
+} from 'hanzio'
 import { z } from 'zod'
 
 import { currentUserTurn } from './messages.js'
@@ -355,5 +360,5 @@ function stepOf(
 
 /** The input with the model's nulls left out, so the same call matches however the model wrote it. */
 function callKey(action: ClientAction, input: unknown): string {
-	return JSON.stringify(normalizeModelNulls(action.inputSchema, input ?? {}))
+	return stableStringify(normalizeModelNulls(action.inputSchema, input ?? {}))
 }

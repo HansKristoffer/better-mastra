@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto'
 import { type EmbeddingModel, embed, embedMany as aiEmbedMany } from 'ai'
-import { normalizeWhitespace } from 'hanzio'
+import {
+	backgroundPromise,
+	chunkArray,
+	normalizeWhitespace,
+	pMap
+} from 'hanzio'
 import { errorAttributes, type Logger, silentLogger } from '../models/route.js'
 import { BoundedPromiseCache } from './bounded-promise-cache.js'
 
@@ -114,9 +119,9 @@ export function createEmbedder<TContext = undefined>(input: {
 			const result = await embed({ model: input.model, value })
 			tokens = result.usage.tokens ?? 0
 			const vector = checked(result.embedding)
-			void input.cache
-				?.set(key, JSON.stringify(vector), SHARED_TTL_SECONDS)
-				.catch(() => undefined)
+			backgroundPromise(async () =>
+				input.cache?.set(key, JSON.stringify(vector), SHARED_TTL_SECONDS)
+			)
 			return vector
 		})
 		report(tokens, context)
@@ -124,28 +129,20 @@ export function createEmbedder<TContext = undefined>(input: {
 	}
 
 	async function embedMany(values: readonly string[], context?: TContext) {
-		const batches: string[][] = []
-		for (let start = 0; start < values.length; start += batchSize) {
-			batches.push(values.slice(start, start + batchSize))
-		}
-		const results: number[][][] = new Array(batches.length)
-		let next = 0
-		const worker = async () => {
-			while (next < batches.length) {
-				const index = next++
-				const batch = batches[index]!
+		const results = await pMap(
+			chunkArray(values, batchSize),
+			async (batch) => {
 				const result = await aiEmbedMany({ model: input.model, values: batch })
 				if (result.embeddings.length !== batch.length) {
 					throw new Error(
 						`Incomplete embedding batch: ${result.embeddings.length} of ${batch.length}`
 					)
 				}
-				results[index] = result.embeddings.map(checked)
+				const embeddings = result.embeddings.map(checked)
 				report(result.usage.tokens ?? 0, context)
-			}
-		}
-		await Promise.all(
-			Array.from({ length: Math.min(concurrency, batches.length) }, worker)
+				return embeddings
+			},
+			{ concurrency }
 		)
 		return results.flat()
 	}

@@ -6,7 +6,7 @@ import {
 	NoObjectGeneratedError
 } from 'ai'
 import type { z } from 'zod'
-import { startTimer, timeoutSignal } from 'hanzio'
+import { startTimer, timeoutSignal, tryCatch } from 'hanzio'
 import { anthropicSafeZodSchema } from '../models/anthropic-safe-schema.js'
 import {
 	type AiBillingError,
@@ -391,9 +391,5 @@ export function withUsage<TContext>(input: {
 
 /** Null rather than throwing: the tokens are known, and losing the row would cost money. */
 async function settledSteps(steps: PromiseLike<readonly unknown[]>) {
-	try {
-		return await steps
-	} catch {
-		return null
-	}
+	return (await tryCatch(async () => steps)).data
 }

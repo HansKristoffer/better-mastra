@@ -4,7 +4,7 @@ import type {
 	GetMetricBreakdownArgs,
 	GetMetricBreakdownResponse as MetricBreakdown
 } from '@mastra/core/storage'
-import { sumBy } from 'hanzio'
+import { must, sortBy, sumBy } from 'hanzio'
 import { type Logger, silentLogger } from '../models/route.js'
 
 /** One group's tokens and cost over a time window. */
@@ -37,11 +37,10 @@ export async function readUsageBreakdown(input: {
 	readonly logger?: Logger
 }): Promise<readonly UsageBreakdownRow[]> {
 	const { mastra, groupBy, from, to } = input
-	const observability = await mastra.getStorage()?.getStore('observability')
-
-	if (!observability) {
-		throw new Error('The Mastra instance has no observability storage')
-	}
+	const observability = must(
+		await mastra.getStorage()?.getStore('observability'),
+		() => new Error('The Mastra instance has no observability storage')
+	)
 
 	const readTotal = (name: string): Promise<MetricBreakdown> =>
 		observability.getMetricBreakdown({
@@ -129,7 +128,7 @@ export function averageOf(values: readonly number[]): number | undefined {
 
 /** The middle value, or the mean of the two middle values. */
 export function medianOf(values: readonly number[]): number | undefined {
-	const sorted = [...values].sort((a, b) => a - b)
+	const sorted = sortBy(values)
 	if (sorted.length === 0) return undefined
 	const middle = Math.floor(sorted.length / 2)
 	return sorted.length % 2 === 0

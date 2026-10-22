@@ -1,5 +1,5 @@
 import type { UIMessageChunk } from 'ai'
-import { getErrorMessage, safeJsonParse } from 'hanzio'
+import { getErrorMessage, safeJsonParse, throttle, withTimeout } from 'hanzio'
 import type { BlockingReader, ResumableRedis, StreamEntry } from './redis.js'
 
 export { bunRedis, ioRedis, upstashRedis } from './redis.js'
@@ -94,7 +94,8 @@ interface LiveRun {
 	listeners: Set<Listener>
 	spillKeys: string[]
 	pending: UIMessageChunk[]
-	flushTimer?: ReturnType<typeof setTimeout> | undefined
+	/** Flushes `pending` on the leading edge, then at most once per `spillFlushMs`. */
+	scheduleFlush: (() => void) & { cancel(): void }
 	renewTimer?: ReturnType<typeof setInterval>
 	evictTimer?: ReturnType<typeof setTimeout>
 	finished: Promise<void>
@@ -171,7 +172,9 @@ export function createResumableStreams(
 	/** Redis failures never fail a turn: log and degrade. */
 	const soft = <T>(op: string, promise: Promise<T>): Promise<T | undefined> =>
 		promise.catch((error) => {
-			logger.warn(`resumable: redis ${op} failed`, { error: String(error) })
+			logger.warn(`resumable: redis ${op} failed`, {
+				error: getErrorMessage(error)
+			})
 			return undefined
 		})
 
@@ -180,7 +183,7 @@ export function createResumableStreams(
 			.subscribe(controlChannel(replicaId), onControl)
 			.catch((error) => {
 				logger.warn('resumable: control channel subscribe failed', {
-					error: String(error)
+					error: getErrorMessage(error)
 				})
 				unsubscribe = undefined
 				return undefined
@@ -212,16 +215,6 @@ export function createResumableStreams(
 		for (const key of run.spillKeys) writeSpill(key, entry)
 	}
 
-	/** Leading edge immediately, then at most one batch per `spillFlushMs`. */
-	function scheduleFlush(run: LiveRun) {
-		if (run.flushTimer) return
-		flush(run)
-		run.flushTimer = setTimeout(() => {
-			run.flushTimer = undefined
-			if (run.pending.length) scheduleFlush(run)
-		}, spillFlushMs)
-	}
-
 	function push(run: LiveRun, chunk: UIMessageChunk) {
 		for (const listener of run.listeners) listener(chunk)
 		if (!run.overflow) {
@@ -237,13 +230,13 @@ export function createResumableStreams(
 		}
 		if (run.spillKeys.length) {
 			append(run.pending, chunk)
-			scheduleFlush(run)
+			run.scheduleFlush()
 		}
 	}
 
 	function finish(run: LiveRun) {
 		run.done = true
-		clearTimeout(run.flushTimer)
+		run.scheduleFlush.cancel()
 		clearInterval(run.renewTimer)
 		flush(run)
 		for (const key of run.spillKeys) writeSpill(key, { end: 'done' })
@@ -326,7 +319,7 @@ export function createResumableStreams(
 		} catch (error) {
 			if (!released)
 				logger.warn('resumable: cross-replica reconnect failed', {
-					error: String(error)
+					error: getErrorMessage(error)
 				})
 		}
 		const first = parse<SpillEntry>(entries[0]?.value)
@@ -381,6 +374,7 @@ export function createResumableStreams(
 				listeners: new Set(),
 				spillKeys: [],
 				pending: [],
+				scheduleFlush: throttle(() => flush(run), spillFlushMs),
 				finished,
 				resolveFinished
 			}
@@ -437,15 +431,11 @@ export function createResumableStreams(
 
 		async close() {
 			closed = true
-			let timer: ReturnType<typeof setTimeout> | undefined
 			const active = [...runs.values()]
 				.filter((run) => !run.done)
 				.map((run) => run.finished)
-			await Promise.race([
-				Promise.all(active),
-				new Promise((resolve) => (timer = setTimeout(resolve, drainTimeoutMs)))
-			])
-			clearTimeout(timer)
+			// Runs still going after the drain window are aborted below.
+			await withTimeout(Promise.all(active), drainTimeoutMs).catch(() => {})
 			for (const run of runs.values()) {
 				if (!run.done) run.abort.abort()
 				clearTimeout(run.evictTimer)

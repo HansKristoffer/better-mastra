@@ -1,6 +1,7 @@
 import { createScorer } from '@mastra/core/evals'
 import { generateText, type LanguageModel, Output } from 'ai'
 import { z } from 'zod'
+import { isDefined } from 'hanzio'
 import { type EvalScorer, readRunOutput, type ScorerRun } from './mastra.js'
 
 /**
@@ -130,7 +131,7 @@ function renderPrompt(
 		'',
 		transcript(input.turns)
 	]
-		.filter((line) => line !== null)
+		.filter(isDefined)
 		.join('\n')
 }
 

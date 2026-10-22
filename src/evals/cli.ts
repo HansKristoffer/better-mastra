@@ -12,6 +12,7 @@ import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { defineCli, defineCommand } from 'hanzio/cli'
 import { z } from 'zod'
+import { must } from 'hanzio'
 import type { EvalCase } from './case.js'
 import { type EvalConfig, runEvalSuite, selectCases } from './config.js'
 import {
@@ -45,8 +46,7 @@ type RunInput = z.output<typeof runInput>
 async function loadConfig(path: string): Promise<EvalConfig> {
 	const file = resolve(path)
 	const module = await import(pathToFileURL(file).href)
-	if (!module.default) throw new Error(`${file} has no default export`)
-	return module.default
+	return must(module.default, () => new Error(`${file} has no default export`))
 }
 
 async function readReport(file: string): Promise<EvalReport> {

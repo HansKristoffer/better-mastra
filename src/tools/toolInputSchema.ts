@@ -7,7 +7,13 @@
  */
 
 import type { StandardSchemaWithJSON } from '@mastra/core/schema'
-import { isRecord, typedSwitch, typedSwitchGroup } from 'hanzio'
+import {
+	isRecord,
+	mapValues,
+	omit,
+	typedSwitch,
+	typedSwitchGroup
+} from 'hanzio'
 import { z } from 'zod'
 
 type JsonSchema = Record<string, unknown>
@@ -149,16 +155,11 @@ export function coerceDateStrings(
 			),
 			object: (object) =>
 				isRecord(value)
-					? Object.fromEntries(
-							Object.entries(value).map(([key, field]) => {
-								const fieldSchema = object.shape[key]
+					? mapValues(value, (field, key) => {
+							const fieldSchema = object.shape[key]
 
-								return [
-									key,
-									fieldSchema ? coerceDateStrings(fieldSchema, field) : field
-								]
-							})
-						)
+							return fieldSchema ? coerceDateStrings(fieldSchema, field) : field
+						})
 					: value,
 			array: (array) =>
 				Array.isArray(value)
@@ -235,11 +236,10 @@ function withoutHiddenProperties(
 	hiddenInputs: readonly string[]
 ): JsonSchema {
 	const { required, ...rest } = jsonSchema
-	const properties = { ...(jsonSchema.properties as JsonSchema | undefined) }
-
-	for (const name of hiddenInputs) {
-		delete properties[name]
-	}
+	const properties = omit(
+		{ ...(jsonSchema.properties as JsonSchema | undefined) },
+		hiddenInputs
+	)
 
 	const visibleRequired = ((required as string[] | undefined) ?? []).filter(
 		(name) => !hiddenInputs.includes(name)
@@ -294,11 +294,7 @@ function isHiddenInputIssue(
 }
 
 function withoutKeys(value: unknown, keys: readonly string[]): unknown {
-	return isRecord(value)
-		? Object.fromEntries(
-				Object.entries(value).filter(([key]) => !keys.includes(key))
-			)
-		: value
+	return isRecord(value) ? omit(value, keys) : value
 }
 
 function refusesOffsets(def: z.core.$ZodStringDef): boolean {

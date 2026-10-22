@@ -29,7 +29,14 @@ import {
 	lastAssistantMessageIsCompleteWithApprovalResponses,
 	type UIMessage
 } from 'ai'
-import { typedSwitch, toError } from 'hanzio'
+import {
+	createEmitter,
+	isOneOf,
+	toError,
+	trimTrailingSlash,
+	tryCatch,
+	typedSwitch
+} from 'hanzio'
 
 import {
 	type ClientAction,
@@ -233,7 +240,7 @@ export function createChatSession<TResumeData = unknown>(
 	const classifyError = options.classifyError ?? classifyChatError
 	const isUserFacing = options.isUserFacingPart ?? isUserFacingPart
 	const resumable = options.resume === true
-	const listeners = new Set<() => void>()
+	const changes = createEmitter<{ change: undefined }>()
 	let snapshot: ChatSessionSnapshot = {
 		turn: initialChatTurnState,
 		restoredDraft: undefined,
@@ -740,9 +747,7 @@ export function createChatSession<TResumeData = unknown>(
 	function publish(next: ChatSessionSnapshot): void {
 		snapshot = next
 
-		for (const listener of listeners) {
-			listener()
-		}
+		changes.emit('change')
 	}
 
 	/** Stop pressed: the request is aborted, and a server that keeps runs going is told to stop. */
@@ -761,7 +766,7 @@ export function createChatSession<TResumeData = unknown>(
 		const send =
 			options.transport.fetch ??
 			((input, init) => globalThis.fetch(input, init))
-		const url = `${options.transport.api.replace(/\/$/, '')}/${encodeURIComponent(threadId)}/stop`
+		const url = `${trimTrailingSlash(options.transport.api)}/${encodeURIComponent(threadId)}/stop`
 
 		try {
 			await send(url, {
@@ -779,8 +784,7 @@ export function createChatSession<TResumeData = unknown>(
 		if (
 			!resumable ||
 			!focused ||
-			chat.status === 'submitted' ||
-			chat.status === 'streaming'
+			isOneOf(['submitted', 'streaming'], chat.status)
 		) {
 			return
 		}
@@ -797,13 +801,7 @@ export function createChatSession<TResumeData = unknown>(
 		threadId,
 		chat,
 		getSnapshot: () => snapshot,
-		subscribe: (listener) => {
-			listeners.add(listener)
-
-			return () => {
-				listeners.delete(listener)
-			}
-		},
+		subscribe: (listener) => changes.on('change', listener),
 		send: (text, sendOptions) => {
 			const before = snapshot.turn
 			const files = sendOptions?.files ?? []
@@ -998,9 +996,6 @@ function failureCodeOf(
 
 /** Waits for a result to be posted; one that fails to post still lets the turn go on. */
 async function settle(posting: void | PromiseLike<void> | null): Promise<void> {
-	try {
-		await posting
-	} catch {
-		// The server reads the call as unanswered.
-	}
+	// A failure leaves the call unanswered, which the server reads as such.
+	await tryCatch(async () => posting)
 }

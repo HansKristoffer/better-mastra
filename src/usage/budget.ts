@@ -1,6 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { setTimeout as sleep } from 'node:timers/promises'
-import { anySignal, startTimer } from 'hanzio'
+import {
+	anySignal,
+	isRecord,
+	parseRetryAfter,
+	promiseTimeout,
+	sortBy,
+	startTimer
+} from 'hanzio'
 import { isBatchingModelCalls } from '../models/openrouter-batch.js'
 
 /**
@@ -74,7 +80,7 @@ export function localConcurrencyLimit(max: number): ConcurrencyLimit {
 	const limit = <T>(run: () => Promise<T>, signal?: AbortSignal) =>
 		pool(async () => {
 			const wait = coolUntil - Date.now()
-			if (wait > 0) await sleep(wait, undefined, { signal })
+			if (wait > 0) await promiseTimeout(wait, signal ? { signal } : {})
 			return run()
 		}, signal)
 	return Object.assign(limit, {
@@ -86,7 +92,7 @@ export function localConcurrencyLimit(max: number): ConcurrencyLimit {
 
 /** A 429 as the AI SDK throws it (`APICallError`) or any error shaped like it. */
 function rateLimitRetryAfter(error: unknown): string | null | undefined {
-	if (typeof error !== 'object' || error === null) return undefined
+	if (!isRecord(error)) return undefined
 	const { statusCode, responseHeaders } = error as {
 		statusCode?: unknown
 		responseHeaders?: Record<string, string>
@@ -192,14 +198,8 @@ export function createModelBudget(
 				const rateLimited = async (retryAfter: string | null | undefined) => {
 					metrics.failed++
 					metrics.rateLimited++
-					const seconds = retryAfter ? Number(retryAfter) : Number.NaN
-					const delay = Number.isFinite(seconds)
-						? seconds * 1000
-						: retryAfter
-							? Date.parse(retryAfter) - Date.now()
-							: 1000
 					await limit.tripCooldown(
-						Number.isFinite(delay) ? Math.max(1000, delay) : 1000
+						Math.max(1000, parseRetryAfter(retryAfter) ?? 1000)
 					)
 				}
 
@@ -228,7 +228,7 @@ export function createModelBudget(
 	function readMetrics() {
 		return [...(scopes.getStore()?.metrics.values() ?? [])].map(
 			({ durations, ...stats }) => {
-				const sorted = [...durations].sort((a, b) => a - b)
+				const sorted = sortBy(durations)
 				const percentile = (p: number) =>
 					sorted[Math.max(0, Math.ceil(sorted.length * p) - 1)] ?? 0
 				return { ...stats, p50Ms: percentile(0.5), p90Ms: percentile(0.9) }

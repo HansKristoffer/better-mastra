@@ -7,6 +7,8 @@
  * whose data changes never registers again.
  */
 
+import { createEmitter } from 'hanzio'
+
 import type { ClientAction } from './actions.js'
 
 // TYPES
@@ -59,16 +61,14 @@ const NO_ACTIONS: readonly ClientAction[] = []
 
 /** An empty stack: no screen until one focuses. */
 export function createScreenContextStack<T>(): ScreenContextStack<T> {
-	const listeners = new Set<() => void>()
+	const changes = createEmitter<{ change: undefined }>()
 	let stack: readonly StackItem<T>[] = []
 	let pinned: Pinned<T> | undefined
 
 	const commit = (next: readonly StackItem<T>[]) => {
 		stack = next
 
-		for (const listener of listeners) {
-			listener()
-		}
+		changes.emit('change')
 	}
 
 	const putOnTop = (instanceId: string, entry: ScreenEntry<T> | undefined) => {
@@ -103,12 +103,6 @@ export function createScreenContextStack<T>(): ScreenContextStack<T> {
 		},
 		read: () => (pinned === undefined ? top()?.read() : pinned.value),
 		actions: () => pinned?.actions ?? top()?.actions ?? NO_ACTIONS,
-		subscribe: (listener) => {
-			listeners.add(listener)
-
-			return () => {
-				listeners.delete(listener)
-			}
-		}
+		subscribe: (listener) => changes.on('change', listener)
 	}
 }

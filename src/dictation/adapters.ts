@@ -4,6 +4,9 @@
  * React Native's app state. Each is typed by the few members it uses, so no
  * platform library is imported.
  */
+
+import { isOneOf } from 'hanzio'
+
 import type {
 	DictationFrame,
 	DictationLifecycle,
@@ -271,7 +274,7 @@ export function mediaRecorderMicrophone(
 			} catch (error) {
 				if (
 					error instanceof Error &&
-					(error.name === 'NotAllowedError' || error.name === 'SecurityError')
+					isOneOf(['NotAllowedError', 'SecurityError'], error.name)
 				) {
 					return false
 				}

@@ -6,7 +6,7 @@
  */
 
 import { getToolName, isToolUIPart, type UIMessage } from 'ai'
-import { typedSwitch } from 'hanzio'
+import { isRecord, typedSwitch } from 'hanzio'
 
 // TYPES
 
@@ -56,11 +56,10 @@ export function readSuspendedRun(
 		return undefined
 	}
 
-	const data = part.data as Record<string, unknown> | null
+	const { data } = part
 
 	if (
-		typeof data !== 'object' ||
-		data === null ||
+		!isRecord(data) ||
 		typeof data.runId !== 'string' ||
 		typeof data.toolCallId !== 'string' ||
 		typeof data.toolName !== 'string' ||

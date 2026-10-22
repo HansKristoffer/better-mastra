@@ -1,4 +1,13 @@
-import { groupBy, mapValues, recordFromKeys, sumBy } from 'hanzio'
+import {
+	getUniqueValues,
+	groupBy,
+	isRecord,
+	keyBy,
+	mapValues,
+	recordFromKeys,
+	sortBy,
+	sumBy
+} from 'hanzio'
 
 import type { EvalTrace } from './case.js'
 import type { EvalCheck } from './checks.js'
@@ -32,7 +41,7 @@ export type EvalReport<Verdict = unknown> = {
 /** The nearest-rank percentile; null without values. */
 export function percentile(values: readonly number[], rank: number) {
 	if (values.length === 0) return null
-	const sorted = [...values].sort((a, b) => a - b)
+	const sorted = sortBy(values)
 	return (
 		sorted[Math.max(0, Math.ceil((rank / 100) * sorted.length) - 1)] ?? null
 	)
@@ -47,10 +56,7 @@ function share(part: number, whole: number) {
  * share of `done` (as `done`), whatever the verdict schema.
  */
 function judgeShares(verdicts: readonly unknown[]) {
-	const objects = verdicts.filter(
-		(verdict): verdict is Record<string, unknown> =>
-			typeof verdict === 'object' && verdict !== null
-	)
+	const objects = verdicts.filter(isRecord)
 	const keys = new Set(objects.flatMap((verdict) => Object.keys(verdict)))
 	const shares: Record<string, number | null> = {}
 	for (const key of keys) {
@@ -183,15 +189,14 @@ const passCount = (result: EvalCaseResult | undefined) =>
 export function compareReports(baseline: EvalReport, candidate: EvalReport) {
 	const before = summarize(baseline.results)
 	const after = summarize(candidate.results)
-	const baselineById = new Map(
-		baseline.results.map((result) => [result.caseId, result])
-	)
+	const baselineById = keyBy(baseline.results, 'caseId')
 	const moved = candidate.results.filter(
-		(result) => passCount(baselineById.get(result.caseId)) !== passCount(result)
+		(result) => passCount(baselineById[result.caseId]) !== passCount(result)
 	)
-	const judgeKeys = [
-		...new Set([...Object.keys(before.judge), ...Object.keys(after.judge)])
-	]
+	const judgeKeys = getUniqueValues([
+		...Object.keys(before.judge),
+		...Object.keys(after.judge)
+	])
 
 	return [
 		`| | ${baseline.promptVersion} (${baseline.modelId}) | ${candidate.promptVersion} (${candidate.modelId}) |`,
@@ -212,7 +217,7 @@ export function compareReports(baseline: EvalReport, candidate: EvalReport) {
 					'| --- | --- | --- |',
 					...moved.map(
 						(result) =>
-							`| ${result.caseId} | ${passCount(baselineById.get(result.caseId))} | ${passCount(result)} |`
+							`| ${result.caseId} | ${passCount(baselineById[result.caseId])} | ${passCount(result)} |`
 					)
 				].join('\n')
 			: 'No case changed its pass count.'

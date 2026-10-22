@@ -8,7 +8,7 @@ import {
 	type UIMessage,
 	type UIMessageChunk
 } from 'ai'
-import { getErrorMessage, pMap } from 'hanzio'
+import { getErrorMessage, pMap, timeoutSignal } from 'hanzio'
 import {
 	caseTurn,
 	type EvalCase,
@@ -192,8 +192,7 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 
 			for (let round = 0; round <= maxResubmits; round += 1) {
 				const usage: EvalUsage[] = []
-				const abort = new AbortController()
-				const timeout = setTimeout(() => abort.abort(), timeoutMs)
+				const abortSignal = timeoutSignal(timeoutMs)
 				const resuming = round > 0
 				const startedAt = performance.now()
 				let firstTextAt: number | null = null
@@ -205,7 +204,7 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 						resuming,
 						page: page as EvalTurnInput<C>['page'],
 						requestContext,
-						abortSignal: abort.signal,
+						abortSignal,
 						reportUsage: (record) => usage.push(record)
 					})
 					const observed = stream.pipeThrough(
@@ -226,11 +225,9 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 						assistant = snapshot
 					}
 				} catch (error) {
-					turn.error = abort.signal.aborted
+					turn.error = abortSignal.aborted
 						? `timed out after ${timeoutMs / 1000}s`
 						: getErrorMessage(error)
-				} finally {
-					clearTimeout(timeout)
 				}
 
 				// A turn that opens with a client action shows its first words in a

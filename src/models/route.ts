@@ -1,4 +1,5 @@
 import type { LanguageModelV4, SharedV4ProviderOptions } from '@ai-sdk/provider'
+import { getErrorMessage } from 'hanzio'
 import type { LlmEffort } from './effort.js'
 import type { LlmUsageTotals } from './pricing.js'
 
@@ -62,7 +63,7 @@ export const silentLogger: Logger = { info: () => {}, warn: () => {} }
 export function errorAttributes(error: unknown) {
 	return error instanceof Error
 		? { error_name: error.name, error_message: error.message }
-		: { error_message: String(error) }
+		: { error_message: getErrorMessage(error) }
 }
 
 /** Drops `temperature` for models that refuse any sampling control. */

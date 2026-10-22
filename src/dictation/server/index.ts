@@ -4,6 +4,9 @@
  * key plus the region's WebSocket URL and model, so a model or region change
  * needs no app release.
  */
+
+import { isRecord } from 'hanzio'
+
 import type { DictationKey } from '../session.js'
 
 /** Soniox's data-residency regions. Processing stays in a region only with that region's project key and host. */
@@ -118,14 +121,11 @@ export async function issueSonioxTemporaryKey(
 function parseIssuedKey(
 	body: unknown
 ): { apiKey: string; expiresAt: string } | undefined {
-	if (typeof body !== 'object' || body === null) {
+	if (!isRecord(body)) {
 		return undefined
 	}
 
-	const { api_key: apiKey, expires_at: expiresAt } = body as Record<
-		string,
-		unknown
-	>
+	const { api_key: apiKey, expires_at: expiresAt } = body
 
 	return typeof apiKey === 'string' &&
 		apiKey !== '' &&

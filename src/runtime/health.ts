@@ -1,3 +1,5 @@
+import { isOneOf } from 'hanzio'
+
 import { type Logger, silentLogger } from '../models/route.js'
 
 /** `up`/`down` for a pinged dependency, `configured`/`not_configured` for one checked by its key. */
@@ -71,8 +73,7 @@ export async function checkHealth(input: {
 	return {
 		checkedAt: (input.now?.() ?? new Date()).toISOString(),
 		healthy: dependencies.every(
-			(row) =>
-				!row.required || row.status === 'up' || row.status === 'configured'
+			(row) => !row.required || isOneOf(['up', 'configured'], row.status)
 		),
 		dependencies
 	}

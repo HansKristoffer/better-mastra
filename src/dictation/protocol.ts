@@ -1,4 +1,4 @@
-import { clamp, isRecord, safeJsonParse } from 'hanzio'
+import { clamp, getUniqueValues, isRecord, safeJsonParse } from 'hanzio'
 /**
  * Soniox's real-time transcription protocol as a dictation speaks it: the
  * start request, float samples as 16-bit PCM, and folding each response into
@@ -52,7 +52,7 @@ export function sonioxLanguageHints(
 ): string[] {
 	const language = (locale.split(/[-_]/)[0] ?? locale).toLowerCase()
 
-	return [...new Set([language, ...languages])]
+	return getUniqueValues([language, ...languages])
 }
 
 /**
@@ -135,11 +135,11 @@ function parseJsonObject(message: string): Record<string, unknown> | undefined {
 }
 
 function toToken(token: unknown): SonioxToken[] {
-	if (typeof token !== 'object' || token === null) {
+	if (!isRecord(token)) {
 		return []
 	}
 
-	const { text, is_final: isFinal } = token as Record<string, unknown>
+	const { text, is_final: isFinal } = token
 
 	return typeof text === 'string' ? [{ text, isFinal: isFinal === true }] : []
 }
