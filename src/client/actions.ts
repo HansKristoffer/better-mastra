@@ -7,6 +7,7 @@
 
 import type { UIMessage } from 'ai'
 import { getToolName, isToolUIPart } from 'ai'
+import { isRecord, typedSwitch, typedSwitchGroup } from 'hanzio'
 import { z } from 'zod'
 
 import { currentUserTurn } from './messages.js'
@@ -74,16 +75,6 @@ export type ClientActionChat = {
 					errorText: string
 			  }
 	) => void | PromiseLike<void>
-}
-
-type SchemaDef = {
-	readonly type: string
-	readonly innerType?: z.ZodType
-	readonly element?: z.ZodType
-	readonly valueType?: z.ZodType
-	readonly in?: z.ZodType
-	readonly options?: readonly z.ZodType[]
-	readonly getter?: () => z.ZodType
 }
 
 // CONSTANTS
@@ -157,87 +148,81 @@ export function defineClientAction<
  * reading that parses.
  */
 export function normalizeModelNulls(
-	schema: z.ZodType,
+	schema: z.core.$ZodType,
 	value: unknown
 ): unknown {
-	const def = schema._zod.def as unknown as SchemaDef
+	const def = (schema as z.core.$ZodTypes)._zod.def
 
-	switch (def.type) {
-		case 'optional':
-		case 'nullable':
-		case 'default':
-		case 'prefault':
-		case 'readonly':
-		case 'catch':
-			return value == null || def.innerType === undefined
-				? value
-				: normalizeModelNulls(def.innerType, value)
-		case 'pipe':
-			return def.in === undefined ? value : normalizeModelNulls(def.in, value)
-		case 'lazy':
-			return def.getter === undefined
-				? value
-				: normalizeModelNulls(def.getter(), value)
-		case 'array': {
-			const element = def.element
+	return typedSwitch(
+		def,
+		'type',
+		{
+			...typedSwitchGroup(
+				def,
+				'type',
+				['optional', 'nullable', 'default', 'prefault', 'readonly', 'catch'],
+				(wrapper) =>
+					value == null ? value : normalizeModelNulls(wrapper.innerType, value)
+			),
+			pipe: (pipe) => normalizeModelNulls(pipe.in, value),
+			lazy: (lazy) => normalizeModelNulls(lazy.getter(), value),
+			array: (array) =>
+				Array.isArray(value)
+					? value.map((item) => normalizeModelNulls(array.element, item))
+					: value,
+			record: (record) => {
+				const { valueType } = record
 
-			return Array.isArray(value) && element !== undefined
-				? value.map((item) => normalizeModelNulls(element, item))
-				: value
-		}
-		case 'record': {
-			const valueType = def.valueType
-
-			if (!isPlainObject(value) || valueType === undefined) {
-				return value
-			}
-
-			return Object.fromEntries(
-				Object.entries(value).flatMap(([key, item]) =>
-					item === null && !valueType.safeParse(null).success
-						? []
-						: [[key, normalizeModelNulls(valueType, item)]]
-				)
-			)
-		}
-		case 'union': {
-			for (const option of def.options ?? []) {
-				const normalized = normalizeModelNulls(option, value)
-
-				if (option.safeParse(normalized).success) {
-					return normalized
+				if (!isRecord(value)) {
+					return value
 				}
-			}
 
-			return value
-		}
-		case 'object': {
-			if (!isPlainObject(value) || !(schema instanceof z.ZodObject)) {
-				return value
-			}
+				return Object.fromEntries(
+					Object.entries(value).flatMap(([key, item]) =>
+						item === null && !z.safeParse(valueType, null).success
+							? []
+							: [[key, normalizeModelNulls(valueType, item)]]
+					)
+				)
+			},
+			union: (union) => {
+				for (const option of union.options) {
+					const normalized = normalizeModelNulls(option, value)
 
-			const shape = schema.shape as Record<string, z.ZodType>
-
-			return Object.fromEntries(
-				Object.entries(value).flatMap(([key, item]) => {
-					const field = shape[key]
-
-					if (field === undefined) {
-						return [[key, item]]
+					if (z.safeParse(option, normalized).success) {
+						return normalized
 					}
+				}
 
-					const leaveOut =
-						item === null &&
-						field.safeParse(undefined).success &&
-						!field.safeParse(null).success
+				return value
+			},
+			object: (object) => {
+				if (!isRecord(value) || !(schema instanceof z.ZodObject)) {
+					return value
+				}
 
-					return leaveOut ? [] : [[key, normalizeModelNulls(field, item)]]
-				})
-			)
-		}
-		default:
-			return value
-	}
+				const { shape } = object
+
+				return Object.fromEntries(
+					Object.entries(value).flatMap(([key, item]) => {
+						const field = shape[key]
+
+						if (field === undefined) {
+							return [[key, item]]
+						}
+
+						const leaveOut =
+							item === null &&
+							z.safeParse(field, undefined).success &&
+							!z.safeParse(field, null).success
+
+						return leaveOut ? [] : [[key, normalizeModelNulls(field, item)]]
+					})
+				)
+			}
+		},
+		() => value
+	)
 }
 
 /** The definitions a request carries, for the server to offer the model as client tools. */
@@ -371,8 +356,4 @@ function stepOf(
 /** The input with the model's nulls left out, so the same call matches however the model wrote it. */
 function callKey(action: ClientAction, input: unknown): string {
 	return JSON.stringify(normalizeModelNulls(action.inputSchema, input ?? {}))
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

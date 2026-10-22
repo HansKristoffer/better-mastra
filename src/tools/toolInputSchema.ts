@@ -7,6 +7,7 @@
  */
 
 import type { StandardSchemaWithJSON } from '@mastra/core/schema'
+import { isRecord, typedSwitch, typedSwitchGroup } from 'hanzio'
 import { z } from 'zod'
 
 type JsonSchema = Record<string, unknown>
@@ -127,41 +128,45 @@ export function coerceDateStrings(
 ): unknown {
 	const def = (schema as z.core.$ZodTypes)._zod.def
 
-	switch (def.type) {
-		case 'date':
-			return typeof value === 'string' && !def.coerce ? new Date(value) : value
-		case 'string':
-			return typeof value === 'string' && refusesOffsets(def)
-				? toUtcDatetime(value)
-				: value
-		case 'optional':
-		case 'nullable':
-		case 'default':
-		case 'prefault':
-		case 'readonly':
-			return value === undefined || value === null
-				? value
-				: coerceDateStrings(def.innerType, value)
-		case 'object':
-			return isPlainObject(value)
-				? Object.fromEntries(
-						Object.entries(value).map(([key, field]) => {
-							const fieldSchema = def.shape[key]
+	return typedSwitch(
+		def,
+		'type',
+		{
+			date: (date) =>
+				typeof value === 'string' && !date.coerce ? new Date(value) : value,
+			string: (string) =>
+				typeof value === 'string' && refusesOffsets(string)
+					? toUtcDatetime(value)
+					: value,
+			...typedSwitchGroup(
+				def,
+				'type',
+				['optional', 'nullable', 'default', 'prefault', 'readonly'],
+				(wrapper) =>
+					value === undefined || value === null
+						? value
+						: coerceDateStrings(wrapper.innerType, value)
+			),
+			object: (object) =>
+				isRecord(value)
+					? Object.fromEntries(
+							Object.entries(value).map(([key, field]) => {
+								const fieldSchema = object.shape[key]
 
-							return [
-								key,
-								fieldSchema ? coerceDateStrings(fieldSchema, field) : field
-							]
-						})
-					)
-				: value
-		case 'array':
-			return Array.isArray(value)
-				? value.map((item) => coerceDateStrings(def.element, item))
-				: value
-		default:
-			return value
-	}
+								return [
+									key,
+									fieldSchema ? coerceDateStrings(fieldSchema, field) : field
+								]
+							})
+						)
+					: value,
+			array: (array) =>
+				Array.isArray(value)
+					? value.map((item) => coerceDateStrings(array.element, item))
+					: value
+		},
+		() => value
+	)
 }
 
 function standardSchema(
@@ -269,7 +274,7 @@ function findOverlongLists(
 		]
 	}
 
-	if (isPlainObject(value)) {
+	if (isRecord(value)) {
 		return Object.entries(value).flatMap(([key, item]) =>
 			findOverlongLists(item, maxArrayItems, [...path, key])
 		)
@@ -289,7 +294,7 @@ function isHiddenInputIssue(
 }
 
 function withoutKeys(value: unknown, keys: readonly string[]): unknown {
-	return isPlainObject(value)
+	return isRecord(value)
 		? Object.fromEntries(
 				Object.entries(value).filter(([key]) => !keys.includes(key))
 			)
@@ -313,12 +318,6 @@ function toUtcDatetime(value: string): string {
 		NON_UTC_DATETIME.test(value) && !Number.isNaN(date.getTime())
 
 	return isNonUtcDatetime ? date.toISOString() : value
-}
-
-function isPlainObject(
-	value: unknown
-): value is Readonly<Record<string, unknown>> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function isSameIssue(

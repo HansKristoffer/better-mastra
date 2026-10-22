@@ -24,6 +24,7 @@ import type {
 	DatasetItemPayload,
 	DatasetItemToolMock
 } from '@mastra/core/storage'
+import { typedSwitch } from 'hanzio'
 import type { EvalCase, EvalToolCall, EvalTrace } from './case.js'
 import { checkTrace, type EvalCheckOptions } from './checks.js'
 
@@ -425,14 +426,11 @@ export function toolMockOptions(matcher: ToolMockMatcher) {
 }
 
 function hookResult(resolution: ToolMockResolution) {
-	switch (resolution.kind) {
-		case 'serve':
-			return { proceed: false, output: resolution.output }
-		case 'fail':
-			return { proceed: false, output: { error: resolution.code } }
-		case 'live':
-			return undefined
-	}
+	return typedSwitch(resolution, 'kind', {
+		serve: (serve) => ({ proceed: false, output: serve.output }),
+		fail: (fail) => ({ proceed: false, output: { error: fail.code } }),
+		live: () => undefined
+	})
 }
 
 export type RecordedToolRead = {

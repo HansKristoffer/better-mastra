@@ -29,6 +29,7 @@ import {
 	lastAssistantMessageIsCompleteWithApprovalResponses,
 	type UIMessage
 } from 'ai'
+import { typedSwitch } from 'hanzio'
 
 import {
 	type ClientAction,
@@ -377,51 +378,49 @@ export function createChatSession<TResumeData = unknown>(
 	}
 
 	function runEffect(effect: ChatTurnEffect): void {
-		switch (effect.kind) {
-			case 'send-message':
+		typedSwitch(effect, 'kind', {
+			'send-message': (send) => {
 				if (focused) {
 					shownPartsBefore = 0
 					startRequest('send', () =>
 						chat.sendMessage(
-							effect.files === undefined
-								? { text: effect.text }
-								: { text: effect.text, files: [...effect.files] }
+							send.files === undefined
+								? { text: send.text }
+								: { text: send.text, files: [...send.files] }
 						)
 					)
 				} else {
-					restoreDraft(effect.text)
+					restoreDraft(send.text)
 					endUnsentRequest()
 				}
-				return
-			case 'request':
+			},
+			request: () => {
 				if (focused) {
 					startNextRequest()
 				} else {
 					endUnsentRequest()
 				}
-				return
-			case 'resume-stream':
+			},
+			'resume-stream': () => {
 				startRequest('resume', () => chat.resumeStream())
-				return
-			case 'abort-request':
+			},
+			'abort-request': () => {
 				void chat.stop()
-				return
-			case 'restore-draft':
-				restoreDraft(effect.text)
-				return
-			case 'resume-run':
+			},
+			'restore-draft': (restore) => {
+				restoreDraft(restore.text)
+			},
+			'resume-run': (resume) => {
 				if (focused) {
-					sendResume(effect.resume)
+					sendResume(resume.resume)
 				} else {
 					endUnsentRequest()
 				}
-				return
-			case 'mark-changes':
-				markChanges(effect.mark, effect.changes)
-				return
-		}
-
-		effect satisfies never
+			},
+			'mark-changes': (mark) => {
+				markChanges(mark.mark, mark.changes)
+			}
+		})
 	}
 
 	/**
@@ -978,20 +977,23 @@ function failureCodeOf(
 	event: ChatTurnEvent,
 	end: RequestEnd
 ): string | undefined {
-	switch (event.kind) {
-		case 'connection-lost':
-			return 'network'
-		case 'error-response':
-			if (event.refusal !== undefined) {
-				return event.refusal.code
-			}
+	return typedSwitch(
+		event,
+		'kind',
+		{
+			'connection-lost': () => 'network',
+			'error-response': (response) => {
+				if (response.refusal !== undefined) {
+					return response.refusal.code
+				}
 
-			return readErrorResponse(end.error) === undefined
-				? 'stream_error'
-				: 'server_error'
-		default:
-			return undefined
-	}
+				return readErrorResponse(end.error) === undefined
+					? 'stream_error'
+					: 'server_error'
+			}
+		},
+		() => undefined
+	)
 }
 
 /** Waits for a result to be posted; one that fails to post still lets the turn go on. */
