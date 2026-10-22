@@ -20,6 +20,7 @@ import {
 	type LlmRoute,
 	silentLogger
 } from './route.js'
+import { must } from 'hanzio'
 
 export const BUILT_IN_ROUTES = [
 	'vertex-eu',
@@ -168,12 +169,13 @@ export async function createLlmRegistry(options: LlmRegistryOptions) {
 
 	function routeFor(modelId: string) {
 		const parsed = parseModelId(modelId)
-		const adapter = routes[parsed.route]
-		if (!adapter) {
-			throw new Error(
-				`Model route "${parsed.route}" is not configured (${modelId}): pass its key to createLlmRegistry`
-			)
-		}
+		const adapter = must(
+			routes[parsed.route],
+			() =>
+				new Error(
+					`Model route "${parsed.route}" is not configured (${modelId}): pass its key to createLlmRegistry`
+				)
+		)
 		return { ...parsed, adapter }
 	}
 

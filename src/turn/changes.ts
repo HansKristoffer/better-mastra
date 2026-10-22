@@ -10,7 +10,7 @@
 import type { Agent, AgentRun, AgentRunToolCall } from '@mastra/core/agent'
 import type { RequestContext } from '@mastra/core/request-context'
 import { isToolUIPart, type UIMessage } from 'ai'
-import { typedSwitch } from 'hanzio'
+import { sortBy, typedSwitch } from 'hanzio'
 
 import type { ChatResume, ThreadKey } from './types.js'
 
@@ -63,11 +63,9 @@ export async function listPendingChanges(
 		resourceId: key.resourceId
 	})
 
-	return [...runs]
-		.sort((a, b) => a.suspendedAt.getTime() - b.suspendedAt.getTime())
-		.flatMap((run) =>
-			run.toolCalls.flatMap((call) => toPendingChange(run, call))
-		)
+	return sortBy(runs, (run) => run.suspendedAt.getTime()).flatMap((run) =>
+		run.toolCalls.flatMap((call) => toPendingChange(run, call))
+	)
 }
 
 /**

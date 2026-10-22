@@ -33,7 +33,7 @@ import {
 import { listPendingChanges, type PendingChange } from './changes.js'
 import { toUserFacingMessage } from './stream.js'
 import type { ThreadKey } from './types.js'
-import { safeJsonParse } from 'hanzio'
+import { invariant, must, safeJsonParse } from 'hanzio'
 
 export interface ThreadSummary {
 	readonly id: string
@@ -280,9 +280,10 @@ export function createThreadHandlers<TScope>(
 				})
 			}
 
-			if (!mastra.observability.addFeedback) {
-				throw new Error('The Mastra observability cannot record feedback.')
-			}
+			invariant(
+				mastra.observability.addFeedback,
+				() => new Error('The Mastra observability cannot record feedback.')
+			)
 
 			await mastra.observability.addFeedback({
 				traceId,
@@ -579,11 +580,10 @@ function readTraceId(message: MastraDBMessage): string | undefined {
 }
 
 async function listThumbs(mastra: Mastra, traceId: string, userId: string) {
-	const store = await mastra.getStorage()?.getStore('observability')
-
-	if (!store) {
-		throw new Error('The Mastra instance has no observability storage.')
-	}
+	const store = must(
+		await mastra.getStorage()?.getStore('observability'),
+		() => new Error('The Mastra instance has no observability storage.')
+	)
 
 	const { feedback } = await store.listFeedback({
 		filters: {
@@ -610,17 +610,15 @@ async function listThumbs(mastra: Mastra, traceId: string, userId: string) {
 }
 
 function requireMastra(mastra: Mastra | undefined): Mastra {
-	if (!mastra) {
-		throw new Error('Rating answers needs the Mastra instance.')
-	}
-
-	return mastra
+	return must(
+		mastra,
+		() => new Error('Rating answers needs the Mastra instance.')
+	)
 }
 
 async function memoryStore(memory: MastraMemory): Promise<MemoryStorage> {
-	const store = await memory.storage.getStore('memory')
-
-	if (!store) throw new Error('The memory storage has no memory domain.')
-
-	return store
+	return must(
+		await memory.storage.getStore('memory'),
+		() => new Error('The memory storage has no memory domain.')
+	)
 }

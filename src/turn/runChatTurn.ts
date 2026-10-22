@@ -47,6 +47,7 @@ import {
 	rememberTurnPlan,
 	type ThreadKey
 } from './types.js'
+import { once } from 'hanzio'
 
 export interface ChatTurnRequest<TAuth, TBody extends ChatTurnBody> {
 	readonly auth: TAuth
@@ -677,13 +678,9 @@ function releaseOnce(
 	release: () => Promise<void>,
 	logger: ChatTurnLogger
 ): () => Promise<void> {
-	let released: Promise<void> | undefined
-
-	return () => {
-		released ??= release().catch((error: unknown) =>
+	return once(() =>
+		release().catch((error: unknown) =>
 			logger.error('[better-mastra] the thread lock release failed', { error })
 		)
-
-		return released
-	}
+	)
 }

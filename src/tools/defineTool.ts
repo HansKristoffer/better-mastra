@@ -12,6 +12,7 @@ import { createTool, type Tool } from '@mastra/core/tools'
 
 import { dryRunResult, isDryRun, isDryRunResult } from './dryRun.js'
 import { withHiddenInputs } from './toolInputSchema.js'
+import { omit } from 'hanzio'
 
 type CreateToolOptions = Parameters<typeof createTool>[0]
 
@@ -172,11 +173,7 @@ function fillHiddenInputs(
 		throw new Error('A tool with hidden inputs ran without a request context.')
 	}
 
-	const visible = Object.fromEntries(
-		Object.entries((input ?? {}) as Record<string, unknown>).filter(
-			([key]) => !names.includes(key)
-		)
-	)
+	const visible = omit((input ?? {}) as Record<string, unknown>, names)
 	const filled = Object.fromEntries(
 		names.flatMap((name) => {
 			const value = hidden[name]?.(requestContext)

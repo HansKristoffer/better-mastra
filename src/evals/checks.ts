@@ -5,6 +5,7 @@ import {
 	type EvalTrace,
 	type EvalTurn
 } from './case.js'
+import { sortBy, sumBy } from 'hanzio'
 
 export type EvalCheck = {
 	check: string
@@ -52,9 +53,9 @@ export function detectReplyLanguage(
 				(list.letters?.test(text) ? 2 : 0)
 		}
 	})
-	const total = scores.reduce((sum, { score }) => sum + score, 0)
+	const total = sumBy(scores, 'score')
 	if (total < 3) return 'unknown'
-	const [best, second] = [...scores].sort((a, b) => b.score - a.score)
+	const [best, second] = sortBy(scores, { by: 'score', order: 'desc' })
 	return best && best.score > (second?.score ?? 0) ? best.language : 'unknown'
 }
 

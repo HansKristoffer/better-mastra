@@ -1,3 +1,4 @@
+import { once } from 'hanzio'
 /** One stream entry: its id and the single value stored under field `d`. */
 export interface StreamEntry {
 	id: string
@@ -178,11 +179,7 @@ export function upstashRedis(
 	options: { pollMs?: number } = {}
 ): ResumableRedis {
 	const { pollMs = 200 } = options
-	let resolved: UpstashRedisLike | undefined
-	const redis = () => {
-		resolved ??= typeof client === 'function' ? client() : client
-		return resolved
-	}
+	const redis = once(() => (typeof client === 'function' ? client() : client))
 	return {
 		set: async (key, value, ttlMs) =>
 			void (await redis().set(key, value, { px: ttlMs })),

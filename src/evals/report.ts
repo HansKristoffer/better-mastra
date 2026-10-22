@@ -1,5 +1,6 @@
 import type { EvalTrace } from './case.js'
 import type { EvalCheck } from './checks.js'
+import { groupBy, mapValues, recordFromKeys, sumBy } from 'hanzio'
 
 export type EvalRun<Verdict = unknown> = {
 	trace: EvalTrace
@@ -70,7 +71,7 @@ export function summarize(results: readonly EvalCaseResult[]) {
 	const runs = results.flatMap((result) => result.runs)
 	const turns = runs.flatMap((run) => run.trace.turns)
 	const verdicts = runs.flatMap((run) => (run.verdict ? [run.verdict] : []))
-	const inputTokens = turns.reduce((sum, turn) => sum + turn.inputTokens, 0)
+	const inputTokens = sumBy(turns, 'inputTokens')
 	const costs = turns.map((turn) => turn.costUsd)
 	const firstTexts = turns.flatMap((turn) =>
 		turn.firstTextMs === null ? [] : [turn.firstTextMs]
@@ -81,20 +82,13 @@ export function summarize(results: readonly EvalCaseResult[]) {
 		runs: runs.length,
 		passed,
 		passRate: share(passed, runs.length),
-		byBucket: Object.fromEntries(
-			[...new Set(results.map((result) => result.bucket))].map((bucket) => {
-				const bucketRuns = results
-					.filter((result) => result.bucket === bucket)
-					.flatMap((result) => result.runs)
-				return [
-					bucket,
-					{
-						passed: bucketRuns.filter((run) => run.pass).length,
-						runs: bucketRuns.length
-					}
-				]
-			})
-		),
+		byBucket: mapValues(groupBy(results, 'bucket'), (bucketResults = []) => {
+			const bucketRuns = bucketResults.flatMap((result) => result.runs)
+			return {
+				passed: bucketRuns.filter((run) => run.pass).length,
+				runs: bucketRuns.length
+			}
+		}),
 		judged: verdicts.length,
 		judge: judgeShares(verdicts),
 		firstTextMsP50: percentile(firstTexts, 50),
@@ -104,23 +98,12 @@ export function summarize(results: readonly EvalCaseResult[]) {
 			turns.map((turn) => turn.durationMs),
 			50
 		),
-		stepsPerTurn: share(
-			turns.reduce((sum, turn) => sum + turn.steps, 0),
-			turns.length
-		),
-		cacheReadShare: share(
-			turns.reduce((sum, turn) => sum + turn.cacheReadTokens, 0),
-			inputTokens
-		),
-		cacheWriteShare: share(
-			turns.reduce((sum, turn) => sum + turn.cacheWriteTokens, 0),
-			inputTokens
-		),
+		stepsPerTurn: share(sumBy(turns, 'steps'), turns.length),
+		cacheReadShare: share(sumBy(turns, 'cacheReadTokens'), inputTokens),
+		cacheWriteShare: share(sumBy(turns, 'cacheWriteTokens'), inputTokens),
 		costUsd: costs.includes(null)
 			? null
-			: Number(
-					costs.reduce<number>((sum, cost) => sum + (cost ?? 0), 0).toFixed(4)
-				),
+			: Number(sumBy(costs, (cost) => cost).toFixed(4)),
 		costPerTurnP50: costs.includes(null)
 			? null
 			: percentile(costs as number[], 50)
@@ -287,32 +270,18 @@ export function scoreLabels<L extends string>(
 			runs.length
 		),
 		agreement: shareOr0(runs.filter(agrees).length, runs.length),
-		labels: Object.fromEntries(
-			labels.map((label) => {
-				const kept = runs.filter((run) => run.kept.includes(label))
-				const shouldKeep = runs.filter((run) => run.expected.includes(label))
-				const correct = kept.filter((run) => run.expected.includes(label))
-				return [
-					label,
-					{
-						kept: kept.length,
-						shouldKeep: shouldKeep.length,
-						keptCorrectly: correct.length,
-						precision: share(correct.length, kept.length),
-						recall: share(correct.length, shouldKeep.length)
-					}
-				]
-			})
-		) as Record<
-			L,
-			{
-				kept: number
-				shouldKeep: number
-				keptCorrectly: number
-				precision: number | null
-				recall: number | null
+		labels: recordFromKeys(labels, (label) => {
+			const kept = runs.filter((run) => run.kept.includes(label))
+			const shouldKeep = runs.filter((run) => run.expected.includes(label))
+			const correct = kept.filter((run) => run.expected.includes(label))
+			return {
+				kept: kept.length,
+				shouldKeep: shouldKeep.length,
+				keptCorrectly: correct.length,
+				precision: share(correct.length, kept.length),
+				recall: share(correct.length, shouldKeep.length)
 			}
-		>,
+		}),
 		failures: runs.filter((run) => !agrees(run))
 	}
 }

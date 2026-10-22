@@ -5,6 +5,7 @@ import type {
 	GetMetricBreakdownResponse as MetricBreakdown
 } from '@mastra/core/storage'
 import { type Logger, silentLogger } from '../models/route.js'
+import { sumBy } from 'hanzio'
 
 /** One group's tokens and cost over a time window. */
 export type UsageBreakdownRow = {
@@ -123,7 +124,7 @@ export function medianCostPerGroup(rows: readonly UsageBreakdownRow[]) {
 
 export function averageOf(values: readonly number[]): number | undefined {
 	if (values.length === 0) return undefined
-	return values.reduce((sum, value) => sum + value, 0) / values.length
+	return sumBy(values, (value) => value) / values.length
 }
 
 /** The middle value, or the mean of the two middle values. */

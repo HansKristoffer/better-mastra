@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { type EmbeddingModel, embed, embedMany as aiEmbedMany } from 'ai'
 import { errorAttributes, type Logger, silentLogger } from '../models/route.js'
 import { BoundedPromiseCache } from './bounded-promise-cache.js'
+import { normalizeWhitespace } from 'hanzio'
 
 /** A shared cache for query embeddings; Redis `get`/`setex` fit as they are. */
 export type EmbeddingCache = {
@@ -31,7 +32,7 @@ export function queryEmbeddingCacheKey(
 	query: string,
 	prefix = 'qemb'
 ) {
-	const normalized = query.trim().toLowerCase().replace(/\s+/g, ' ')
+	const normalized = normalizeWhitespace(query.toLowerCase())
 	const digest = createHash('sha256')
 		.update(`${modelId}:${normalized}`)
 		.digest('hex')

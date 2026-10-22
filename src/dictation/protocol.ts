@@ -1,4 +1,4 @@
-import { isRecord, safeJsonParse } from 'hanzio'
+import { clamp, isRecord, safeJsonParse } from 'hanzio'
 /**
  * Soniox's real-time transcription protocol as a dictation speaks it: the
  * start request, float samples as 16-bit PCM, and folding each response into
@@ -79,7 +79,7 @@ export function toS16le(samples: Float32Array): ArrayBuffer {
 	const view = new DataView(buffer)
 
 	samples.forEach((sample, index) => {
-		const clamped = Math.max(-1, Math.min(1, sample))
+		const clamped = clamp(sample, -1, 1)
 		const scaled =
 			clamped < 0 ? clamped * INT16_MIN_MAGNITUDE : clamped * INT16_MAX
 

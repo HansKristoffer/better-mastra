@@ -18,6 +18,7 @@ import {
 } from '@mastra/core/processors'
 
 import { findTurnPlan } from './types.js'
+import { must } from 'hanzio'
 
 /** The tripwire reason the app reads when a turn is stopped at the tool-call budget. */
 export const TOOL_CALL_BUDGET_STOP_REASON = 'tool_call_budget'
@@ -143,16 +144,14 @@ function hasStreamedAnswerText(messageList: MessageList): boolean {
 }
 
 function defaultStreamErrorRetry(): StreamErrorRetryProcessor {
-	const retry = defaultStabilityErrorProcessors().find(
-		(processor): processor is StreamErrorRetryProcessor =>
-			processor instanceof StreamErrorRetryProcessor
+	return must(
+		defaultStabilityErrorProcessors().find(
+			(processor): processor is StreamErrorRetryProcessor =>
+				processor instanceof StreamErrorRetryProcessor
+		),
+		() =>
+			new Error(
+				"Mastra's default error processors no longer include its stream error retry."
+			)
 	)
-
-	if (!retry) {
-		throw new Error(
-			"Mastra's default error processors no longer include its stream error retry."
-		)
-	}
-
-	return retry
 }

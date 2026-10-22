@@ -2,6 +2,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { wrapLanguageModel } from 'ai'
 import type { LlmEffort } from '../effort.js'
 import type { LlmRoute } from '../route.js'
+import { clamp } from 'hanzio'
 
 /**
  * Inception's Mercury diffusion models over their OpenAI-compatible chat API.
@@ -29,7 +30,7 @@ export function inceptionRoute(apiKey: string): LlmRoute {
 						...params,
 						...(params.temperature === undefined
 							? {}
-							: { temperature: Math.min(1, Math.max(0.5, params.temperature)) })
+							: { temperature: clamp(params.temperature, 0.5, 1) })
 					})
 				}
 			}),

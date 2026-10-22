@@ -1,5 +1,6 @@
 import { type JSONSchema7, type Schema, zodSchema } from 'ai'
 import type { z } from 'zod'
+import { mapValues, typedEntries } from 'hanzio'
 
 const NUMBER_BOUNDS = [
 	'minimum',
@@ -27,12 +28,10 @@ function stripUnsupported(value: unknown): unknown {
 	if (value === null || typeof value !== 'object') return value
 	if (Array.isArray(value)) return value.map(stripUnsupported)
 
-	const node: Record<string, unknown> = Object.fromEntries(
-		Object.entries(value).map(([key, child]) => [key, stripUnsupported(child)])
-	)
+	const node: Record<string, unknown> = mapValues(value, stripUnsupported)
 
 	const type = node.type
-	for (const [kind, keys] of Object.entries(STRIP)) {
+	for (const [kind, keys] of typedEntries(STRIP)) {
 		const match = type === kind || (Array.isArray(type) && type.includes(kind))
 		if (!match) continue
 		for (const key of keys) delete node[key]

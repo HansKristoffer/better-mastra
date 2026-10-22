@@ -16,7 +16,7 @@ import {
 	type EvalTurn
 } from './case.js'
 import { DRY_RUN_KEY, dryRunResult } from '../tools/dryRun.js'
-import { getErrorMessage } from 'hanzio'
+import { getErrorMessage, pMap } from 'hanzio'
 
 /**
  * Request-context key an eval run sets: write tools wrapped in
@@ -298,14 +298,5 @@ export async function mapWithConcurrency<T, R>(
 	limit: number,
 	work: (item: T, index: number) => Promise<R>
 ): Promise<R[]> {
-	const results: R[] = new Array(items.length)
-	// The workers share one iterator, so each item is taken by exactly one of them.
-	const queue = items.entries()
-	const worker = async () => {
-		for (const [index, item] of queue) results[index] = await work(item, index)
-	}
-	await Promise.all(
-		Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker)
-	)
-	return results
+	return pMap(items, work, { concurrency: Math.max(1, limit) })
 }

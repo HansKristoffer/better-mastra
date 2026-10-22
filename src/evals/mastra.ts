@@ -24,7 +24,7 @@ import type {
 	DatasetItemPayload,
 	DatasetItemToolMock
 } from '@mastra/core/storage'
-import { isRecord, typedSwitch } from 'hanzio'
+import { isRecord, stableStringify, typedSwitch } from 'hanzio'
 import type { EvalCase, EvalToolCall, EvalTrace } from './case.js'
 import { checkTrace, type EvalCheckOptions } from './checks.js'
 
@@ -276,23 +276,10 @@ export async function listDatasetItems(dataset: Dataset) {
 	return Array.isArray(items) ? items : items.items
 }
 
-/** The value with every object's keys in one order: Postgres hands JSON back reordered. */
-function withSortedKeys(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(withSortedKeys)
-	if (typeof value !== 'object' || value === null) return value
-	return Object.fromEntries(
-		Object.entries(value)
-			.sort(([a], [b]) => a.localeCompare(b))
-			.map(([key, field]) => [key, withSortedKeys(field)])
-	)
-}
-
+/** Keys sorted, because Postgres hands JSON back reordered. */
 const comparable = (
 	item: Pick<DatasetItem, 'input' | 'groundTruth' | 'metadata'>
-) =>
-	JSON.stringify(
-		withSortedKeys([item.input, item.groundTruth, item.metadata ?? null])
-	)
+) => stableStringify([item.input, item.groundTruth, item.metadata ?? null])
 
 /** The changes that make the stored items match: new ones added, changed ones updated, the rest deleted. */
 export function planDatasetSync(

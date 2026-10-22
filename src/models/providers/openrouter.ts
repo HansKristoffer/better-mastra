@@ -18,14 +18,10 @@ import {
 	reportedCost,
 	silentLogger
 } from '../route.js'
+import { omit } from 'hanzio'
 
 /** Call options that would replace our routing, model or usage reporting in the request body. */
-const ROUTING_OVERRIDES: ReadonlySet<string> = new Set([
-	'model',
-	'models',
-	'provider',
-	'usage'
-])
+const ROUTING_OVERRIDES = ['model', 'models', 'provider', 'usage']
 
 /**
  * OpenRouter with usage accounting on every call, upstream routing from
@@ -87,9 +83,7 @@ const keepRouting = {
 	}) => {
 		const openrouter = params.providerOptions?.openrouter
 		if (!openrouter) return params
-		const kept = Object.fromEntries(
-			Object.entries(openrouter).filter(([key]) => !ROUTING_OVERRIDES.has(key))
-		)
+		const kept = omit(openrouter, ROUTING_OVERRIDES)
 		return {
 			...params,
 			providerOptions: { ...params.providerOptions, openrouter: kept }
