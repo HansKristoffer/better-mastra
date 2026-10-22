@@ -1,6 +1,6 @@
 # Agent notes
 
-- Bun, TypeScript strict, Biome. Run `bun run lint:write` and `bun test` before committing.
+- Bun, TypeScript strict. `bun check` typechecks, `bun fmt` formats (options in `bunfig.toml` `[fmt]`) and Biome lints. Run `bun run lint:write` and `bun test` before committing.
 - Tooling (tsconfig, biome, build script, CI and release-please) mirrors `HansKristoffer/better-graphile-worker`; copy from there rather than inventing new setups.
 - Each subpath export lives in its own `src/<subpath>/` folder with an `index.ts`, and is listed in `package.json` `exports`.
 - Keep the library a thin layer: prefer native features of the peer libraries over wrappers.

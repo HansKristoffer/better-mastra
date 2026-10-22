@@ -34,18 +34,7 @@
 		}
 	},
 	"formatter": {
-		"enabled": true,
-		"indentStyle": "tab",
-		"indentWidth": 2,
-		"lineWidth": 80,
-		"lineEnding": "lf"
-	},
-	"javascript": {
-		"formatter": {
-			"quoteStyle": "single",
-			"trailingCommas": "none",
-			"semicolons": "asNeeded"
-		}
+		"enabled": false
 	},
 	"files": {
 		"includes": ["**/*.ts"]
