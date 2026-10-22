@@ -59,20 +59,18 @@ const observerAnswering = () =>
 async function runObservationCycle(memory: Memory) {
 	await memory.createThread(KEY)
 	await memory.saveMessages({
-		messages: [0, 1].map(
-			(index): MastraDBMessage => ({
-				id: `observed-${index}`,
-				role: index === 0 ? 'user' : 'assistant',
-				createdAt: new Date(STARTS_AT.getTime() + index * 1_000),
-				...KEY,
-				content: {
-					format: 2,
-					parts: [
-						{ type: 'text', text: 'I want to save for a holiday. '.repeat(800) }
-					]
-				}
-			})
-		)
+		messages: [0, 1].map((index): MastraDBMessage => ({
+			id: `observed-${index}`,
+			role: index === 0 ? 'user' : 'assistant',
+			createdAt: new Date(STARTS_AT.getTime() + index * 1_000),
+			...KEY,
+			content: {
+				format: 2,
+				parts: [
+					{ type: 'text', text: 'I want to save for a holiday. '.repeat(800) }
+				]
+			}
+		}))
 	})
 	const engine = await memory.omEngine
 	if (!engine) throw new Error('Observational memory is off')

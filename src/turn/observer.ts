@@ -14,11 +14,7 @@ import { typedSwitch } from 'hanzio'
 import type { TurnStreamEnding } from './stream.js'
 
 export type TurnOutcome =
-	| 'answered'
-	| 'stopped'
-	| 'budget_stop'
-	| 'timeout'
-	| 'error'
+	'answered' | 'stopped' | 'budget_stop' | 'timeout' | 'error'
 
 export interface TurnSummary {
 	readonly outcome: TurnOutcome

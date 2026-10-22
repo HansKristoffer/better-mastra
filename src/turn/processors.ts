@@ -102,9 +102,7 @@ export class TurnSignals implements Processor<'turn-signals'> {
  * The app cannot take back text it has shown, so a retry after that would show
  * the answer's start twice; the step fails with the fixed error sentence.
  */
-export class RetryBeforeAnswerText
-	implements Processor<'stream-error-retry-processor'>
-{
+export class RetryBeforeAnswerText implements Processor<'stream-error-retry-processor'> {
 	readonly id = 'stream-error-retry-processor'
 	readonly #retry = defaultStreamErrorRetry()
 

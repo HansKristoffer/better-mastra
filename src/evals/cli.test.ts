@@ -73,9 +73,8 @@ Run "better-mastra-evals <command> --help" for a command's options.
 	})
 
 	test('run help', () => {
-		expect(
-			cli('run', '--help').stdout
-		).toBe(`Usage: better-mastra-evals run [options]
+		expect(cli('run', '--help').stdout)
+			.toBe(`Usage: better-mastra-evals run [options]
 
 Run a suite and save its report
 
@@ -96,9 +95,8 @@ Options:
 	})
 
 	test('inspect help', () => {
-		expect(
-			cli('inspect', '--help').stdout
-		).toBe(`Usage: better-mastra-evals inspect <report> [options]
+		expect(cli('inspect', '--help').stdout)
+			.toBe(`Usage: better-mastra-evals inspect <report> [options]
 
 Print a report's failed checks and transcripts
 
@@ -112,9 +110,8 @@ Options:
 	})
 
 	test('compare help', () => {
-		expect(
-			cli('compare', '--help').stdout
-		).toBe(`Usage: better-mastra-evals compare <baseline> <candidate> [options]
+		expect(cli('compare', '--help').stdout)
+			.toBe(`Usage: better-mastra-evals compare <baseline> <candidate> [options]
 
 Compare a candidate report with a baseline
 

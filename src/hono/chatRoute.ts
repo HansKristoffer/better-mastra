@@ -151,8 +151,7 @@ export function createChatRoute<
  */
 function keepConnectionOpen(c: Context): void {
 	const server = c.env as
-		| { timeout?: (request: Request, seconds: number) => void }
-		| undefined
+		{ timeout?: (request: Request, seconds: number) => void } | undefined
 
 	if (typeof server?.timeout === 'function') {
 		server.timeout(c.req.raw, 0)

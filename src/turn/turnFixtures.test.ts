@@ -33,8 +33,7 @@ type ModelStreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>
 export type ModelStreamPart =
 	ModelStreamResult['stream'] extends ReadableStream<infer Part> ? Part : never
 type ModelReply =
-	| readonly ModelStreamPart[]
-	| (() => Promise<ModelStreamResult>)
+	readonly ModelStreamPart[] | (() => Promise<ModelStreamResult>)
 
 export interface Scope {
 	readonly userId: string

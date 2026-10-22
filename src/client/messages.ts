@@ -344,8 +344,7 @@ export function countShownParts(
 /** The user message a `data-user-message` part carries, or undefined for any other data. */
 export function readUserMessage(data: unknown): UIMessage | undefined {
 	const message = (data as { message?: unknown } | null)?.message as
-		| Partial<UIMessage>
-		| undefined
+		Partial<UIMessage> | undefined
 
 	return typeof message?.id === 'string' &&
 		message.role === 'user' &&

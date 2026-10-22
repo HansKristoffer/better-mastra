@@ -28,9 +28,7 @@ export interface ChatFetchOptions {
 	readonly fetch?: ChatFetch
 	/** Headers every request carries, read per request: a session cookie, an origin. */
 	readonly headers?: () =>
-		| HeadersInit
-		| undefined
-		| Promise<HeadersInit | undefined>
+		HeadersInit | undefined | Promise<HeadersInit | undefined>
 	readonly retry?: {
 		/** Wait before retrying a request the network dropped before any response. */
 		readonly connect?: number | false

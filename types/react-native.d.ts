@@ -9,11 +9,7 @@ import type { Component, ComponentType, ReactNode } from 'react'
 export type TextStyle = { color?: string; [key: string]: unknown }
 export type ViewStyle = Record<string, unknown>
 export type StyleProp<T> =
-	| T
-	| readonly StyleProp<T>[]
-	| false
-	| null
-	| undefined
+	T | readonly StyleProp<T>[] | false | null | undefined
 
 export declare namespace StyleSheet {
 	type NamedStyles<T> = { [P in keyof T]: object }

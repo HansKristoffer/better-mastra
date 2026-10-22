@@ -21,8 +21,7 @@ type JsonSchema = Record<string, unknown>
 interface ValidationIssue {
 	readonly message: string
 	readonly path?:
-		| ReadonlyArray<PropertyKey | { readonly key: PropertyKey }>
-		| undefined
+		ReadonlyArray<PropertyKey | { readonly key: PropertyKey }> | undefined
 }
 
 type ValidationResult =
@@ -53,8 +52,7 @@ export function toolInputSchema(
 	return standardSchema(jsonSchema, (value) => {
 		const input = coerceDateStrings(schema, value)
 		const result = schema['~standard'].validate(input) as
-			| ValidationResult
-			| Promise<ValidationResult>
+			ValidationResult | Promise<ValidationResult>
 
 		if (result instanceof Promise) {
 			throw new Error('A tool input must validate synchronously.')
@@ -111,8 +109,7 @@ export function withHiddenInputs(
 					return { value: result.issues ? input : result.value }
 				}
 				const result = own.validate(input) as
-					| ValidationResult
-					| Promise<ValidationResult>
+					ValidationResult | Promise<ValidationResult>
 
 				return (
 					result instanceof Promise ? result.then(finish) : finish(result)

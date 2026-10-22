@@ -26,8 +26,8 @@ export type JsonProjection<T, TOmit extends string = never> = T extends {
 		? readonly JsonProjection<TItem, TOmit>[]
 		: T extends object
 			? {
-					readonly [TKey in keyof T as TKey extends TOmit
-						? never
-						: TKey]: JsonProjection<T[TKey], TOmit>
+					readonly [
+						TKey in keyof T as TKey extends TOmit ? never : TKey
+					]: JsonProjection<T[TKey], TOmit>
 				}
 			: T

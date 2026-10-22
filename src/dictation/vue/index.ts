@@ -26,12 +26,12 @@ export type DictationPhase = 'idle' | 'starting' | 'listening' | 'finishing'
 
 /** Why the last dictation gave no text: the microphone was refused or is missing, or dictation failed. */
 export type DictationNotice =
-	| 'permission_denied'
-	| 'no_microphone'
-	| 'unavailable'
+	'permission_denied' | 'no_microphone' | 'unavailable'
 
-export interface UseDictationOptions
-	extends Omit<DictationOptions, 'signal' | 'onEnd' | 'locale' | 'microphone'> {
+export interface UseDictationOptions extends Omit<
+	DictationOptions,
+	'signal' | 'onEnd' | 'locale' | 'microphone'
+> {
 	readonly locale: MaybeRefOrGetter<string>
 	/** Defaults to `mediaRecorderMicrophone()`. */
 	readonly microphone?: DictationMicrophone
