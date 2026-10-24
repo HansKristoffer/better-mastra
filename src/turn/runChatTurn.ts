@@ -31,7 +31,10 @@ import {
 	type ToolSettledEvent,
 	type TurnSummary
 } from './observer.js'
-import { sendReplySuggestions } from './replySuggestions.js'
+import {
+	ANSWER_COMPLETE_PART,
+	sendReplySuggestions
+} from './replySuggestions.js'
 import {
 	TURN_ERROR_SENTENCE,
 	type TurnStreamEnding,
@@ -518,6 +521,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 
 			if (outcome !== 'answered' || !answer || question.length === 0) return
 
+			send({ type: ANSWER_COMPLETE_PART, data: {}, transient: true })
 			await sendReplySuggestions({
 				mastra: deps.mastra,
 				agentId: suggestions.agentId,

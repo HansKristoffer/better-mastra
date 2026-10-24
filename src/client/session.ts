@@ -54,6 +54,7 @@ import {
 } from './errors.js'
 import type { ChatFetch } from './fetch.js'
 import {
+	ANSWER_COMPLETE_PART,
 	countShownParts,
 	findStrandedToolCalls,
 	isUserFacingPart,
@@ -87,6 +88,12 @@ export interface ChatSessionSnapshot {
 	readonly changeMarks: ReadonlyMap<string, ChangeMark>
 	/** The replies offered after the newest answer; empty once the user writes. */
 	readonly replySuggestions: readonly string[]
+	/**
+	 * The running request's answer is complete and only its replies are still
+	 * being written, so a client can show the answer as done before the turn
+	 * ends. False again when the next request starts.
+	 */
+	readonly answerComplete: boolean
 }
 
 export interface RestoredDraft {
@@ -244,7 +251,8 @@ export function createChatSession<TResumeData = unknown>(
 		turn: initialChatTurnState,
 		restoredDraft: undefined,
 		changeMarks: NO_CHANGE_MARKS,
-		replySuggestions: NO_REPLY_SUGGESTIONS
+		replySuggestions: NO_REPLY_SUGGESTIONS,
+		answerComplete: false
 	}
 	let focused = true
 	/** Tool results already reported or loaded from history, by tool call id: each is reported once, as it arrives. */
@@ -317,6 +325,11 @@ export function createChatSession<TResumeData = unknown>(
 
 			if (part.type === USER_MESSAGE_PART) {
 				showQuestion(readUserMessage(part.data))
+				return
+			}
+
+			if (part.type === ANSWER_COMPLETE_PART) {
+				publish({ ...snapshot, answerComplete: true })
 				return
 			}
 
@@ -572,6 +585,11 @@ export function createChatSession<TResumeData = unknown>(
 	function resetRequest(): void {
 		shownBeforeRequest = new Set(chat.messages.map((message) => message.id))
 		takeReplySuggestions()
+
+		if (snapshot.answerComplete) {
+			publish({ ...snapshot, answerComplete: false })
+		}
+
 		offersReplies = true
 		pendingResume = undefined
 		requestError = undefined
