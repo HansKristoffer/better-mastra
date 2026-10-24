@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import type { UIMessage } from 'ai'
 
-import { REPLY_SUGGESTIONS_PART } from './replySuggestions.js'
+import {
+	ANSWER_COMPLETE_PART,
+	REPLY_SUGGESTIONS_PART
+} from './replySuggestions.js'
 import { TURN_ERROR_SENTENCE, USER_MESSAGE_PART } from './stream.js'
 import {
 	ASK_TOOL,
@@ -152,7 +155,7 @@ describe('runChatTurn', () => {
 		expect(harness.finished[0]?.outcome).toBe('budget_stop')
 	})
 
-	test('should offer reply suggestions as a transient part before the finish', async () => {
+	test('should mark the answer complete, then offer reply suggestions as transient parts before the finish', async () => {
 		// Given a suggestions agent that offers two replies
 		const harness = createHarness({
 			suggestions: [
@@ -168,7 +171,12 @@ describe('runChatTurn', () => {
 			await harness.run({ messages: [userMessage('Mad?')] })
 		)
 
-		// Then the replies come after the lock is released and before the finish
+		// Then the answer is marked complete, the replies follow after the lock is released, and the finish comes last
+		const types = chunks.map((chunk) => chunk.type)
+		expect(types.indexOf(ANSWER_COMPLETE_PART)).toBeGreaterThan(-1)
+		expect(types.indexOf(ANSWER_COMPLETE_PART)).toBeLessThan(
+			types.indexOf(REPLY_SUGGESTIONS_PART)
+		)
 		const suggestions = chunks.filter(
 			(chunk) => chunk.type === REPLY_SUGGESTIONS_PART
 		)

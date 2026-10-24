@@ -652,6 +652,28 @@ describe('createChatSession', () => {
 		await settled(chat)
 	})
 
+	test('marks the answer complete when the server says so, until the next request', async () => {
+		const server = fakeServer([
+			stream([
+				...answer('Svar').slice(0, -1),
+				{ type: 'data-answer-complete', data: {}, transient: true },
+				{ type: 'finish' }
+			]),
+			stream(answer('Ok', 'answer-2'))
+		])
+		const chat = session(server)
+
+		chat.send('Hej')
+		await settled(chat)
+
+		expect(chat.getSnapshot().answerComplete).toBe(true)
+
+		chat.send('Tak')
+
+		expect(chat.getSnapshot().answerComplete).toBe(false)
+		await settled(chat)
+	})
+
 	test('stops and restores the message of a session that is not on screen', () => {
 		const server = fakeServer([])
 		const chat = session(server)

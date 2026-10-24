@@ -34,6 +34,7 @@ export {
 	withConversationCache
 } from './promptCache.js'
 export {
+	ANSWER_COMPLETE_PART,
 	createReplySuggestionsAgent,
 	REPLY_SUGGESTIONS_PART,
 	replySuggestionsSchema,
