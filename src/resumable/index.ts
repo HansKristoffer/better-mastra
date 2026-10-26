@@ -1,6 +1,11 @@
 import type { UIMessageChunk } from 'ai'
 import { getErrorMessage, safeJsonParse, throttle, withTimeout } from 'hanzio'
-import type { BlockingReader, ResumableRedis, StreamEntry } from './redis.js'
+import {
+	type BlockingReader,
+	noRedis,
+	type ResumableRedis,
+	type StreamEntry
+} from './redis.js'
 
 export { bunRedis, ioRedis, upstashRedis } from './redis.js'
 export type {
@@ -40,8 +45,16 @@ export interface ResumableLogger {
  */
 export interface ResumableLocator {
 	read(threadKey: string): Promise<string | null>
-	/** Called when a turn starts, with `locatorTtlMs`. */
-	write(threadKey: string, locator: string, ttlMs: number): Promise<void>
+	/**
+	 * Called when a turn starts, with `locatorTtlMs`. Resolve with the locator
+	 * it replaced, if the store can tell, so a turn still running for the
+	 * thread on another replica is aborted.
+	 */
+	write(
+		threadKey: string,
+		locator: string,
+		ttlMs: number
+	): Promise<string | null | void>
 	/**
 	 * Renews the locator while the turn runs (every third of `locatorTtlMs`),
 	 * then shortens it to `graceMs` when the turn ends. Leave it out when the
@@ -51,8 +64,12 @@ export interface ResumableLocator {
 }
 
 export interface ResumableStreamsOptions {
-	redis: ResumableRedis
-	/** Where the thread locator is kept. Default: `${keyPrefix}loc:<threadKey>` in `redis`. */
+	/**
+	 * Shares turns across replicas. Leave it out for one process (local
+	 * development, a single instance): turns are then resumable on it only.
+	 */
+	redis?: ResumableRedis
+	/** Where the thread locator is kept; needs `redis`. Default: `${keyPrefix}loc:<threadKey>` in `redis`. */
 	locator?: ResumableLocator
 	/** How long a finished turn stays resumable. Default 30 s. */
 	graceMs?: number
@@ -64,6 +81,12 @@ export interface ResumableStreamsOptions {
 	spillFlushMs?: number
 	/** A cross-replica reader without data this long checks whether the owner is still alive. Default 10 s. */
 	idleTimeoutMs?: number
+	/**
+	 * How long a stopped turn may take to end its stream. After it the run ends
+	 * with an `abort` chunk, so a tool that ignores its abort signal cannot
+	 * keep the turn open. Default 5 s.
+	 */
+	stopTimeoutMs?: number
 	/** Upper bound for `close()` to wait on active turns. Default 30 s. */
 	drainTimeoutMs?: number
 	/** Identifies this process. Default: a random UUID. */
@@ -78,9 +101,12 @@ interface Locator {
 }
 
 type Control =
-	| { type: 'spill'; streamId: string; key: string }
-	| { type: 'abort'; streamId: string }
-type SpillEntry = { c: UIMessageChunk[] } | { end: 'done' | 'unavailable' }
+	{ type: 'spill'; streamId: string } | { type: 'abort'; streamId: string }
+/** One spill stream entry: chunks, the end marker, or both. */
+interface SpillEntry {
+	c?: UIMessageChunk[]
+	end?: 'done' | 'unavailable'
+}
 type Listener = (chunk: UIMessageChunk | null) => void
 
 interface LiveRun {
@@ -92,34 +118,61 @@ interface LiveRun {
 	overflow: boolean
 	done: boolean
 	listeners: Set<Listener>
-	spillKeys: string[]
+	/** Mirroring to the run's one spill stream, shared by every cross-replica reader. */
+	spill: 'off' | 'live' | 'ended'
+	/** An XADD is in flight; chunks arriving meanwhile go out together after it. */
+	writing: boolean
 	pending: UIMessageChunk[]
 	/** Flushes `pending` on the leading edge, then at most once per `spillFlushMs`. */
 	scheduleFlush: (() => void) & { cancel(): void }
 	renewTimer?: ReturnType<typeof setInterval>
+	spillTimer?: ReturnType<typeof setInterval>
 	evictTimer?: ReturnType<typeof setTimeout>
 	finished: Promise<void>
 	resolveFinished: () => void
 }
 
 const SPILL_TTL_SECONDS = 60
+/** The owner answers a spill request within a round trip; a silent one is gone. */
+const SPILL_ACK_MS = 2_000
 const ownerGone: UIMessageChunk = {
 	type: 'error',
 	errorText: 'The stream owner stopped responding.'
 }
+const interrupted: UIMessageChunk = {
+	type: 'error',
+	errorText: 'The resumed stream was interrupted.'
+}
 
-/** Appends a chunk, merging consecutive text deltas of the same part. Returns the bytes added. */
+type Delta = Extract<UIMessageChunk, { type: 'text-delta' | 'reasoning-delta' }>
+const isDelta = (chunk: UIMessageChunk): chunk is Delta =>
+	chunk.type === 'text-delta' || chunk.type === 'reasoning-delta'
+
+/** Appends a chunk, merging consecutive deltas of the same part. Returns the bytes added. */
 function append(chunks: UIMessageChunk[], chunk: UIMessageChunk): number {
 	const last = chunks.at(-1)
 	if (
-		chunk.type === 'text-delta' &&
-		last?.type === 'text-delta' &&
+		last &&
+		isDelta(last) &&
+		isDelta(chunk) &&
+		last.type === chunk.type &&
 		last.id === chunk.id &&
 		!last.providerMetadata &&
 		!chunk.providerMetadata
 	) {
 		chunks[chunks.length - 1] = { ...last, delta: last.delta + chunk.delta }
 		return chunk.delta.length
+	}
+	if (
+		last?.type === 'tool-input-delta' &&
+		chunk.type === 'tool-input-delta' &&
+		last.toolCallId === chunk.toolCallId
+	) {
+		chunks[chunks.length - 1] = {
+			...last,
+			inputTextDelta: last.inputTextDelta + chunk.inputTextDelta
+		}
+		return chunk.inputTextDelta.length
 	}
 	chunks.push(chunk)
 	return JSON.stringify(chunk).length
@@ -142,12 +195,13 @@ export function createResumableStreams(
 	options: ResumableStreamsOptions
 ): ResumableStreams {
 	const {
-		redis,
+		redis = noRedis,
 		graceMs = 30_000,
 		maxBufferBytes = 2_000_000,
 		locatorTtlMs = 30_000,
 		spillFlushMs = 50,
 		idleTimeoutMs = 10_000,
+		stopTimeoutMs = 5_000,
 		drainTimeoutMs = 30_000,
 		replicaId = crypto.randomUUID(),
 		keyPrefix = 'resumable:',
@@ -156,7 +210,10 @@ export function createResumableStreams(
 			warn: (message, attributes) => console.warn(message, attributes)
 		}
 	} = options
+	/** The thread's current run, by thread key. */
 	const runs = new Map<string, LiveRun>()
+	/** Every run still in memory, including one a newer turn replaced, by stream id. */
+	const streams = new Map<string, LiveRun>()
 	const readers = new Set<BlockingReader>()
 	const locatorKey = (threadKey: string) => `${keyPrefix}loc:${threadKey}`
 	const locatorStore: ResumableLocator = options.locator ?? {
@@ -166,6 +223,8 @@ export function createResumableStreams(
 		expire: (threadKey, ttlMs) => redis.pexpire(locatorKey(threadKey), ttlMs)
 	}
 	const controlChannel = (owner: string) => `${keyPrefix}ctl:${owner}`
+	const spillKey = (streamId: string) => `${keyPrefix}spill:${streamId}`
+	const spillTtlSeconds = Math.ceil(graceMs / 1000) + SPILL_TTL_SECONDS
 	let unsubscribe: Promise<(() => Promise<void>) | undefined> | undefined
 	let closed = false
 
@@ -188,31 +247,61 @@ export function createResumableStreams(
 				unsubscribe = undefined
 				return undefined
 			})
+		return unsubscribe
 	}
 
-	function writeSpill(key: string, entry: SpillEntry) {
-		void soft('xadd', redis.xadd(key, JSON.stringify(entry)))
-		void soft('expire', redis.expire(key, SPILL_TTL_SECONDS))
+	/** Awaited in turn, so the XADD creates the key before EXPIRE on clients that do not keep order (HTTP). */
+	async function writeSpill(key: string, entry: SpillEntry, expire: boolean) {
+		await soft('xadd', redis.xadd(key, JSON.stringify(entry)))
+		if (expire) await soft('expire', redis.expire(key, spillTtlSeconds))
 	}
 
 	function onControl(message: string) {
 		const control = parse<Control>(message)
 		if (!control) return
-		const run = [...runs.values()].find((r) => r.streamId === control.streamId)
-		if (control.type === 'abort') return void run?.abort.abort()
+		const run = streams.get(control.streamId)
+		// A finished turn's signal may still guard its epilogue (reply suggestions).
+		if (control.type === 'abort')
+			return void (run && !run.done && run.abort.abort())
+		// Already mirroring: the stream holds the run from its first chunk.
+		if (run && run.spill !== 'off') return
 		if (!run || run.overflow)
-			return writeSpill(control.key, { end: 'unavailable' })
-		// One XADD with the whole buffer; commands on one connection stay ordered, so batches follow it.
-		writeSpill(control.key, { c: run.chunks })
-		if (run.done) writeSpill(control.key, { end: 'done' })
-		else run.spillKeys.push(control.key)
+			return void writeSpill(
+				spillKey(control.streamId),
+				{ end: 'unavailable' },
+				true
+			)
+		run.spill = 'live'
+		run.pending = run.chunks.slice()
+		flush(run)
 	}
 
+	/** Mirrors the run to its spill stream one XADD at a time, so entries land in order on any client. */
 	function flush(run: LiveRun) {
-		if (!run.pending.length) return
-		const entry = { c: run.pending }
+		if (run.spill !== 'live' || run.writing) return
+		if (!run.pending.length && !run.done) return
+		const key = spillKey(run.streamId)
+		const entry: SpillEntry = run.done
+			? { c: run.pending, end: 'done' }
+			: { c: run.pending }
+		const first = !run.spillTimer
 		run.pending = []
-		for (const key of run.spillKeys) writeSpill(key, entry)
+		if (run.done) {
+			run.spill = 'ended'
+			clearInterval(run.spillTimer)
+		} else if (first) {
+			// The TTL outlives a quiet stretch (a long tool call) without an EXPIRE per batch.
+			run.spillTimer = setInterval(
+				() => void soft('expire', redis.expire(key, spillTtlSeconds)),
+				(spillTtlSeconds * 1000) / 3
+			)
+			run.spillTimer.unref?.()
+		}
+		run.writing = true
+		void writeSpill(key, entry, first || run.done).then(() => {
+			run.writing = false
+			flush(run)
+		})
 	}
 
 	function push(run: LiveRun, chunk: UIMessageChunk) {
@@ -228,7 +317,7 @@ export function createResumableStreams(
 				)
 			}
 		}
-		if (run.spillKeys.length) {
+		if (run.spill === 'live') {
 			append(run.pending, chunk)
 			run.scheduleFlush()
 		}
@@ -239,13 +328,12 @@ export function createResumableStreams(
 		run.scheduleFlush.cancel()
 		clearInterval(run.renewTimer)
 		flush(run)
-		for (const key of run.spillKeys) writeSpill(key, { end: 'done' })
-		run.spillKeys = []
 		for (const listener of run.listeners) listener(null)
 		run.listeners.clear()
 		if (locatorStore.expire)
 			void soft('pexpire', locatorStore.expire(run.threadKey, graceMs))
 		run.evictTimer = setTimeout(() => {
+			streams.delete(run.streamId)
 			if (runs.get(run.threadKey) === run) runs.delete(run.threadKey)
 		}, graceMs)
 		run.evictTimer.unref?.()
@@ -254,6 +342,15 @@ export function createResumableStreams(
 
 	async function pump(run: LiveRun, stream: ReadableStream<UIMessageChunk>) {
 		const reader = stream.getReader()
+		let deadline: ReturnType<typeof setTimeout> | undefined
+		const onAbort = () => {
+			deadline = setTimeout(() => {
+				push(run, { type: 'abort' })
+				void reader.cancel().catch(() => {})
+			}, stopTimeoutMs)
+			deadline.unref?.()
+		}
+		run.abort.signal.addEventListener('abort', onAbort, { once: true })
 		try {
 			for (;;) {
 				const { done, value } = await reader.read()
@@ -267,6 +364,8 @@ export function createResumableStreams(
 					errorText: getErrorMessage(error)
 				})
 		} finally {
+			clearTimeout(deadline)
+			run.abort.signal.removeEventListener('abort', onAbort)
 			finish(run)
 		}
 	}
@@ -310,12 +409,16 @@ export function createResumableStreams(
 			reader.close()
 		}
 		signal?.addEventListener('abort', release)
-		const key = `${keyPrefix}spill:${locator.streamId}:${crypto.randomUUID()}`
-		const spill: Control = { type: 'spill', streamId: locator.streamId, key }
+		const key = spillKey(locator.streamId)
+		const spill: Control = { type: 'spill', streamId: locator.streamId }
 		let entries: StreamEntry[] = []
 		try {
 			await redis.publish(controlChannel(locator.owner), JSON.stringify(spill))
-			entries = await reader.xread(key, '0', idleTimeoutMs)
+			entries = await reader.xread(
+				key,
+				'0',
+				Math.min(idleTimeoutMs, SPILL_ACK_MS)
+			)
 		} catch (error) {
 			if (!released)
 				logger.warn('resumable: cross-replica reconnect failed', {
@@ -323,31 +426,42 @@ export function createResumableStreams(
 				})
 		}
 		const first = parse<SpillEntry>(entries[0]?.value)
-		if (!first || 'end' in first) {
+		if (!first || first.end === 'unavailable') {
 			release()
 			return null
 		}
 		let lastId = '0'
 		return new ReadableStream<UIMessageChunk>({
 			async pull(controller) {
+				/** Ends the stream; an `error` chunk tells the client to reload the thread. */
+				const end = (error?: UIMessageChunk) => {
+					if (error && !released) controller.enqueue(error)
+					release()
+					closeQuietly(controller)
+				}
 				try {
 					while (!entries.length) {
 						entries = await reader.xread(key, lastId, idleTimeoutMs)
 						if (entries.length) break
-						const current = parse<Locator>(await locatorStore.read(threadKey))
-						if (current?.streamId === locator.streamId) continue
-						controller.enqueue(ownerGone)
-						throw new Error('owner gone')
+						// A failed read is a Redis blip, not a dead owner: keep waiting.
+						const current = await soft('get', locatorStore.read(threadKey))
+						if (current === undefined) continue
+						if (parse<Locator>(current)?.streamId === locator.streamId) continue
+						return end(ownerGone)
 					}
 					for (const entry of entries.splice(0)) {
 						lastId = entry.id
 						const spillEntry = parse<SpillEntry>(entry.value)
-						if (!spillEntry || 'end' in spillEntry) throw new Error('end')
-						for (const chunk of spillEntry.c) controller.enqueue(chunk)
+						if (!spillEntry) return end(interrupted)
+						for (const chunk of spillEntry.c ?? []) controller.enqueue(chunk)
+						if (spillEntry.end) return end()
 					}
-				} catch {
-					release()
-					closeQuietly(controller)
+				} catch (error) {
+					if (!released)
+						logger.warn('resumable: cross-replica read failed', {
+							error: getErrorMessage(error)
+						})
+					end(interrupted)
 				}
 			},
 			cancel: release
@@ -361,8 +475,9 @@ export function createResumableStreams(
 			const finished = new Promise<void>((resolve) => {
 				resolveFinished = resolve
 			})
+			// A new turn supersedes one still running on the thread, which nothing could reach or stop anymore.
 			const previous = runs.get(threadKey)
-			if (previous) clearTimeout(previous.evictTimer)
+			if (previous && !previous.done) previous.abort.abort()
 			const run: LiveRun = {
 				threadKey,
 				streamId: crypto.randomUUID(),
@@ -372,19 +487,39 @@ export function createResumableStreams(
 				overflow: false,
 				done: false,
 				listeners: new Set(),
-				spillKeys: [],
+				spill: 'off',
+				writing: false,
 				pending: [],
 				scheduleFlush: throttle(() => flush(run), spillFlushMs),
 				finished,
 				resolveFinished
 			}
 			runs.set(threadKey, run)
-			ensureSubscribed()
-			const locator: Locator = { streamId: run.streamId, owner: replicaId }
-			void soft(
-				'set',
-				locatorStore.write(threadKey, JSON.stringify(locator), locatorTtlMs)
-			)
+			streams.set(run.streamId, run)
+			const locator = JSON.stringify({
+				streamId: run.streamId,
+				owner: replicaId
+			} satisfies Locator)
+			// Point other replicas here only once spill and stop requests can reach this one.
+			void ensureSubscribed().then(async (subscribed) => {
+				if (!subscribed) return
+				const replaced = await soft(
+					'set',
+					locatorStore.write(
+						threadKey,
+						locator,
+						run.done ? graceMs : locatorTtlMs
+					)
+				)
+				// A turn the thread ran on another replica would keep running there, unreachable.
+				const before = typeof replaced === 'string' && parse<Locator>(replaced)
+				if (!before || before.owner === replicaId) return
+				const abort: Control = { type: 'abort', streamId: before.streamId }
+				void soft(
+					'publish',
+					redis.publish(controlChannel(before.owner), JSON.stringify(abort))
+				)
+			})
 			const { expire } = locatorStore
 			if (expire) {
 				run.renewTimer = setInterval(
@@ -431,16 +566,18 @@ export function createResumableStreams(
 
 		async close() {
 			closed = true
-			const active = [...runs.values()]
+			const active = [...streams.values()]
 				.filter((run) => !run.done)
 				.map((run) => run.finished)
 			// Runs still going after the drain window are aborted below.
 			await withTimeout(Promise.all(active), drainTimeoutMs).catch(() => {})
-			for (const run of runs.values()) {
+			for (const run of streams.values()) {
 				if (!run.done) run.abort.abort()
 				clearTimeout(run.evictTimer)
+				clearInterval(run.spillTimer)
 			}
 			runs.clear()
+			streams.clear()
 			for (const reader of readers) reader.close()
 			readers.clear()
 			const off = await unsubscribe

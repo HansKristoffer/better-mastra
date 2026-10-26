@@ -13,7 +13,7 @@ import { chatErrorResponse } from '../turn/errors.js'
 import { SSE_HEARTBEAT_MS, toChatStreamResponse } from '../turn/response.js'
 import type { ChatTurnRequest, ChatTurnResult } from '../turn/runChatTurn.js'
 import type { ChatRefusal, ChatTurnBody } from '../turn/types.js'
-import type { ResumableStreams } from './types.js'
+import type { ResumableStreams } from '../resumable/index.js'
 
 export interface ChatRouteOptions<
 	TAuth,

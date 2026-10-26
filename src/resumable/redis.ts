@@ -14,7 +14,8 @@ export interface BlockingReader {
 
 /** The few Redis commands resumable streams need. Use `bunRedis` or `ioRedis`, or implement it. */
 export interface ResumableRedis {
-	set(key: string, value: string, ttlMs: number): Promise<void>
+	/** `SET key value PX ttlMs GET` (Redis 6.2+): resolves with the value it replaced. */
+	set(key: string, value: string, ttlMs: number): Promise<string | null>
 	get(key: string): Promise<string | null>
 	del(key: string): Promise<void>
 	pexpire(key: string, ttlMs: number): Promise<void>
@@ -28,6 +29,19 @@ export interface ResumableRedis {
 	xadd(key: string, value: string): Promise<void>
 	/** Opens a dedicated connection for one reader. */
 	reader(): Promise<BlockingReader>
+}
+
+/** Stands in when there is no Redis: no locator is ever found, so every turn stays on its own process. */
+export const noRedis: ResumableRedis = {
+	set: async () => null,
+	get: async () => null,
+	del: async () => {},
+	pexpire: async () => {},
+	expire: async () => {},
+	publish: async () => {},
+	subscribe: async () => async () => {},
+	xadd: async () => {},
+	reader: () => Promise.reject(new Error('resumable: no redis'))
 }
 
 type Send = (command: string, args: string[]) => Promise<unknown>
@@ -48,7 +62,8 @@ function fromSend(
 ): ResumableRedis {
 	return {
 		set: async (key, value, ttlMs) =>
-			void (await send('SET', [key, value, 'PX', String(ttlMs)])),
+			((await send('SET', [key, value, 'PX', String(ttlMs), 'GET'])) as
+				string | null) ?? null,
 		get: async (key) => ((await send('GET', [key])) as string | null) ?? null,
 		del: async (key) => void (await send('DEL', [key])),
 		pexpire: async (key, ttlMs) =>
@@ -141,7 +156,11 @@ export function ioRedis(client: IoRedisLike): ResumableRedis {
 /** The `@upstash/redis` `Redis` methods the adapter uses. */
 export interface UpstashRedisLike {
 	get(key: string): Promise<unknown>
-	set(key: string, value: string, options: { px: number }): Promise<unknown>
+	set(
+		key: string,
+		value: string,
+		options: { px: number; get: true }
+	): Promise<unknown>
 	del(key: string): Promise<unknown>
 	pexpire(key: string, milliseconds: number): Promise<unknown>
 	expire(key: string, seconds: number): Promise<unknown>
@@ -182,7 +201,7 @@ export function upstashRedis(
 	const redis = once(() => (typeof client === 'function' ? client() : client))
 	return {
 		set: async (key, value, ttlMs) =>
-			void (await redis().set(key, value, { px: ttlMs })),
+			asText(await redis().set(key, value, { px: ttlMs, get: true })),
 		get: async (key) => asText(await redis().get(key)),
 		del: async (key) => void (await redis().del(key)),
 		pexpire: async (key, ttlMs) => void (await redis().pexpire(key, ttlMs)),
