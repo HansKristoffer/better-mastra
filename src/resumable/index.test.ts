@@ -19,9 +19,11 @@ class FakeRedis {
 	seq = 0
 
 	client() {
-		const view = { ops: 0, down: false }
+		/** `jitter` lands each command after a random delay, as concurrent HTTP requests may. */
+		const view = { ops: 0, down: false, jitter: false }
 		const op = async <T>(fn: () => T | Promise<T>): Promise<T> => {
 			view.ops++
+			if (view.jitter) await tick(Math.random() * 4)
 			if (view.down) throw new Error('redis down')
 			return fn()
 		}
@@ -34,10 +36,11 @@ class FakeRedis {
 			(this.streams.get(key) ?? []).filter((e) => Number(e.id) > Number(id))
 		const redis: ResumableRedis = {
 			set: (key, value, ttlMs) =>
-				op(
-					() =>
-						void this.values.set(key, { value, expiresAt: Date.now() + ttlMs })
-				),
+				op(() => {
+					const replaced = live(key)?.value ?? null
+					this.values.set(key, { value, expiresAt: Date.now() + ttlMs })
+					return replaced
+				}),
 			get: (key) => op(() => live(key)?.value ?? null),
 			del: (key) => op(() => void this.values.delete(key)),
 			pexpire: (key, ttlMs) =>
@@ -359,6 +362,227 @@ test('locator hook: the locator lives in the app lock value and dies with it', a
 	expect(await b.streams.reconnect('t')).toBeNull()
 })
 
+test('repeated cross-replica reconnects share one spill stream', async () => {
+	const { fake, a, b } = setup()
+	const turn = source()
+	const response = await a.streams.start({ threadKey: 't', ...turn })
+	turn.begin()
+	turn.text('Hel')
+	await tick()
+	const first = await b.streams.reconnect('t')
+	await first?.cancel() // a flaky client drops the stream and reconnects
+	turn.text('lo')
+	await tick(5)
+	const second = await b.streams.reconnect('t')
+	turn.text('!')
+	turn.end()
+	expect(textOf(await collect(second))).toBe('Hello!')
+	await collect(response)
+	expect([...fake.streams.keys()]).toHaveLength(1)
+})
+
+test('a silent owner answers a cross-replica reconnect with null quickly', async () => {
+	const { fake, b } = setup({ idleTimeoutMs: 10_000 })
+	// The owner crashed; its locator has not expired yet.
+	fake.values.set('resumable:loc:t', {
+		value: JSON.stringify({ streamId: 's', owner: 'gone' }),
+		expiresAt: Date.now() + 30_000
+	})
+	const started = Date.now()
+	expect(await b.streams.reconnect('t')).toBeNull()
+	expect(Date.now() - started).toBeLessThan(3_000)
+})
+
+test('no locator until the owner listens on its control channel', async () => {
+	const fake = new FakeRedis()
+	const { redis } = fake.client()
+	let failSubscribe = true
+	const a = createResumableStreams({
+		redis: {
+			...redis,
+			subscribe: (channel, onMessage) =>
+				failSubscribe
+					? Promise.reject(new Error('subscribe failed'))
+					: redis.subscribe(channel, onMessage)
+		},
+		logger: { warn() {} }
+	})
+	open.push(a)
+	const turn = source()
+	await a.start({ threadKey: 't', ...turn })
+	await tick()
+	expect(fake.values.has('resumable:loc:t')).toBe(false)
+	turn.end()
+	failSubscribe = false
+	const next = source()
+	await a.start({ threadKey: 'u', ...next }) // subscribing is retried
+	await tick()
+	expect(fake.values.has('resumable:loc:u')).toBe(true)
+	next.end()
+})
+
+test('spill entries stay ordered on a client that reorders commands', async () => {
+	const { a, b } = setup()
+	const turn = source()
+	const response = await a.streams.start({ threadKey: 't', ...turn })
+	await tick(10)
+	a.view.jitter = true
+	turn.begin()
+	for (let i = 0; i < 20; i++) turn.text(`${i},`)
+	const resumed = await b.streams.reconnect('t')
+	for (let i = 20; i < 60; i++) {
+		turn.text(`${i},`)
+		await tick(1)
+	}
+	turn.end()
+	const expected = Array.from({ length: 60 }, (_, i) => `${i},`).join('')
+	expect(textOf(await collect(resumed))).toBe(expected)
+	await collect(response)
+})
+
+test('a new turn on the thread aborts the one still running', async () => {
+	const { a } = setup()
+	const old = source()
+	const oldResponse = await a.streams.start({ threadKey: 't', ...old })
+	old.begin()
+	const next = source()
+	await a.streams.start({ threadKey: 't', ...next })
+	expect(old.abort.signal.aborted).toBe(true)
+	expect((await collect(oldResponse)).at(-1)?.type).toBe('abort')
+	expect(next.abort.signal.aborted).toBe(false)
+	next.end()
+})
+
+test('reasoning and tool input deltas are merged in the replay', async () => {
+	const { a } = setup()
+	const turn = source()
+	await a.streams.start({ threadKey: 't', ...turn })
+	turn.write({ type: 'reasoning-start', id: 'r' })
+	for (const delta of ['thi', 'nk'])
+		turn.write({ type: 'reasoning-delta', id: 'r', delta })
+	turn.write({ type: 'tool-input-start', toolCallId: 'c', toolName: 'x' })
+	for (const inputTextDelta of ['{"a"', ':1}'])
+		turn.write({ type: 'tool-input-delta', toolCallId: 'c', inputTextDelta })
+	turn.end()
+	await tick()
+	const replay = await collect(await a.streams.reconnect('t'))
+	expect(replay.filter((c) => c.type === 'reasoning-delta')).toEqual([
+		{ type: 'reasoning-delta', id: 'r', delta: 'think' }
+	])
+	expect(replay.filter((c) => c.type === 'tool-input-delta')).toEqual([
+		{ type: 'tool-input-delta', toolCallId: 'c', inputTextDelta: '{"a":1}' }
+	])
+})
+
+test('without redis: one process resumes and stops its own turns', async () => {
+	const streams = createResumableStreams({ logger: { warn() {} } })
+	open.push(streams)
+	const turn = source()
+	await streams.start({ threadKey: 't', ...turn })
+	turn.begin()
+	turn.text('hi')
+	await tick()
+	const resumed = await streams.reconnect('t')
+	expect(await streams.reconnect('other')).toBeNull()
+	expect(await streams.stop('t')).toBe(true)
+	const chunks = await collect(resumed)
+	expect(textOf(chunks)).toBe('hi')
+	expect(chunks.at(-1)?.type).toBe('abort')
+})
+
+test('a new turn on another replica aborts the one still running', async () => {
+	const { a, b } = setup()
+	const old = source()
+	const oldResponse = await a.streams.start({ threadKey: 't', ...old })
+	old.begin()
+	await tick()
+	const next = source()
+	await b.streams.start({ threadKey: 't', ...next })
+	expect((await collect(oldResponse)).at(-1)?.type).toBe('abort')
+	expect(next.abort.signal.aborted).toBe(false)
+	next.end()
+})
+
+test('a stop that reaches a finished turn leaves its signal alone', async () => {
+	const { a, b } = setup()
+	const turn = source()
+	await collect(
+		await a.streams.start({ threadKey: 't', ...turn }).then((s) => {
+			turn.begin()
+			turn.end()
+			return s
+		})
+	)
+	expect(await b.streams.stop('t')).toBe(true)
+	await tick()
+	expect(turn.abort.signal.aborted).toBe(false)
+})
+
+test('a stopped turn whose stream ignores the abort ends after stopTimeoutMs', async () => {
+	const { a } = setup({ stopTimeoutMs: 20 })
+	let controller!: ReadableStreamDefaultController<UIMessageChunk>
+	const stream = new ReadableStream<UIMessageChunk>({
+		start(c) {
+			controller = c
+		}
+	})
+	const abort = new AbortController()
+	const response = await a.streams.start({ threadKey: 't', stream, abort })
+	controller.enqueue({ type: 'start' })
+	await a.streams.stop('t') // a tool that ignores the signal keeps the stream open
+	const chunks = await collect(response)
+	expect(chunks.map((c) => c.type)).toEqual(['start', 'abort'])
+})
+
+test('a failed liveness read keeps a cross-replica reader waiting', async () => {
+	const values = new Map<string, string>()
+	let failReads = false
+	const locator = {
+		read: async (threadKey: string) => {
+			if (failReads) throw new Error('redis blip')
+			return values.get(threadKey) ?? null
+		},
+		write: async (threadKey: string, value: string) => {
+			const replaced = values.get(threadKey) ?? null
+			values.set(threadKey, value)
+			return replaced
+		}
+	}
+	const { a, b } = setup({ locator, idleTimeoutMs: 10 })
+	const turn = source()
+	await a.streams.start({ threadKey: 't', ...turn })
+	turn.begin()
+	turn.text('Hel')
+	await tick()
+	const reading = collect(await b.streams.reconnect('t'))
+	failReads = true
+	await tick(50) // several idle checks fail
+	failReads = false
+	turn.text('lo')
+	turn.end()
+	const chunks = await reading
+	expect(textOf(chunks)).toBe('Hello')
+	expect(chunks.at(-1)?.type).toBe('finish')
+})
+
+test('a failed cross-replica read ends the stream with an error chunk', async () => {
+	const { a, b } = setup()
+	const turn = source()
+	await a.streams.start({ threadKey: 't', ...turn })
+	turn.begin()
+	turn.text('Hel')
+	await tick()
+	const resumed = await b.streams.reconnect('t')
+	b.view.down = true // the reader's XREAD fails
+	const chunks = await collect(resumed)
+	expect(textOf(chunks)).toBe('Hel')
+	expect(chunks.at(-1)).toEqual({
+		type: 'error',
+		errorText: 'The resumed stream was interrupted.'
+	})
+	turn.end()
+})
+
 /** `@upstash/redis` with its default `automaticDeserialization`: JSON values come back parsed. */
 function fakeUpstash() {
 	const values = new Map<string, string>()
@@ -378,7 +602,11 @@ function fakeUpstash() {
 			const value = values.get(key)
 			return value === undefined ? null : parsed(value)
 		},
-		set: async (key, value) => void values.set(key, value),
+		set: async (key, value) => {
+			const replaced = values.get(key)
+			values.set(key, value)
+			return replaced === undefined ? null : parsed(replaced)
+		},
 		del: async (key) => void values.delete(key),
 		pexpire: async () => 1,
 		expire: async () => 1,

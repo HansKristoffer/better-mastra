@@ -6,7 +6,7 @@ import type { ChatTurnRequest } from '../turn/runChatTurn.js'
 import { refused } from '../turn/runChatTurn.js'
 import type { ChatTurnBody } from '../turn/types.js'
 import { type ChatRouteOptions, createChatRoute } from './chatRoute.js'
-import type { ResumableStreams } from './types.js'
+import type { ResumableStreams } from '../resumable/index.js'
 
 const THREAD = { threadId: 'thread-1', resourceId: 'org:user' }
 
