@@ -51,6 +51,9 @@ const OBSERVATIONAL_MEMORY_PART_PREFIX = 'data-om-'
 /** The transient data part a server streams after an answer: up to three replies the user can tap to send. */
 export const REPLY_SUGGESTIONS_PART = 'data-reply-suggestions'
 
+/** The transient data part a server streams before the replies: the answer is complete, though its finish waits for them. */
+export const ANSWER_COMPLETE_PART = 'data-answer-complete'
+
 export const REPLY_SUGGESTIONS_MAX = 3
 
 /** The transient data part a turn streams right after its start: the user's message, for a client that reattaches before the thread stores it. */

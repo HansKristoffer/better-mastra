@@ -69,6 +69,7 @@ export interface ChatSessionRefs extends Pick<
 	readonly replySuggestions: ComputedRef<
 		ChatSessionSnapshot['replySuggestions']
 	>
+	readonly answerComplete: ComputedRef<ChatSessionSnapshot['answerComplete']>
 }
 
 /** The component for each card kind, which gets the card as its `card` prop; `silent` draws nothing and needs none. */
@@ -116,6 +117,7 @@ export function useChatSession(
 		restoredDraft: computed(() => snapshot.value.restoredDraft),
 		changeMarks: computed(() => snapshot.value.changeMarks),
 		replySuggestions: computed(() => snapshot.value.replySuggestions),
+		answerComplete: computed(() => snapshot.value.answerComplete),
 		send: session.send,
 		stop: session.stop,
 		tryAgain: session.tryAgain,
