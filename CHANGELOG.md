@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/HansKristoffer/better-mastra/compare/v0.4.0...v0.5.0) (2026-10-26)
+
+
+### Features
+
+* **resumable:** coordinate and stop turns across replicas ([#28](https://github.com/HansKristoffer/better-mastra/issues/28)) ([ed84a97](https://github.com/HansKristoffer/better-mastra/commit/ed84a97bbc5a1e27f6885775b90fa6982d74dca2))
+* **turn:** mark the answer complete before its reply suggestions ([#27](https://github.com/HansKristoffer/better-mastra/issues/27)) ([c217b30](https://github.com/HansKristoffer/better-mastra/commit/c217b3050fd3e31297c21ccb188657d530573742))
+
 ## [0.4.0](https://github.com/HansKristoffer/better-mastra/compare/v0.3.0...v0.4.0) (2026-10-21)
 
 
