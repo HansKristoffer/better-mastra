@@ -2,6 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import type { UIMessage } from 'ai'
 
 import {
+	classifyTurnChanges,
+	type PendingChange,
+	withoutStaleAnswers
+} from './changes.js'
+import {
 	ANSWER_COMPLETE_PART,
 	REPLY_SUGGESTIONS_PART
 } from './replySuggestions.js'
@@ -356,6 +361,71 @@ describe('runChatTurn', () => {
 
 			expect(result).toMatchObject({ kind: 'refused', code: 'change_expired' })
 			expect(harness.held.size).toBe(0)
+		})
+
+		test('should leave an old answer in the history out of a new message', async () => {
+			// Given a client that sends the whole history, with an approval
+			// answered in an earlier turn
+			const harness = createHarness({ replies: [textReply('Hej!')] })
+			const old: UIMessage = {
+				id: 'a-1',
+				role: 'assistant',
+				parts: [
+					{
+						type: `tool-${DELETE_TOOL}`,
+						toolCallId: 'call-1',
+						state: 'approval-responded',
+						input: { budgetId: 'b-1' },
+						approval: { id: 'run-gone::call-1', approved: true }
+					}
+				]
+			}
+
+			// When the user writes again
+			const result = await harness.run({
+				messages: [userMessage('Slet'), old, userMessage('Hej')]
+			})
+
+			// Then the new message runs
+			expect(result.kind).toBe('stream')
+			await readTurn(result)
+		})
+
+		test('should hand Mastra only the answers that wait in the thread', () => {
+			const pending: PendingChange[] = [
+				{
+					kind: 'approval',
+					runId: 'run-1',
+					toolCallId: 'call-2',
+					toolName: DELETE_TOOL,
+					approvalId: 'run-1::call-2'
+				}
+			]
+			const answered = (toolCallId: string, runId = 'run-1') => ({
+				type: `tool-${DELETE_TOOL}` as const,
+				toolCallId,
+				state: 'approval-responded' as const,
+				input: {},
+				approval: { id: `${runId}::${toolCallId}`, approved: true }
+			})
+			const message: UIMessage = {
+				id: 'a-1',
+				role: 'assistant',
+				parts: [
+					{ type: 'step-start' },
+					answered('call-1'),
+					answered('call-2'),
+					answered('call-9', 'run-other')
+				]
+			}
+
+			expect(
+				classifyTurnChanges({ messages: [message], resume: undefined }, pending)
+			).toEqual({ kind: 'approvalAnswers' })
+			expect(withoutStaleAnswers([message], pending)[0]?.parts).toEqual([
+				{ type: 'step-start' },
+				answered('call-2')
+			])
 		})
 
 		test('should decline a waiting approval when the user writes a new message', async () => {

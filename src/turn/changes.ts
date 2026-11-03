@@ -70,8 +70,11 @@ export async function listPendingChanges(
 
 /**
  * Classifies the request against the changes waiting in the caller's thread. A
- * resume must name a waiting suspended run, and every answered approval a
- * waiting approval with the same tool call; anything else has expired.
+ * resume must name a waiting suspended run. The approvals answered in the last
+ * step of the trailing assistant message must include one that waits with the
+ * same tool call; the others in that step were carried out already (the first
+ * of two approvals in one step stays `approval-responded`) and
+ * `withoutStaleAnswers` keeps them from Mastra. Anything else has expired.
  */
 export function classifyTurnChanges(
 	request: {
@@ -94,10 +97,10 @@ export function classifyTurnChanges(
 		return isWaiting ? { kind: 'resume', resume } : { kind: 'expired' }
 	}
 
-	const answers = answeredApprovals(request.messages)
+	const answers = answeredApprovals(lastStepParts(request.messages))
 
 	if (answers.length > 0) {
-		return answers.every((answer) => isWaitingApproval(answer, pending))
+		return answers.some((answer) => isWaitingApproval(answer, pending))
 			? { kind: 'approvalAnswers' }
 			: { kind: 'expired' }
 	}
@@ -192,17 +195,57 @@ function toPendingChange(
 			]
 }
 
-/** Every approval the messages answer, as `@mastra/ai-sdk` reads them: from every assistant message. */
-function answeredApprovals(
-	messages: readonly UIMessage[]
-): readonly { readonly approvalId: string; readonly toolCallId: string }[] {
-	return messages.flatMap((message) =>
+/**
+ * The messages without the approval answers that do not wait in the thread.
+ * `@mastra/ai-sdk` resumes every answer it finds in them by its run id, so only
+ * a waiting one may reach it: an answer already carried out, or one from older
+ * history, is left out.
+ */
+export function withoutStaleAnswers(
+	messages: readonly UIMessage[],
+	pending: readonly PendingChange[]
+): UIMessage[] {
+	return messages.map((message) =>
 		message.role === 'assistant'
-			? message.parts.flatMap((part) =>
-					isToolUIPart(part) && part.state === 'approval-responded'
-						? [{ approvalId: part.approval.id, toolCallId: part.toolCallId }]
-						: []
-				)
+			? {
+					...message,
+					parts: message.parts.filter(
+						(part) =>
+							!isToolUIPart(part) ||
+							part.state !== 'approval-responded' ||
+							isWaitingApproval(
+								{ approvalId: part.approval.id, toolCallId: part.toolCallId },
+								pending
+							)
+					)
+				}
+			: message
+	)
+}
+
+/** The parts after the last `step-start` of the trailing assistant message. */
+function lastStepParts(
+	messages: readonly UIMessage[]
+): readonly UIMessage['parts'][number][] {
+	const last = messages.at(-1)
+
+	if (last?.role !== 'assistant') {
+		return []
+	}
+
+	// The tsconfig lib predates `findLastIndex`.
+	const start = last.parts.map((part) => part.type).lastIndexOf('step-start')
+
+	return last.parts.slice(start + 1)
+}
+
+/** Every approval the parts answer. */
+function answeredApprovals(
+	parts: readonly UIMessage['parts'][number][]
+): readonly { readonly approvalId: string; readonly toolCallId: string }[] {
+	return parts.flatMap((part) =>
+		isToolUIPart(part) && part.state === 'approval-responded'
+			? [{ approvalId: part.approval.id, toolCallId: part.toolCallId }]
 			: []
 	)
 }

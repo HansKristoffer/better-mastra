@@ -26,7 +26,6 @@ import {
 	type FileUIPart,
 	getToolName,
 	isToolUIPart,
-	lastAssistantMessageIsCompleteWithApprovalResponses,
 	type UIMessage
 } from 'ai'
 import {
@@ -66,7 +65,11 @@ import {
 	type ToolPart,
 	USER_MESSAGE_PART
 } from './messages.js'
-import { type PendingChange, readWaitingChanges } from './pending.js'
+import {
+	isApprovalStepAnswered,
+	type PendingChange,
+	readWaitingChanges
+} from './pending.js'
 import {
 	type ChangeMark,
 	type ChatTurnEffect,
@@ -366,8 +369,7 @@ export function createChatSession<TResumeData = unknown>(
 		// Once the user has answered every approval of the step, the AI SDK
 		// sends the answers on its own, but only for a user turn that waits.
 		sendAutomaticallyWhen: ({ messages }) =>
-			lastAssistantMessageIsCompleteWithApprovalResponses({ messages }) &&
-			startApprovalRequest()
+			isApprovalStepAnswered(messages) && startApprovalRequest()
 	})
 
 	chat.subscribe(() => {
