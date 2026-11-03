@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/HansKristoffer/better-mastra/compare/v0.5.0...v0.5.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **client:** send an approval answer when the step has a call queued behind it ([5f8f80d](https://github.com/HansKristoffer/better-mastra/commit/5f8f80d45b81b034622340794226206dea12166a))
+* **client:** send an approval answer when the step has a call queued behind it ([d47d6f1](https://github.com/HansKristoffer/better-mastra/commit/d47d6f1b00aa489db2146c169474fb085931f0ec))
+
 ## [0.5.0](https://github.com/HansKristoffer/better-mastra/compare/v0.4.0...v0.5.0) (2026-10-26)
 
 
