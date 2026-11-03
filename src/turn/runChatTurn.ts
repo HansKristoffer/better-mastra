@@ -23,7 +23,8 @@ import {
 	listPendingChanges,
 	moveOnFromWaitingChanges,
 	type PendingChange,
-	type TurnChanges
+	type TurnChanges,
+	withoutStaleAnswers
 } from './changes.js'
 import { chatErrorResponse, chatRefusal } from './errors.js'
 import {
@@ -378,7 +379,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	rememberTurnPlan(requestContext, plan)
 
 	const memory = { thread: threadKey.threadId, resource: threadKey.resourceId }
-	const changes = await classifyChanges(
+	const { changes, pending } = await classifyChanges(
 		turn,
 		requestContext,
 		memory,
@@ -423,7 +424,9 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			// Built field by field: Mastra hands every params field it does not
 			// know to the agent ahead of its defaults, so nothing else of the body
 			// may reach it.
-			messages: [...(prepared.messages ?? turn.messages)] as never[],
+			messages: (pending
+				? withoutStaleAnswers(prepared.messages ?? turn.messages, pending)
+				: [...(prepared.messages ?? turn.messages)]) as never[],
 			memory,
 			requestContext,
 			abortSignal: request.signal,
@@ -597,13 +600,20 @@ async function classifyChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 	memory: { readonly thread: string; readonly resource: string },
 	deps: ChatTurnDeps<TAuth, TBody, TScope>,
 	logger: ChatTurnLogger
-): Promise<TurnChanges> {
+): Promise<{
+	readonly changes: TurnChanges
+	/** The changes waiting in the thread; undefined when the app keeps none. */
+	readonly pending: readonly PendingChange[] | undefined
+}> {
 	const { body, signal } = turn.request
 
 	if (deps.pendingChanges === false) {
-		return body.resume
-			? { kind: 'resume', resume: body.resume }
-			: { kind: 'continuation' }
+		return {
+			changes: body.resume
+				? { kind: 'resume', resume: body.resume }
+				: { kind: 'continuation' },
+			pending: undefined
+		}
 	}
 
 	const agent = deps.mastra.getAgentById(deps.agentId)
@@ -635,7 +645,7 @@ async function classifyChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 		)
 	}
 
-	return changes
+	return { changes, pending }
 }
 
 /**

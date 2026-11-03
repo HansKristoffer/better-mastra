@@ -97,6 +97,35 @@ export function readWaitingChanges(message: UIMessage): PendingChange[] {
 }
 
 /**
+ * Whether the user answered the approvals of the newest answer's latest step:
+ * at least one answered, none still asking. A call left `input-available`
+ * beside them is one Mastra dropped from the step when the first approval
+ * suspended the run; the resumed run runs it or asks about it, so unlike the
+ * AI SDK's `lastAssistantMessageIsCompleteWithApprovalResponses` it does not
+ * hold the answers back.
+ */
+export function isApprovalStepAnswered(
+	messages: readonly UIMessage[]
+): boolean {
+	const last = messages.at(-1)
+
+	if (last?.role !== 'assistant') {
+		return false
+	}
+
+	// The tsconfig lib predates `findLastIndex`.
+	const stepStart = last.parts
+		.map((part) => part.type)
+		.lastIndexOf('step-start')
+	const step = last.parts.slice(stepStart + 1).filter(isToolUIPart)
+
+	return (
+		step.some((part) => part.state === 'approval-responded') &&
+		!step.some((part) => part.state === 'approval-requested')
+	)
+}
+
+/**
  * The stored messages with each pending change put back as the live stream
  * showed it: a waiting approval on its tool part with its approval id, a
  * suspended run as the tool's suspended part. Cards then redraw, and can be

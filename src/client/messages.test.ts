@@ -14,6 +14,7 @@ import {
 } from './messages'
 import {
 	expiredChanges,
+	isApprovalStepAnswered,
 	type PendingChange,
 	readWaitingChanges,
 	rebuildPendingApprovals
@@ -116,6 +117,59 @@ describe('selectRequestMessages', () => {
 		expect(selectRequestMessages([...earlier, user('u1'), answer])).toEqual([
 			answer
 		])
+	})
+})
+
+describe('isApprovalStepAnswered', () => {
+	const step = (...parts: UIMessage['parts']) => [
+		user('u1'),
+		assistant('a1', [{ type: 'step-start' }, ...parts])
+	]
+	const declined = {
+		...tool('c1', 'approval-responded'),
+		approval: { id: 'run-1::c1', approved: false }
+	} as UIMessage['parts'][number]
+
+	test('sends an answer with a call queued behind it, approval or read', () => {
+		expect(
+			isApprovalStepAnswered(
+				step(tool('c1', 'approval-responded'), tool('c2', 'input-available'))
+			)
+		).toBe(true)
+		expect(
+			isApprovalStepAnswered(
+				step(tool('r1', 'output-available'), tool('c1', 'approval-responded'))
+			)
+		).toBe(true)
+		expect(
+			isApprovalStepAnswered(step(declined, tool('c2', 'input-available')))
+		).toBe(true)
+	})
+
+	test('waits while an approval of the step still asks', () => {
+		expect(
+			isApprovalStepAnswered(
+				step(tool('c1', 'approval-responded'), tool('c2', 'approval-requested'))
+			)
+		).toBe(false)
+	})
+
+	test('counts only the last step of the newest answer', () => {
+		expect(
+			isApprovalStepAnswered(
+				step(
+					tool('c1', 'approval-responded'),
+					{ type: 'step-start' },
+					tool('r1', 'input-available')
+				)
+			)
+		).toBe(false)
+		expect(
+			isApprovalStepAnswered([
+				assistant('a1', [tool('c1', 'approval-responded')]),
+				user('u2')
+			])
+		).toBe(false)
 	})
 })
 

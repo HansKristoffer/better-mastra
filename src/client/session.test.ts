@@ -6,6 +6,13 @@ import {
 } from 'ai'
 import { z } from 'zod'
 
+import {
+	createHarness,
+	DELETE_TOOL,
+	type ModelStreamPart,
+	textReply,
+	toolCallReply
+} from '../turn/turnFixtures.test'
 import { defineClientAction } from './actions'
 import { createChatFetch } from './fetch'
 import { STRANDED_TOOL_ERROR } from './messages'
@@ -586,6 +593,67 @@ describe('createChatSession', () => {
 		expect(server.requests).toHaveLength(2)
 		expect(chat.getSnapshot().turn).toEqual({ kind: 'idle' })
 		expect(results).toEqual(['updateGoal'])
+	})
+
+	test('sends the answer to the first of two approvals in one step, then asks about the second', async () => {
+		// Given a model that deletes two budgets in one step, run by the real
+		// turn: Mastra asks about the first and leaves the second queued
+		const one = toolCallReply(DELETE_TOOL, { budgetId: 'b-1' }, 'call-1')
+		const two = toolCallReply(DELETE_TOOL, { budgetId: 'b-2' }, 'call-2')
+		const step = [...one.slice(0, -1), two[1], one[2]] as ModelStreamPart[]
+		const harness = createHarness({ replies: [step, textReply('Slettet.')] })
+		const sent: unknown[] = []
+		const results: string[] = []
+		const chat = session(
+			{
+				requests: [],
+				fetch: async (_input, init) => {
+					const body = JSON.parse(String(init?.body))
+					sent.push(body)
+					const result = await harness.run(body)
+
+					return result.kind === 'stream'
+						? createUIMessageStreamResponse({ stream: result.stream })
+						: Response.json({ code: result.code }, { status: 409 })
+				}
+			},
+			{ onToolResult: ({ toolName }) => results.push(toolName) }
+		)
+		const waiting = () => {
+			const turn = chat.getSnapshot().turn
+
+			return turn.kind === 'waiting' ? turn.changes : []
+		}
+
+		chat.send('Slet begge budgetter')
+		await settled(chat)
+
+		expect(waiting().map((change) => change.toolCallId)).toEqual(['call-1'])
+
+		// When the user confirms the one card that asks
+		const [first] = waiting()
+		if (first?.kind !== 'approval') throw new Error('No approval waits.')
+		chat.answerApproval({ approvalId: first.approvalId, approved: true })
+		await settled(chat)
+
+		// Then the answer goes out and the second call asks in the same answer
+		expect(sent).toHaveLength(2)
+		const [second] = waiting()
+		expect(second?.toolCallId).toBe('call-2')
+		if (second?.kind !== 'approval') throw new Error('No approval waits.')
+
+		// And answering it carries out both changes, with the run's older answer
+		// to the first still in the message
+		chat.answerApproval({ approvalId: second.approvalId, approved: true })
+		await settled(chat, ['idle', 'failed'])
+
+		expect(sent).toHaveLength(3)
+		expect(results).toEqual([DELETE_TOOL, DELETE_TOOL])
+		expect(texts(chat.chat.messages)).toEqual([
+			'Slet begge budgetter',
+			'Slettet.'
+		])
+		expect(chat.getSnapshot().turn).toEqual({ kind: 'idle' })
 	})
 
 	test('shows a stored page with its pending approval waiting, never sending on its own', async () => {
