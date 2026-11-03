@@ -121,7 +121,7 @@
 		"verify:package": "node scripts/verify-package.mjs"
 	},
 	"dependencies": {
-		"hanzio": "^3.3.0"
+		"hanzio": "^3.4.0"
 	},
 	"peerDependencies": {
 		"@ai-sdk/anthropic": "^4.0.0",
