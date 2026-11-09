@@ -17,6 +17,7 @@ import {
 	DELETE_TOOL,
 	failingReply,
 	LOOKUP_TOOL,
+	RENAME_TOOL,
 	readTurn,
 	textReply,
 	toolCallReply,
@@ -114,6 +115,30 @@ describe('runChatTurn', () => {
 		expect(new Set(errorTexts)).toEqual(new Set([TURN_ERROR_SENTENCE]))
 		expect(harness.finished[0]?.outcome).toBe('error')
 		expect(harness.releases).toHaveLength(1)
+	})
+
+	test("should hand a tool's error to the model and report it as the tool's, not as a turn failure", async () => {
+		// Given a model that calls a tool that refuses, then answers
+		const harness = createHarness({
+			replies: [
+				toolCallReply(RENAME_TOOL, { budgetId: 'b-404' }),
+				textReply('That budget does not exist.')
+			]
+		})
+
+		// When the user asks
+		await readTurn(await harness.run({ messages: [userMessage('Omdøb')] }))
+
+		// Then the model read the refusal, the tool settled with an error, and
+		// nothing was logged: the turn itself answered
+		expect(JSON.stringify(harness.model.doStreamCalls[1]?.prompt)).toContain(
+			'No budget has that id.'
+		)
+		expect(harness.settled).toEqual([
+			expect.objectContaining({ toolName: RENAME_TOOL, outcome: 'error' })
+		])
+		expect(harness.errors).toEqual([])
+		expect(harness.finished[0]?.outcome).toBe('answered')
 	})
 
 	test('should send the system prompt, the signal and the cache markers to the model', async () => {

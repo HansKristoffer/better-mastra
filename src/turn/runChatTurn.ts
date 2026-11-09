@@ -415,6 +415,25 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			})
 	})
 
+	// What `onError` saw, oldest first, until the chunk it made passes: a
+	// tool's error is the model's to read and `sinks.toolSettled` reports it;
+	// only an `error` chunk is the turn failing.
+	const reportedErrors: unknown[] = []
+	const observeErrors = (chunk: UIMessageChunk) => {
+		if (chunk.type === 'tool-output-error') {
+			reportedErrors.shift()
+			return
+		}
+		if (chunk.type !== 'error' || reportedErrors.length === 0) return
+
+		const error = reportedErrors.shift()
+		observer.failed(error)
+		logger.error('[better-mastra] the turn reported an error', {
+			stage: 'model' satisfies ChatTurnStage,
+			error
+		})
+	}
+
 	const started = await handleChatStream({
 		mastra: deps.mastra,
 		agentId: deps.agentId,
@@ -445,12 +464,10 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 					steps: event.steps
 				})
 		},
+		// Called for a tool's error too, right before its `tool-output-error`
+		// chunk: `observeErrors` decides which it was once the chunk passes.
 		onError: (error) => {
-			observer.failed(error)
-			logger.error('[better-mastra] the turn reported an error', {
-				stage: 'model' satisfies ChatTurnStage,
-				error
-			})
+			reportedErrors.push(error)
 
 			return deps.errorSentence ?? TURN_ERROR_SENTENCE
 		}
@@ -547,7 +564,10 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		kind: 'stream',
 		threadKey,
 		stream: toUserFacingStream(started, {
-			observe: (chunk) => observer.observe(chunk),
+			observe: (chunk) => {
+				observeErrors(chunk)
+				observer.observe(chunk)
+			},
 			...(newMessage && {
 				afterStart: {
 					type: USER_MESSAGE_PART,
