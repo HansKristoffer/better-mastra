@@ -232,7 +232,7 @@ await resumable.stop(threadId)
 
 A new `start()` on a thread whose turn still runs aborts that turn, on this replica or another. A stopped turn gets `stopTimeoutMs` (5 s) to end its stream; after that it ends with an `abort` chunk, so a tool that ignores its abort signal cannot keep the turn open.
 
-The adapters need Redis 6.2 or newer (`SET … GET`). Use `ioRedis(client)` for ioredis. Both adapters open extra connections with `duplicate()`: one subscriber per replica, and one per cross-replica reader (for `XREAD BLOCK`). Sticky sessions keep reconnects on the owner, where they cost nothing.
+The adapters need Redis 6.2 or newer (`SET … GET`). Use `ioRedis(client)` for ioredis. Both adapters open extra connections with `duplicate()`: one subscriber per replica, and one per cross-replica reader (for `XREAD BLOCK`). When the command client cannot duplicate itself (one wrapped to time its commands out), pass the connections separately: `bunRedis(commands, { connect: () => newSubscriberConnection() })`. Sticky sessions keep reconnects on the owner, where they cost nothing.
 
 Use `upstashRedis(client)` for `@upstash/redis`. Upstash has no blocking `XREAD`, so a cross-replica reader polls every `pollMs` (200 ms); pass `() => Redis.fromEnv()` to create the client on first use.
 

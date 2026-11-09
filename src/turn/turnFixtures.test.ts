@@ -46,6 +46,7 @@ export const SUGGESTIONS_AGENT_ID = 'chat-suggestions'
 export const LOOKUP_TOOL = 'lookupSpending'
 export const DELETE_TOOL = 'deleteBudget'
 export const ASK_TOOL = 'askQuestion'
+export const RENAME_TOOL = 'renameBudget'
 
 const USAGE = {
 	inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
@@ -173,6 +174,15 @@ export function createHarness(
 		requireApproval: true,
 		execute: async () => ({ deleted: true })
 	})
+	// Refuses every call, as a tool does with input it cannot act on.
+	const rename = createTool({
+		id: RENAME_TOOL,
+		description: 'Renames the budget.',
+		inputSchema: z.object({ budgetId: z.string() }),
+		execute: async () => {
+			throw new Error('No budget has that id.')
+		}
+	})
 	const ask = createTool({
 		id: ASK_TOOL,
 		description: 'Asks the user a question.',
@@ -233,7 +243,8 @@ export function createHarness(
 				tools: {
 					[LOOKUP_TOOL]: lookup,
 					[DELETE_TOOL]: deleteBudget,
-					[ASK_TOOL]: ask
+					[ASK_TOOL]: ask,
+					[RENAME_TOOL]: rename
 				},
 				toolTiers: { [LOOKUP_TOOL]: 'read', [DELETE_TOOL]: 'approval' },
 				maxSteps: options.maxSteps ?? 4
