@@ -31,6 +31,7 @@ ESM only, Node 20+ or Bun. Every other peer is optional and loaded only by the s
 | `better-mastra/embeddings` | Cached query embeddings and batched document embeddings |
 | `better-mastra/usage` | Metered `generateText`/`generateObject`, model budgets, per-user rate limits |
 | `better-mastra/evals` | Eval cases, checks and an LLM judge, run through your production turn |
+| `better-mastra/mcp-relay` | Another MCP server's tools offered on your own MCP server, called as the current user |
 
 Two CLIs ship with it: `better-mastra-evals` and `better-mastra-tool-manifest`.
 
@@ -327,6 +328,42 @@ bunx --bun better-mastra-evals --suite smoke --model google/gemini-3.5-flash --m
 ```
 
 Several `--model` flags print a model comparison; `--compare` diffs against a saved report.
+
+## MCP relay (`better-mastra/mcp-relay`)
+
+Offers a remote MCP server's tools on your own MCP server, so its consumers use them as they use yours. Each call goes to the remote as the user who made it, with headers your server derives for that user. The remote's descriptions, results and instructions pass through unchanged.
+
+```ts
+import { createMcpRelay, withRelayedTools } from 'better-mastra/mcp-relay'
+
+// Once per remote, at module scope.
+const feedloop = createMcpRelay<{ userId: string }>({
+	url: new URL('/mcp/reporter', feedloopBaseUrl),
+	prefix: 'feedloop_', // optional, put before every remote tool's name
+	headers: async ({ userId }) => ({ Authorization: `Bearer ${await reporterTokenFor(userId)}` }),
+	onError: (error, event) => logger.warn('Feedloop relay failed', { ...event, error }) // never gets arguments
+})
+
+// Per request, around whatever registers your own tools (here orpc-fn):
+const handler = createMcpHandler(async ({ authInfo }) => {
+	const { userId } = authInfo.extra.context
+	const server = new McpServer(
+		{ name: 'app', version: '1.0.0' },
+		{ instructions: `${ownInstructions}\n\n${await feedloop.instructions()}`, capabilities: { tools: {} } }
+	)
+	registerMcpTools(withRelayedTools(server.server, [feedloop], { caller: { userId } }), router, options)
+	return server
+})
+```
+
+- `withRelayedTools` keeps your `tools/list` and `tools/call` handlers and answers both with your tools and the relayed ones. A call to one of your tools never reaches a remote. Your server must declare the `tools` capability.
+- Nothing reaches the remote until a relayed tool is listed or called, or `instructions()` is read. Then the relay discovers the remote once for the process, without a caller's headers, and keeps the answer. On a 2026-07-28 remote each call is then one HTTP request; a 2025-era remote gets an `initialize` per call.
+- A remote that is down or takes over 5 s leaves your own tools working: the listing has only yours, `instructions()` gives `''`, and the relay tries again after 30 s.
+- A refused credential (401, 403), any other HTTP failure and a remote error come back as a tool error result the agent can read. Only an aborted call throws. Neither the error text nor `onError` repeats the call's arguments.
+- A relayed tool named like one of yours, or like another relay's, fails `tools/list`. Give the relay a `prefix`.
+- `relay.tools()` and `relay.callTool(name, args, caller)` are there for a server that registers its tools another way.
+
+The subpath loads `@modelcontextprotocol/client` and nothing from Mastra or the AI SDK, so an app without them can use it. Install `better-mastra @modelcontextprotocol/client @modelcontextprotocol/server` (MCP SDK 2.x). Bun then also installs the package's required Mastra peers (`@mastra/core`, `@mastra/memory`, `@mastra/ai-sdk`) and leaves your own `ai` version as it is; this subpath loads none of them. npm refuses an `ai` older than 7 as a peer conflict, so it needs `--legacy-peer-deps`.
 
 ## Mastra Studio
 
