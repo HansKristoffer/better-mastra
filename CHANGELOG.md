@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0](https://github.com/HansKristoffer/better-mastra/compare/v0.5.1...v0.6.0) (2026-11-09)
+
+
+### Features
+
+* **mcp-relay:** offer a remote MCP server's tools on the host's own server ([1b683a9](https://github.com/HansKristoffer/better-mastra/commit/1b683a9716b87209314af9d49f42e4525070522f))
+* **mcp-relay:** offer a remote MCP server's tools on the host's own server ([898fa2f](https://github.com/HansKristoffer/better-mastra/commit/898fa2f7ec60710d7c23b9e87edefc5f68aae096))
+* **resumable:** bunRedis takes a connect for subscribers and readers ([c5363ea](https://github.com/HansKristoffer/better-mastra/commit/c5363ea837d74e2ca6d23e8a6a9d60e95a4461a4))
+
+
+### Bug Fixes
+
+* **turn:** a tool's error is the tool's, not a turn failure ([37a6df7](https://github.com/HansKristoffer/better-mastra/commit/37a6df79c7ed76e03e41c91cc805fadd7af2ea9b))
+* **turn:** a tool's error is the tool's, not a turn failure; bunRedis takes a connect ([7a99f69](https://github.com/HansKristoffer/better-mastra/commit/7a99f69eb7fb9afaa919837e754d3ed65441764f))
+
 ## [0.5.1](https://github.com/HansKristoffer/better-mastra/compare/v0.5.0...v0.5.1) (2026-11-03)
 
 
