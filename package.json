@@ -41,6 +41,10 @@
 			"types": "./dist/embeddings/index.d.ts",
 			"import": "./dist/embeddings/index.js"
 		},
+		"./mcp-relay": {
+			"types": "./dist/mcp-relay/index.d.ts",
+			"import": "./dist/mcp-relay/index.js"
+		},
 		"./evals": {
 			"types": "./dist/evals/index.d.ts",
 			"import": "./dist/evals/index.js"
@@ -136,6 +140,8 @@
 		"@mastra/libsql": "^1.26.0",
 		"@mastra/memory": "^1.37.0",
 		"@mastra/pg": "^1.31.0",
+		"@modelcontextprotocol/client": "^2.0.0",
+		"@modelcontextprotocol/server": "^2.0.0",
 		"@openrouter/ai-sdk-provider": "^3.1.0",
 		"ai": "^7.0.143",
 		"hono": "^4.12.32",
@@ -169,6 +175,12 @@
 			"optional": true
 		},
 		"@mastra/pg": {
+			"optional": true
+		},
+		"@modelcontextprotocol/client": {
+			"optional": true
+		},
+		"@modelcontextprotocol/server": {
 			"optional": true
 		},
 		"@openrouter/ai-sdk-provider": {
@@ -209,6 +221,8 @@
 		"@mastra/libsql": "^1.26.2",
 		"@mastra/memory": "^1.37.1",
 		"@mastra/pg": "^1.31.2",
+		"@modelcontextprotocol/client": "2.0.0",
+		"@modelcontextprotocol/server": "2.0.0",
 		"@openrouter/ai-sdk-provider": "^3.1.0",
 		"@testing-library/react": "^16.3.3",
 		"@types/bun": "^1.2.0",
