@@ -96,16 +96,40 @@ interface BunRedisLike {
 	close(): void
 }
 
-/** Adapter for Bun's built-in `RedisClient`. */
-export function bunRedis(client: BunRedisLike): ResumableRedis {
+/** A connection of its own, for one subscriber or one blocking reader. */
+type BunRedisConnection = Omit<BunRedisLike, 'duplicate'>
+
+/**
+ * Adapter for Bun's built-in `RedisClient`. Commands go on `client`, and each
+ * subscriber and cross-replica reader gets a connection of its own: by
+ * default `client.duplicate()`, or `connect` for a command client that cannot
+ * duplicate itself, such as one wrapped to time its commands out.
+ */
+export function bunRedis(client: BunRedisLike): ResumableRedis
+export function bunRedis(
+	client: Pick<BunRedisLike, 'send'>,
+	options: { connect(): Promise<BunRedisConnection> }
+): ResumableRedis
+export function bunRedis(
+	client: Pick<BunRedisLike, 'send'> & Partial<Pick<BunRedisLike, 'duplicate'>>,
+	options?: { connect(): Promise<BunRedisConnection> }
+): ResumableRedis {
+	const connect = async (): Promise<BunRedisConnection> => {
+		if (options) return options.connect()
+		if (!client.duplicate) {
+			throw new Error('bunRedis needs a client with duplicate(), or connect')
+		}
+		return client.duplicate()
+	}
+
 	return fromSend((command, args) => client.send(command, args), {
 		async subscribe(channel, onMessage) {
-			const subscriber = await client.duplicate()
+			const subscriber = await connect()
 			await subscriber.subscribe(channel, onMessage)
 			return async () => subscriber.close()
 		},
 		async reader() {
-			const connection = await client.duplicate()
+			const connection = await connect()
 			return {
 				xread: async (key, afterId, blockMs) =>
 					parseXread(
