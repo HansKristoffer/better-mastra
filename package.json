@@ -33,6 +33,10 @@
 			"types": "./dist/libsql/index.d.ts",
 			"import": "./dist/libsql/index.js"
 		},
+		"./analytics": {
+			"types": "./dist/analytics/index.d.ts",
+			"import": "./dist/analytics/index.js"
+		},
 		"./usage": {
 			"types": "./dist/usage/index.d.ts",
 			"import": "./dist/usage/index.js"
