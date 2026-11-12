@@ -92,9 +92,9 @@ export interface ChatSessionSnapshot {
 	/** The replies offered after the newest answer; empty once the user writes. */
 	readonly replySuggestions: readonly string[]
 	/**
-	 * The running request's answer is complete and only its replies are still
-	 * being written, so a client can show the answer as done before the turn
-	 * ends. False again when the next request starts.
+	 * The newest request's answer is complete and stored, and only its replies
+	 * may still arrive. The user turn ends at this point, so a new message
+	 * goes out at once. False again when the next request starts.
 	 */
 	readonly answerComplete: boolean
 }
@@ -252,6 +252,14 @@ const NO_REPLY_SUGGESTIONS: readonly string[] = []
 
 const NO_ACTIONS: readonly ClientAction[] = []
 
+/** A request that ended with its answer. */
+const ANSWERED: RequestEnd = {
+	isAbort: false,
+	isDisconnect: false,
+	isError: false,
+	error: undefined
+}
+
 // FUNCTIONS
 
 /** A conversation for one thread. */
@@ -293,6 +301,13 @@ export function createChatSession<TResumeData = unknown>(
 	let shownBeforeRequest = new Set<string>()
 	let requestError: Error | undefined
 	let requestEnd: RequestEnd | undefined
+	/**
+	 * The user turn ended at the answer while the request's stream still
+	 * delivers the replies: how the AI SDK ends that request is no turn event.
+	 */
+	let repliesStreaming = false
+	/** The number of the request whose turn ended at its answer. */
+	let endedAtAnswer = 0
 
 	const clientActions = (): readonly ClientAction[] => {
 		const actions = options.clientActions
@@ -340,7 +355,9 @@ export function createChatSession<TResumeData = unknown>(
 			}
 		}),
 		onError: (error) => {
-			requestError = error
+			if (!repliesStreaming) {
+				requestError = error
+			}
 		},
 		onData: (part) => {
 			options.onData?.(part)
@@ -352,6 +369,7 @@ export function createChatSession<TResumeData = unknown>(
 
 			if (part.type === ANSWER_COMPLETE_PART) {
 				publish({ ...snapshot, answerComplete: true })
+				endTurnAtAnswer()
 				return
 			}
 
@@ -378,11 +396,16 @@ export function createChatSession<TResumeData = unknown>(
 			}
 		},
 		onFinish: ({ isAbort, isDisconnect, isError }) => {
+			if (repliesStreaming) {
+				repliesStreaming = false
+				return
+			}
+
 			requestEnd = { isAbort, isDisconnect, isError, error: requestError }
 
 			if (sendsApprovalAnswers) {
 				sendsApprovalAnswers = false
-				queueMicrotask(() => finishRequest('send'))
+				queueMicrotask(() => finishRequest(endOf('send', undefined)))
 			}
 		},
 		// Once the user has answered every approval of the step, the AI SDK
@@ -588,7 +611,11 @@ export function createChatSession<TResumeData = unknown>(
 		dispatch({ kind: 'request-finished', continues: false })
 	}
 
-	/** Runs one request and turns how it ended into the reducer's event once the AI SDK is done with it. */
+	/**
+	 * Runs one request and turns how it ended into the reducer's event once
+	 * the AI SDK is done with it. The AI SDK runs one request at a time, so one
+	 * still delivering its replies is ended first.
+	 */
 	function startRequest(
 		kind: RequestKind,
 		request: () => Promise<void>,
@@ -597,10 +624,36 @@ export function createChatSession<TResumeData = unknown>(
 		resetRequest()
 		pendingResume = resume
 
-		void request().then(
-			() => finishRequest(kind),
-			(error: unknown) => finishRequest(kind, toError(error))
+		const number = requestCount
+		const finish = (rejection?: Error) => {
+			if (number !== endedAtAnswer) {
+				finishRequest(endOf(kind, rejection))
+			}
+		}
+
+		void (repliesStreaming ? chat.stop().then(request) : request()).then(
+			() => finish(),
+			(error: unknown) => finish(toError(error))
 		)
+	}
+
+	/**
+	 * The server said the answer is complete and stored, and keeps the stream
+	 * open only for the replies: the user turn ends here, so a queued or new
+	 * message goes out without waiting for them.
+	 */
+	function endTurnAtAnswer(): void {
+		if (
+			repliesStreaming ||
+			!isOneOf(['requesting', 'streaming'], snapshot.turn.kind)
+		) {
+			return
+		}
+
+		repliesStreaming = true
+		endedAtAnswer = requestCount
+		sendsApprovalAnswers = false
+		finishRequest(ANSWERED)
 	}
 
 	function resetRequest(): void {
@@ -623,9 +676,7 @@ export function createChatSession<TResumeData = unknown>(
 	 * Changes the answer leaves waiting come first: the user answers them, and
 	 * a client action called beside one waits with the step.
 	 */
-	function finishRequest(kind: RequestKind, rejection?: Error): void {
-		const end = endOf(kind, rejection)
-
+	function finishRequest(end: RequestEnd | 'nothing-to-resume'): void {
 		if (end === 'nothing-to-resume') {
 			dispatch({ kind: 'nothing-to-resume' })
 
