@@ -1,5 +1,6 @@
 export {
 	asAgentModel,
+	asStepModel,
 	type CreateChatAgentOptions,
 	createChatAgent
 } from './agent.js'
@@ -111,7 +112,9 @@ export {
 	chatErrorCodes,
 	findTurnPlan,
 	type LanguageModelObject,
+	MAX_CACHED_INSTRUCTION_BLOCKS,
 	type ProviderOptions,
 	rememberTurnPlan,
+	stableInstructionBlocks,
 	type ThreadKey
 } from './types.js'

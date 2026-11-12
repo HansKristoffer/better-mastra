@@ -77,6 +77,15 @@ describe('measurePromptBudget', () => {
 		expect(budget.toolChars.lookup).toBeGreaterThan(40)
 		expect(budget.cachedPrefixChars).toBe(100 + budget.toolSchemaChars)
 	})
+
+	test('should count every stable instruction block', async () => {
+		const budget = await measurePromptBudget({
+			instructions: ['x'.repeat(100), 'y'.repeat(20)]
+		})
+
+		expect(budget.instructionsChars).toBe(120)
+		expect(budget.cachedPrefixChars).toBe(120)
+	})
 })
 
 describe('deriveThreadTitle', () => {

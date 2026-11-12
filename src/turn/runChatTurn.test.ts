@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { UIMessage } from 'ai'
 
+import { asStepModel } from './agent.js'
 import {
 	classifyTurnChanges,
 	type PendingChange,
@@ -14,6 +15,7 @@ import { TURN_ERROR_SENTENCE, USER_MESSAGE_PART } from './stream.js'
 import {
 	ASK_TOOL,
 	createHarness,
+	createScriptedModel,
 	DELETE_TOOL,
 	failingReply,
 	LOOKUP_TOOL,
@@ -160,6 +162,84 @@ describe('runChatTurn', () => {
 		expect(call?.prompt.at(-1)?.providerOptions).toMatchObject({
 			openrouter: { cacheControl: { type: 'ephemeral' } }
 		})
+	})
+
+	test('should send each stable instruction block as its own system message, the last two with a cache marker', async () => {
+		// Given a plan with three stable blocks, an empty one and a per-request part
+		const harness = createHarness()
+		const prepare = harness.deps.prepare
+		harness.deps.prepare = async (input) => {
+			const prepared = await prepare(input)
+
+			return {
+				...prepared,
+				plan: {
+					...prepared.plan,
+					instructions: [
+						'Rules for everyone.',
+						'',
+						'This tenant.',
+						'This workspace.'
+					],
+					perRequestInstructions: 'This thread.'
+				}
+			}
+		}
+
+		// When the user asks
+		await readTurn(await harness.run({ messages: [userMessage('Mad?')] }))
+
+		// Then the blocks arrive in order, and only the last two stable ones are cache breakpoints
+		const system = (harness.model.doStreamCalls[0]?.prompt ?? []).filter(
+			(message) => message.role === 'system'
+		)
+		const marked = { anthropic: { cacheControl: { type: 'ephemeral' } } }
+
+		expect(system.map((message) => message.content)).toEqual([
+			'Rules for everyone.',
+			'This tenant.',
+			'This workspace.',
+			'This thread.'
+		])
+		expect(system[0]?.providerOptions?.anthropic).toBeUndefined()
+		expect(system[1]?.providerOptions).toMatchObject(marked)
+		expect(system[2]?.providerOptions).toMatchObject(marked)
+		expect(system[3]?.providerOptions?.anthropic).toBeUndefined()
+	})
+
+	test('should run a step on the model a processor swaps in, with the conversation cache markers', async () => {
+		// Given a per-turn processor that replaces the step's model
+		const harness = createHarness({ replies: [textReply('From the plan.')] })
+		const candidate = createScriptedModel([textReply('From the candidate.')])
+		const prepare = harness.deps.prepare
+		harness.deps.prepare = async (input) => {
+			const prepared = await prepare(input)
+
+			return {
+				...prepared,
+				plan: {
+					...prepared.plan,
+					inputProcessors: [
+						{
+							id: 'candidate-model',
+							processInputStep: async () => ({ model: asStepModel(candidate) })
+						}
+					]
+				}
+			}
+		}
+
+		// When the user asks
+		const { message } = await readTurn(
+			await harness.run({ messages: [userMessage('Mad?')] })
+		)
+
+		// Then the candidate answered, and its prompt carries the conversation's marker
+		expect(JSON.stringify(message)).toContain('From the candidate.')
+		expect(harness.model.doStreamCalls).toHaveLength(0)
+		expect(
+			candidate.doStreamCalls[0]?.prompt.at(-1)?.providerOptions
+		).toMatchObject({ anthropic: { cacheControl: { type: 'ephemeral' } } })
 	})
 
 	test('should stop a turn over its tool-call budget before calling the model', async () => {

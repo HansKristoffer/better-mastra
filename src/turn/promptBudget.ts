@@ -1,6 +1,6 @@
 /**
  * What a turn plan costs on every step, in characters, for tests that hold a
- * prompt to its budget: the stable instructions (cached), the per-request
+ * prompt to its budget: the stable instructions (cached, every block), the per-request
  * part and the signal (paid in full), and each tool's name, description and
  * input schema as Mastra sends them to the model.
  */
@@ -9,7 +9,7 @@ import type { ToolsInput } from '@mastra/core/agent'
 import { makeCoreToolV5 } from '@mastra/core/utils'
 import { sumBy } from 'hanzio'
 
-import type { ChatTurnPlan } from './types.js'
+import { type ChatTurnPlan, stableInstructionBlocks } from './types.js'
 
 export interface PromptBudget {
 	readonly instructionsChars: number
@@ -29,14 +29,18 @@ export async function measurePromptBudget(
 ): Promise<PromptBudget> {
 	const toolChars = await measureToolSchemas(plan.tools ?? {})
 	const toolSchemaChars = sumBy(Object.values(toolChars), (chars) => chars)
+	const instructionsChars = sumBy(
+		stableInstructionBlocks(plan.instructions),
+		(block) => block.length
+	)
 
 	return {
-		instructionsChars: plan.instructions.length,
+		instructionsChars,
 		perRequestChars:
 			(plan.perRequestInstructions?.length ?? 0) + (plan.signal?.length ?? 0),
 		toolChars,
 		toolSchemaChars,
-		cachedPrefixChars: plan.instructions.length + toolSchemaChars
+		cachedPrefixChars: instructionsChars + toolSchemaChars
 	}
 }
 
