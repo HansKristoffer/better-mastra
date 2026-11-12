@@ -55,6 +55,12 @@ export function createMemory(input: {
 	observerMaxOutputTokens?: number
 	reflectorMaxOutputTokens?: number
 	observationMessageTokens?: number
+	/**
+	 * Observation tokens, by Mastra's estimate, at which the Reflector
+	 * condenses the observations; Mastra's default is 40,000. Lower it to keep
+	 * the prompt of a long-running thread small.
+	 */
+	reflectionObservationTokens?: number
 	// biome-ignore lint/suspicious/noExplicitAny: extractors may use any schema
 	extract?: Extractor<any>[]
 	/** Retries of the Observer and the Reflector; Mastra defaults to 8. */
@@ -88,6 +94,9 @@ export function createMemory(input: {
 							},
 							reflection: {
 								model: toModelInstance(input.reflector ?? observer),
+								...(input.reflectionObservationTokens !== undefined && {
+									observationTokens: input.reflectionObservationTokens
+								}),
 								...outputCap(input.reflectorMaxOutputTokens),
 								maxRetries,
 								failurePolicy: 'continue'

@@ -134,6 +134,33 @@ describe('createMemory', () => {
 		expect(observer.doStreamCalls).toHaveLength(1)
 	})
 
+	test("reflects at the given observation tokens, and at Mastra's own threshold without one", async () => {
+		const reflectsAt = async (reflectionObservationTokens?: number) => {
+			const memory = createMemory({
+				storage: new InMemoryStore(),
+				observer: observerAnswering(),
+				...(reflectionObservationTokens && { reflectionObservationTokens })
+			})
+			const engine = await memory.omEngine
+			const record = await engine?.getOrCreateRecord(
+				KEY.threadId,
+				KEY.resourceId
+			)
+			const config = record?.config as {
+				observation: { messageTokens: number }
+				reflection: { observationTokens: number }
+			}
+
+			// The observation preset stays whatever the reflection is set to
+			expect(config.observation.messageTokens).toBe(15_000)
+
+			return config.reflection.observationTokens
+		}
+
+		expect(await reflectsAt(12_000)).toBe(12_000)
+		expect(await reflectsAt()).toBe(40_000)
+	})
+
 	test('without an observer it is plain message history', async () => {
 		const memory = createMemory({ storage: new InMemoryStore() })
 		await expect(memory.omEngine).resolves.toBeFalsy()
