@@ -2,7 +2,14 @@ import { describe, expect, test } from 'bun:test'
 
 import { chatErrorResponse } from '../turn/errors.js'
 import { classifyChatError } from '../client/errors.js'
-import { chatTurnBodySchema, clientToolDefSchema } from './index.js'
+import { parseChatTurnBody } from '../turn/body.js'
+import {
+	chatResumeSchema,
+	chatTurnBodySchema,
+	clientToolDefSchema,
+	defineChatErrors
+} from './index.js'
+import { z } from 'zod'
 
 const MESSAGE = {
 	id: 'm1',
@@ -46,6 +53,99 @@ describe('chatTurnBodySchema', () => {
 				jsonSchema: {}
 			}).success
 		).toBe(true)
+	})
+})
+
+describe("an app's own body", () => {
+	// The server derives the thread, caps the messages, types the resume and adds its fields
+	const appBody = chatTurnBodySchema
+		.omit({ threadId: true, clientTools: true })
+		.extend({
+			messages: chatTurnBodySchema.shape.messages.min(1).max(2),
+			resume: chatResumeSchema
+				.extend({ data: z.object({ ticked: z.array(z.string()) }) })
+				.optional(),
+			locale: z.enum(['da', 'en'])
+		})
+
+	test('should parse with the schema and check every message part', async () => {
+		const body = await parseChatTurnBody(appBody, {
+			messages: [MESSAGE],
+			locale: 'da',
+			resume: { runId: 'r1', data: { ticked: ['a'] } }
+		})
+
+		expect(body?.locale).toBe('da')
+		expect(body?.resume?.data.ticked).toEqual(['a'])
+		expect(body?.messages[0]?.parts).toEqual([{ type: 'text', text: 'Hej' }])
+	})
+
+	test('should refuse what the schema refuses, and a part the AI SDK does not know', async () => {
+		expect(
+			await parseChatTurnBody(appBody, { messages: [], locale: 'da' })
+		).toBeUndefined()
+		expect(
+			await parseChatTurnBody(appBody, { messages: [MESSAGE], locale: 'sv' })
+		).toBeUndefined()
+		// The shape passes `chatTurnBodySchema`; the part itself is not a text part
+		expect(
+			await parseChatTurnBody(appBody, {
+				messages: [{ ...MESSAGE, parts: [{ type: 'text' }] }],
+				locale: 'da'
+			})
+		).toBeUndefined()
+	})
+})
+
+describe('defineChatErrors', () => {
+	const errors = defineChatErrors({
+		codes: { workspace_forbidden: 403, chat_model_forbidden: 403 },
+		rename: {
+			forbidden: 'workspace_forbidden',
+			not_found: 'workspace_forbidden'
+		}
+	})
+
+	test('should list the codes a client can get: the built-in ones it keeps, then its own', () => {
+		expect(errors.codes).toEqual([
+			'invalid_request',
+			'message_too_long',
+			'unauthenticated',
+			'unavailable',
+			'consent_required',
+			'turn_in_progress',
+			'change_expired',
+			'usage_limited',
+			'temporarily_unavailable',
+			'workspace_forbidden',
+			'chat_model_forbidden'
+		])
+		// A renamed built-in code is not one of the app's codes
+		// @ts-expect-error
+		errors.status('forbidden')
+	})
+
+	test('should give each code its status, and a refusal for the gate', () => {
+		expect(errors.status('workspace_forbidden')).toBe(403)
+		expect(errors.status('usage_limited')).toBe(429)
+		expect(errors.refusal('usage_limited', { retryAfterSeconds: 30 })).toEqual({
+			code: 'usage_limited',
+			status: 429,
+			retryAfterSeconds: 30
+		})
+	})
+
+	test("should map the renamed built-in refusals, and parse a refusal's body", () => {
+		expect(errors.refusals).toEqual({
+			forbidden: { code: 'workspace_forbidden', status: 403 },
+			not_found: { code: 'workspace_forbidden', status: 403 }
+		})
+		expect(
+			errors.bodySchema.safeParse({ error: 'chat_model_forbidden' }).success
+		).toBe(true)
+		expect(errors.bodySchema.safeParse({ error: 'forbidden' }).success).toBe(
+			false
+		)
 	})
 })
 

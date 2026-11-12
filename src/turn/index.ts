@@ -13,11 +13,16 @@ export {
 	type PendingChange,
 	type TurnChanges
 } from './changes.js'
+export { parseChatTurnBody } from './body.js'
 export { chatErrorResponse, chatRefusal } from './errors.js'
 export {
+	type ChatErrorRefusal,
+	type ChatErrors,
+	chatErrorStatuses,
 	chatResumeSchema,
 	chatTurnBodySchema,
 	type ChatTurnBodyInput,
+	defineChatErrors,
 	turnOutcomes,
 	uiMessageSchema
 } from '../protocol/index.js'
