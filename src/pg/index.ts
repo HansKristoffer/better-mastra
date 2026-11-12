@@ -10,6 +10,22 @@ import { asMastraStorage } from '../runtime/type-bridge.js'
 
 export type { MastraStorage, PgStorageOptions } from '../runtime/storage.js'
 
+/**
+ * What `pgStorage` returns: `MastraStorage`, and the same store typed as
+ * `@mastra/pg` made it.
+ */
+export type PgStorage<
+	TStore extends PostgresStore | PostgresStoreVNext = PostgresStoreVNext
+> = MastraStorage & {
+	/**
+	 * `store` itself, typed as `@mastra/pg`'s class, for code that names that
+	 * type. `store` stays typed as `@mastra/core`'s, which `new Mastra` and
+	 * `createMemory` take even where `@mastra/pg` resolves another copy of
+	 * `@mastra/core` than the app's.
+	 */
+	readonly postgres: TStore
+}
+
 /** Probes an idle connection after this long, so a quiet socket is not severed on the way. */
 const KEEP_ALIVE_INITIAL_DELAY_MS = 10_000
 
@@ -27,7 +43,18 @@ function positiveInteger(name: string, value: number) {
  * `init()` creates and migrates once at startup. Synchronous: pools connect
  * on first query. Needs `@mastra/pg` and `pg`.
  */
-export function pgStorage(options: PgStorageOptions): MastraStorage {
+export function pgStorage(
+	options: PgStorageOptions & { observabilitySchema: false }
+): PgStorage<PostgresStore>
+export function pgStorage(
+	options: PgStorageOptions & { observabilitySchema?: string }
+): PgStorage
+export function pgStorage(
+	options: PgStorageOptions
+): PgStorage<PostgresStore | PostgresStoreVNext>
+export function pgStorage(
+	options: PgStorageOptions
+): PgStorage<PostgresStore | PostgresStoreVNext> {
 	const logger = options.logger ?? silentLogger
 	const id = options.id ?? 'mastra'
 	const schemaName = options.schema ?? 'mastra'
@@ -95,8 +122,11 @@ export function pgStorage(options: PgStorageOptions): MastraStorage {
 			: new PostgresStore(config)
 	}
 
+	const postgres = createStore(true)
+
 	return {
-		store: asMastraStorage(createStore(true)),
+		store: asMastraStorage(postgres),
+		postgres,
 		init: initWithRetry(() => createStore(false).init()),
 		ping: async () => {
 			await pool.query('SELECT 1')
