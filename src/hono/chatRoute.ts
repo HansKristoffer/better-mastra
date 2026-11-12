@@ -14,6 +14,8 @@ import { SSE_HEARTBEAT_MS, toChatStreamResponse } from '../turn/response.js'
 import type { ChatTurnRequest, ChatTurnResult } from '../turn/runChatTurn.js'
 import type { ChatRefusal, ChatTurnBody } from '../turn/types.js'
 import type { ResumableStreams } from '../resumable/index.js'
+import { replayPrefixOf } from '../resumable/replay.js'
+import { toUserFacingMessage } from '../turn/stream.js'
 
 export interface ChatRouteOptions<
 	TAuth,
@@ -100,7 +102,9 @@ export function createChatRoute<
 				stream = await resumable.start({
 					threadKey: result.threadKey.threadId,
 					stream: result.stream,
-					abort: abort!
+					abort: abort!,
+					// A turn that goes on with an earlier answer streams only what it adds.
+					replayPrefix: replayPrefixOf(body.messages.map(toUserFacingMessage))
 				})
 			} catch (error) {
 				// The run is already going and nothing reads it: end it rather than leave it to the process's exit.
