@@ -67,3 +67,27 @@ describe('a refusal with a retry time', () => {
 		})
 	})
 })
+
+describe('the web-safe entry points', () => {
+	test.each([
+		['protocol', ['ai', 'zod']],
+		['client', ['ai', 'hanzio', 'zod']]
+	])('%s loads no Mastra and no server code', async (subpath, allowed) => {
+		const build = await Bun.build({
+			entrypoints: [`${import.meta.dir}/../${subpath}/index.ts`],
+			target: 'browser',
+			packages: 'external',
+			metafile: true
+		})
+		const external = Object.values(build.metafile?.inputs ?? {}).flatMap(
+			(input) => input.imports.filter((i) => i.external).map((i) => i.path)
+		)
+
+		expect(
+			[...new Set(external)].filter(
+				(path) =>
+					!allowed.some((name) => path === name || path.startsWith(`${name}/`))
+			)
+		).toEqual([])
+	})
+})
