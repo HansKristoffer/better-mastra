@@ -22,7 +22,8 @@ describe('readUsageBreakdown', () => {
 	test.each(['userId', 'threadId', 'entityName'] as const)(
 		'should return one row per %s with its tokens and recorded cost',
 		async (groupBy) => {
-			// Given input and output token totals for two groups, where only the input carries the reported cost
+			// Given input and output token totals for two groups, where only the input carries the reported cost,
+			// and one group read most of its input from the prompt cache
 			const { mastra, getMetricBreakdown } = fakeMastra({
 				input: [
 					{ dimensions: { [groupBy]: 'a' }, value: 9_000, estimatedCost: 0.03 },
@@ -31,7 +32,11 @@ describe('readUsageBreakdown', () => {
 				output: [
 					{ dimensions: { [groupBy]: 'a' }, value: 400, estimatedCost: null },
 					{ dimensions: { [groupBy]: 'b' }, value: 100, estimatedCost: 0.002 }
-				]
+				],
+				cacheRead: [
+					{ dimensions: { [groupBy]: 'a' }, value: 8_000, estimatedCost: 0.5 }
+				],
+				cacheWrite: [{ dimensions: { [groupBy]: 'b' }, value: 900 }]
 			})
 
 			// When the usage is read for the window
@@ -42,10 +47,24 @@ describe('readUsageBreakdown', () => {
 				to: TO
 			})
 
-			// Then each group has its tokens and the sum of the costs Mastra recorded
+			// Then each group has its tokens, its cache share, and the sum of the costs Mastra recorded on the totals
 			expect(rows).toEqual([
-				{ group: 'a', inputTokens: 9_000, outputTokens: 400, cost: 0.03 },
-				{ group: 'b', inputTokens: 1_000, outputTokens: 100, cost: 0.012 }
+				{
+					group: 'a',
+					inputTokens: 9_000,
+					cacheReadTokens: 8_000,
+					cacheWriteTokens: 0,
+					outputTokens: 400,
+					cost: 0.03
+				},
+				{
+					group: 'b',
+					inputTokens: 1_000,
+					cacheReadTokens: 0,
+					cacheWriteTokens: 900,
+					outputTokens: 100,
+					cost: 0.012
+				}
 			])
 			expect(getMetricBreakdown).toHaveBeenCalledWith({
 				name: ['mastra_model_total_input_tokens'],
@@ -76,7 +95,14 @@ describe('readUsageBreakdown', () => {
 
 		// Then the user has tokens and no cost
 		expect(rows).toEqual([
-			{ group: 'user-1', inputTokens: 500, outputTokens: 50, cost: undefined }
+			{
+				group: 'user-1',
+				inputTokens: 500,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				outputTokens: 50,
+				cost: undefined
+			}
 		])
 	})
 })
@@ -125,12 +151,18 @@ describe('averageCostPerGroup and medianCostPerGroup', () => {
 function fakeMastra(totals: {
 	readonly input: readonly BreakdownGroup[]
 	readonly output: readonly BreakdownGroup[]
+	readonly cacheRead?: readonly BreakdownGroup[]
+	readonly cacheWrite?: readonly BreakdownGroup[]
 }) {
+	const byMetric: Record<string, readonly BreakdownGroup[] | undefined> = {
+		mastra_model_total_input_tokens: totals.input,
+		mastra_model_total_output_tokens: totals.output,
+		mastra_model_input_cache_read_tokens: totals.cacheRead,
+		mastra_model_input_cache_write_tokens: totals.cacheWrite
+	}
 	const getMetricBreakdown = mock(
 		async (args: { readonly name: readonly string[] }) => ({
-			groups: args.name.includes('mastra_model_total_input_tokens')
-				? totals.input
-				: totals.output
+			groups: args.name.flatMap((name) => byMetric[name] ?? [])
 		})
 	)
 	const observability = { getMetricBreakdown }
@@ -148,6 +180,8 @@ function usageRow(cost: number | undefined): UsageBreakdownRow {
 	return {
 		group: crypto.randomUUID(),
 		inputTokens: 1_000,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
 		outputTokens: 100,
 		cost
 	}
