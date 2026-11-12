@@ -77,6 +77,9 @@ export function createChatRoute<
 
 		if (!body) return refuse('invalid_request')
 
+		// A turn started now would be cut off at the end of the drain: the client tries again on the next process.
+		if (resumable?.draining) return drainingResponse()
+
 		keepConnectionOpen(c)
 
 		// With a resumable stream, Stop and the turn's own end abort the run, never a disconnect.
@@ -90,13 +93,23 @@ export function createChatRoute<
 
 		if (result.kind === 'refused') return result.response
 
-		const stream = resumable
-			? await resumable.start({
+		let stream = result.stream
+
+		if (resumable) {
+			try {
+				stream = await resumable.start({
 					threadKey: result.threadKey.threadId,
 					stream: result.stream,
 					abort: abort!
 				})
-			: result.stream
+			} catch (error) {
+				// The run is already going and nothing reads it: end it rather than leave it to the process's exit.
+				abort!.abort('shutdown')
+				await result.stream.cancel().catch(() => {})
+				if (resumable.draining) return drainingResponse()
+				throw error
+			}
+		}
 
 		return toChatStreamResponse(stream, heartbeatMs)
 	})
@@ -143,6 +156,17 @@ export function createChatRoute<
 	})
 
 	return app
+}
+
+/** What the chat client retries once on its own, after a second (`createChatFetch`'s `retry.draining`). */
+function drainingResponse(): Response {
+	return Response.json(
+		{ status: 'draining' },
+		{
+			status: 503,
+			headers: { 'Retry-After': '1', 'Cache-Control': 'no-store' }
+		}
+	)
 }
 
 /**

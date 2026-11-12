@@ -15,7 +15,16 @@ export type {
 	UpstashRedisLike
 } from './redis.js'
 
+/**
+ * Why the registry aborted a turn, as its `abort` signal's `reason`: the
+ * user's Stop, a newer turn on the same thread, or `close()` once the drain
+ * window passed. `runChatTurn` reports only `stop` as the user stopping.
+ */
+export type TurnAbortReason = 'stop' | 'superseded' | 'shutdown'
+
 export interface ResumableStreams {
+	/** True from `close()` on: `start` throws, and the chat route turns new turns away with `503 { status: 'draining' }`. */
+	readonly draining: boolean
 	/** Takes over the model stream and returns the response stream for the request that started the turn. */
 	start(input: {
 		threadKey: string
@@ -87,7 +96,11 @@ export interface ResumableStreamsOptions {
 	 * keep the turn open. Default 5 s.
 	 */
 	stopTimeoutMs?: number
-	/** Upper bound for `close()` to wait on active turns. Default 30 s. */
+	/**
+	 * Upper bound for `close()` to wait on active turns. Default 90 s, past
+	 * `createChatAgent`'s 80 s turn timeout, so a deploy lets a turn the
+	 * agent allows finish. Keep the platform's own shutdown grace longer still.
+	 */
 	drainTimeoutMs?: number
 	/** Identifies this process. Default: a random UUID. */
 	replicaId?: string
@@ -101,7 +114,8 @@ interface Locator {
 }
 
 type Control =
-	{ type: 'spill'; streamId: string } | { type: 'abort'; streamId: string }
+	| { type: 'spill'; streamId: string }
+	| { type: 'abort'; streamId: string; reason?: TurnAbortReason }
 /** One spill stream entry: chunks, the end marker, or both. */
 interface SpillEntry {
 	c?: UIMessageChunk[]
@@ -202,7 +216,7 @@ export function createResumableStreams(
 		spillFlushMs = 50,
 		idleTimeoutMs = 10_000,
 		stopTimeoutMs = 5_000,
-		drainTimeoutMs = 30_000,
+		drainTimeoutMs = 90_000,
 		replicaId = crypto.randomUUID(),
 		keyPrefix = 'resumable:',
 		logger = {
@@ -262,7 +276,11 @@ export function createResumableStreams(
 		const run = streams.get(control.streamId)
 		// A finished turn's signal may still guard its epilogue (reply suggestions).
 		if (control.type === 'abort')
-			return void (run && !run.done && run.abort.abort())
+			return void (
+				run &&
+				!run.done &&
+				run.abort.abort(control.reason ?? ('stop' satisfies TurnAbortReason))
+			)
 		// Already mirroring: the stream holds the run from its first chunk.
 		if (run && run.spill !== 'off') return
 		if (!run || run.overflow)
@@ -469,6 +487,10 @@ export function createResumableStreams(
 	}
 
 	return {
+		get draining() {
+			return closed
+		},
+
 		async start({ threadKey, stream, abort }) {
 			if (closed) throw new Error('resumable: start() called after close()')
 			let resolveFinished = () => {}
@@ -477,7 +499,8 @@ export function createResumableStreams(
 			})
 			// A new turn supersedes one still running on the thread, which nothing could reach or stop anymore.
 			const previous = runs.get(threadKey)
-			if (previous && !previous.done) previous.abort.abort()
+			if (previous && !previous.done)
+				previous.abort.abort('superseded' satisfies TurnAbortReason)
 			const run: LiveRun = {
 				threadKey,
 				streamId: crypto.randomUUID(),
@@ -514,7 +537,11 @@ export function createResumableStreams(
 				// A turn the thread ran on another replica would keep running there, unreachable.
 				const before = typeof replaced === 'string' && parse<Locator>(replaced)
 				if (!before || before.owner === replicaId) return
-				const abort: Control = { type: 'abort', streamId: before.streamId }
+				const abort: Control = {
+					type: 'abort',
+					streamId: before.streamId,
+					reason: 'superseded'
+				}
 				void soft(
 					'publish',
 					redis.publish(controlChannel(before.owner), JSON.stringify(abort))
@@ -550,14 +577,18 @@ export function createResumableStreams(
 		async stop(threadKey) {
 			const run = runs.get(threadKey)
 			if (run && !run.done) {
-				run.abort.abort()
+				run.abort.abort('stop' satisfies TurnAbortReason)
 				return true
 			}
 			const locator = parse<Locator>(
 				await soft('get', locatorStore.read(threadKey))
 			)
 			if (!locator || locator.owner === replicaId) return false
-			const abort: Control = { type: 'abort', streamId: locator.streamId }
+			const abort: Control = {
+				type: 'abort',
+				streamId: locator.streamId,
+				reason: 'stop'
+			}
 			const sent = redis
 				.publish(controlChannel(locator.owner), JSON.stringify(abort))
 				.then(() => true)
@@ -572,7 +603,7 @@ export function createResumableStreams(
 			// Runs still going after the drain window are aborted below.
 			await withTimeout(Promise.all(active), drainTimeoutMs).catch(() => {})
 			for (const run of streams.values()) {
-				if (!run.done) run.abort.abort()
+				if (!run.done) run.abort.abort('shutdown' satisfies TurnAbortReason)
 				clearTimeout(run.evictTimer)
 				clearInterval(run.spillTimer)
 			}
