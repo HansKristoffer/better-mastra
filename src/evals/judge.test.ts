@@ -134,6 +134,24 @@ describe('a judge', () => {
 		])
 		expect(() => judge.scorer()).toThrow('has no model')
 	})
+	test("hands each call's own context to the generate hook", async () => {
+		const seen: string[] = []
+		const judge = defineJudge({
+			version: 'test-v1',
+			system: 'Judge.',
+			generate: async (
+				_request,
+				context: { readonly organizationId: string }
+			) => {
+				seen.push(context.organizationId)
+				return verdict
+			}
+		})
+
+		await judge.judge({ turns: [] }, { organizationId: 'org-1' })
+
+		expect(seen).toEqual(['org-1'])
+	})
 })
 
 test('a transcript clips long tool payloads and shows errors', () => {

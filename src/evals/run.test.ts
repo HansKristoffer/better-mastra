@@ -177,6 +177,21 @@ test('a dry-run tool answers with a marker inside an eval run only', async () =>
 	})
 })
 
+test('a dry-run Mastra tool stays an instance of its class', () => {
+	class Tool {
+		id = 'deal.markWon'
+		execute = async () => ({ written: true })
+		describe() {
+			return this.id
+		}
+	}
+
+	const wrapped = withEvalDryRun(new Tool())
+
+	expect(wrapped).toBeInstanceOf(Tool)
+	expect(wrapped.describe()).toBe('deal.markWon')
+})
+
 test('mapWithConcurrency keeps order with a bounded pool', async () => {
 	let inFlight = 0
 	let peak = 0

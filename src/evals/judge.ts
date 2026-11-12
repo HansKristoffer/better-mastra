@@ -147,7 +147,7 @@ export type JudgeRequest<S extends z.ZodType> = {
 	schema: S
 }
 
-export type DefineJudgeOptions<S extends z.ZodType> = {
+export type DefineJudgeOptions<S extends z.ZodType, TContext = undefined> = {
 	/**
 	 * Bump when the rubric or the evidence the judge sees changes, so scores
 	 * from different rubrics are never compared as one series.
@@ -160,13 +160,22 @@ export type DefineJudgeOptions<S extends z.ZodType> = {
 	| {
 			/** `judge()` calls it with `generateText`; `scorer()` hands it to Mastra. */
 			model: LanguageModel
-			/** Makes `judge()`'s call instead, e.g. so its cost lands on the app's usage ledger. */
-			generate?: (request: JudgeRequest<S>) => Promise<z.infer<S>>
+			/**
+			 * Makes `judge()`'s call instead, e.g. so its cost lands on the app's
+			 * usage ledger. `context` is what that `judge()` call was given.
+			 */
+			generate?: (
+				request: JudgeRequest<S>,
+				context: TContext
+			) => Promise<z.infer<S>>
 	  }
 	| {
 			/** Only `scorer()` needs it; without it `scorer()` throws. */
 			model?: LanguageModel
-			generate: (request: JudgeRequest<S>) => Promise<z.infer<S>>
+			generate: (
+				request: JudgeRequest<S>,
+				context: TContext
+			) => Promise<z.infer<S>>
 	  }
 )
 
@@ -174,9 +183,10 @@ export type DefineJudgeOptions<S extends z.ZodType> = {
  * A versioned LLM judge, used directly on a trace (`judge`) or as a Mastra
  * scorer (`scorer`) in `runEvals`, experiments and live scoring.
  */
-export function defineJudge<S extends z.ZodType = typeof judgeVerdictSchema>(
-	options: DefineJudgeOptions<S>
-) {
+export function defineJudge<
+	S extends z.ZodType = typeof judgeVerdictSchema,
+	TContext = undefined
+>(options: DefineJudgeOptions<S, TContext>) {
 	const schema = (options.schema ?? judgeVerdictSchema) as S
 	const transcript =
 		options.renderTranscript ?? ((turns) => renderTranscript(turns))
@@ -186,10 +196,17 @@ export function defineJudge<S extends z.ZodType = typeof judgeVerdictSchema>(
 		version: options.version,
 		schema,
 		prompt,
-		async judge(input: JudgeInput): Promise<z.infer<S>> {
+		/** `context` reaches `generate`, such as the organization a usage row is for. */
+		async judge(
+			input: JudgeInput,
+			...[context]: undefined extends TContext
+				? [context?: TContext]
+				: [context: TContext]
+		): Promise<z.infer<S>> {
 			const request = { system: options.system, prompt: prompt(input), schema }
 
-			if (options.generate) return options.generate(request)
+			if (options.generate)
+				return options.generate(request, context as TContext)
 
 			const { output } = await generateText({
 				model: requireModel(options.model, options.version),
