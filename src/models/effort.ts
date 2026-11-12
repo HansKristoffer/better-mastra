@@ -1,9 +1,10 @@
 /**
  * How much a call may think. The names are ours; each route turns them into
- * its provider's wire shape. `medium` usually only arrives pinned on an id.
+ * its provider's wire shape.
  */
 export type ReasoningEffort = 'off' | 'low' | 'high'
 
+/** Every effort a call may ask for; an id pins any of them but `off` (`model@medium`). */
 export type LlmEffort = ReasoningEffort | 'medium'
 
 type PinnedEffort = Exclude<LlmEffort, 'off'>

@@ -49,6 +49,11 @@ export {
 } from './pricing.js'
 export type { VertexKeys } from './providers/vertex.js'
 export {
+	defaultModelRoute,
+	type ParsedModelId,
+	parseModelId
+} from './modelId.js'
+export {
 	BUILT_IN_ROUTES,
 	type BuiltInRoute,
 	capOutputTokens,

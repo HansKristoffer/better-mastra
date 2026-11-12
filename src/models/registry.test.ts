@@ -3,6 +3,7 @@ import { generateText, streamText, tool } from 'ai'
 import { z } from 'zod'
 import { openRouterPrivacyRouting } from './openrouter'
 import { extractRequestyCostUsd } from './providers/requesty'
+import { parseModelId } from './modelId'
 import { createLlmRegistry } from './registry'
 import { chatCompletion, stubFetch } from './stub-fetch.test'
 
@@ -42,6 +43,26 @@ const chunk = (
 	model,
 	created: 1,
 	choices: [{ index: 0, delta, finish_reason }]
+})
+
+describe('parseModelId', () => {
+	test('reads an id as the registry does, without loading any route', () => {
+		expect(parseModelId('openrouter/google/gemini-3.5-flash@low')).toEqual({
+			route: 'openrouter',
+			providerModelId: 'google/gemini-3.5-flash',
+			effort: 'low'
+		})
+		expect(parseModelId('gemini-3.5-flash')).toMatchObject({
+			route: 'vertex-eu',
+			effort: null
+		})
+		expect(parseModelId('local/qwen', { routes: ['local'] }).route).toBe(
+			'local'
+		)
+		expect(() => parseModelId('openrouter/')).toThrow(
+			'Missing or invalid model ID'
+		)
+	})
 })
 
 describe('resolveLlm', () => {
