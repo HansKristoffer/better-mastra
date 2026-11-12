@@ -275,3 +275,18 @@ function isPendingRunPart(
 			change.kind === 'suspended' && change.toolCallId === data?.toolCallId
 	)
 }
+
+/** The approval the user turn waits for, the first one when several do; null when it waits for none. */
+export function pendingApproval(turn: {
+	readonly kind: string
+	readonly changes?: readonly PendingChange[]
+}): Extract<PendingChange, { kind: 'approval' }> | null {
+	if (turn.kind !== 'waiting') return null
+
+	return (
+		turn.changes?.find(
+			(change): change is Extract<PendingChange, { kind: 'approval' }> =>
+				change.kind === 'approval'
+		) ?? null
+	)
+}

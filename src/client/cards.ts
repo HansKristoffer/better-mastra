@@ -150,3 +150,23 @@ export function createCardRegistry<const S extends CardSchemas>(
 		}
 	}
 }
+
+/**
+ * An `onToolResult` that runs the refresh of each data namespace the tool's
+ * manifest entry `invalidates`. Typed on the manifest: a namespace without a
+ * refresh fails the typecheck, and so does a refresh no tool needs.
+ */
+export function createToolRefresh<
+	M extends Readonly<
+		Record<string, { readonly invalidates: readonly string[] }>
+	>
+>(
+	manifest: M,
+	refresh: Readonly<Record<M[keyof M]['invalidates'][number], () => void>>
+): (result: { readonly toolName: string }) => void {
+	return ({ toolName }) => {
+		for (const namespace of manifest[toolName]?.invalidates ?? []) {
+			;(refresh as Readonly<Record<string, () => void>>)[namespace]?.()
+		}
+	}
+}

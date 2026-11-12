@@ -185,6 +185,30 @@ describe('createChatSession', () => {
 		])
 	})
 
+	test("adds the app's fields to the default body, and reports the saved answer once", async () => {
+		const server = fakeServer([
+			stream(answer('Ok')),
+			json(429, { error: 'usage_limited' })
+		])
+		const saved: (string | undefined)[] = []
+		const chat = session(server, {
+			prepareBody: (_request, body) => ({ ...body, locale: 'da' }),
+			onSaved: ({ message }) => saved.push(message?.id)
+		})
+
+		chat.send('Hej')
+		await settled(chat)
+		chat.send('Igen')
+		await settled(chat)
+
+		expect(server.requests[0]?.body).toMatchObject({
+			threadId: 'thread-1',
+			trigger: 'submit-message',
+			locale: 'da'
+		})
+		expect(saved).toEqual(['answer-1'])
+	})
+
 	test('types the resume data prepareBody reads and resumeRun takes', () => {
 		type Answer = { readonly answer: 'yes' | 'no' }
 		const typed = createChatSession<Answer>({
