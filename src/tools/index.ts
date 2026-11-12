@@ -13,7 +13,10 @@ export {
 export {
 	type DefinedTool,
 	defineTool,
+	TOOL_ERROR_SENTENCE,
 	type ToolDefinition,
+	type ToolErrorMasking,
+	ToolRefusal,
 	type ToolKind,
 	type ToolTier,
 	toToolName,
@@ -36,6 +39,7 @@ export {
 export { type JsonProjection, toJsonProjection } from './projection.js'
 export {
 	coerceDateStrings,
+	jsonSchemaInput,
 	type ToolInputSchema,
 	toolInputSchema,
 	withHiddenInputs

@@ -20,6 +20,7 @@ export {
 	type StreamTextUsage
 } from './stream.js'
 export {
+	admissionRefusal,
 	admitUserRequest,
 	type RunRedisScript,
 	USER_REQUEST_ADMISSION_SCRIPT,

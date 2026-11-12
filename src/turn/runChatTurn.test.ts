@@ -71,7 +71,8 @@ describe('runChatTurn', () => {
 			expect.objectContaining({
 				toolName: LOOKUP_TOOL,
 				outcome: 'success',
-				tier: 'read'
+				tier: 'read',
+				durationMs: expect.any(Number)
 			})
 		])
 		expect(harness.finished[0]).toMatchObject({ toolCalls: 1, steps: 2 })
@@ -233,13 +234,17 @@ describe('runChatTurn', () => {
 			})
 		})
 
-		test('should refuse a user message over the maximum length', async () => {
+		test('should refuse a user message over the maximum length as too long', async () => {
 			const harness = createHarness()
 			const result = await harness.run({
-				messages: [userMessage('x'.repeat(4_001))]
+				messages: [userMessage('x'.repeat(32_001))]
 			})
 
-			expect(result).toMatchObject({ kind: 'refused', code: 'invalid_request' })
+			expect(result).toMatchObject({
+				kind: 'refused',
+				code: 'message_too_long',
+				status: 413
+			})
 		})
 
 		test('should refuse a caller without a scope', async () => {
@@ -515,6 +520,84 @@ describe('runChatTurn', () => {
 		// Then the turn closes as stopped and gives the lock back
 		expect(harness.finished[0]?.outcome).toBe('stopped')
 		expect(harness.held.size).toBe(0)
+	})
+
+	test('should report a turn the server ended as interrupted, not stopped', async () => {
+		// Given a slow model
+		const harness = createHarness({
+			replies: [
+				async () => {
+					await new Promise((resolve) => setTimeout(resolve, 50))
+					return {
+						stream: new ReadableStream({
+							start: (controller) => controller.close()
+						})
+					}
+				}
+			]
+		})
+		const abort = new AbortController()
+
+		// When the resumable registry ends it at shutdown
+		const result = await harness.run(
+			{ messages: [userMessage('Mad?')] },
+			{ signal: abort.signal }
+		)
+		abort.abort('shutdown')
+		await readTurn(result)
+
+		// Then it is not counted as the user's stop
+		expect(harness.finished[0]?.outcome).toBe('interrupted')
+	})
+
+	test('should put the usage the run reported on the finished turn', async () => {
+		// Given a turn that also records its usage event
+		const usage: unknown[] = []
+		const harness = createHarness({
+			replies: [textReply('Hej!')],
+			overrides: {
+				sinks: {
+					usage: (event) => usage.push(event),
+					turnFinished: (event) => harness.finished.push(event)
+				}
+			}
+		})
+
+		// When the turn answers
+		await readTurn(await harness.run({ messages: [userMessage('Hej')] }))
+
+		// Then the finished event carries the same totals, typed
+		expect(usage).toHaveLength(1)
+		expect(harness.finished[0]?.usage).toEqual({
+			totalUsage: (usage[0] as { totalUsage: unknown }).totalUsage,
+			steps: (usage[0] as { steps: unknown }).steps
+		} as never)
+		expect(harness.finished[0]?.usage?.totalUsage?.inputTokens).toBeNumber()
+	})
+
+	test('should not read suspended runs for a thread that does not exist yet', async () => {
+		// Given an agent whose suspended-run reads are counted
+		const harness = createHarness({
+			replies: [textReply('Hej!'), textReply('Igen!')]
+		})
+		const agent = harness.mastra.getAgentById('chat')
+		const listSuspendedRuns = agent.listSuspendedRuns.bind(agent)
+		let reads = 0
+		agent.listSuspendedRuns = ((
+			...args: Parameters<typeof listSuspendedRuns>
+		) => {
+			reads += 1
+			return listSuspendedRuns(...args)
+		}) as typeof agent.listSuspendedRuns
+
+		// When the first turn runs, then a second one on the stored thread
+		await readTurn(await harness.run({ messages: [userMessage('Hej')] }))
+		const firstTurnReads = reads
+		await readTurn(await harness.run({ messages: [userMessage('Igen')] }))
+
+		// Then only the second turn read them
+		expect(firstTurnReads).toBe(0)
+		expect(reads).toBeGreaterThan(0)
 	})
 
 	test("should hand prepare the cleaned messages and stream the user's message right after the start", async () => {

@@ -11,10 +11,10 @@ import { isMastraTimeoutError } from '@mastra/core/loop'
 import type { UIMessageChunk } from 'ai'
 import { typedSwitch } from 'hanzio'
 
+import type { TurnOutcome } from '../protocol/index.js'
 import type { TurnStreamEnding } from './stream.js'
 
-export type TurnOutcome =
-	'answered' | 'stopped' | 'budget_stop' | 'timeout' | 'error'
+export type { TurnOutcome }
 
 export interface TurnSummary {
 	readonly outcome: TurnOutcome
@@ -28,6 +28,8 @@ export interface ToolSettledEvent {
 	readonly toolName: string
 	readonly toolCallId: string
 	readonly outcome: 'success' | 'error' | 'denied'
+	/** From the model's finished call to its result; undefined for a call the stream never showed whole. */
+	readonly durationMs: number | undefined
 }
 
 export interface TurnObserver {
@@ -38,6 +40,8 @@ export interface TurnObserver {
 		readonly ending: TurnStreamEnding
 		/** Whether the user stopped the turn: Mastra's own time limit aborts the run too. */
 		readonly userStopped: boolean
+		/** Whether the server ended the turn: a newer turn on the thread, or a shutdown. */
+		readonly interrupted?: boolean
 	}): TurnSummary
 	/** Everything the answer wrote, also when it waits for the user. */
 	writtenText(): string
@@ -55,6 +59,7 @@ export function createTurnObserver(
 ): TurnObserver {
 	const elapsedMs = handlers.elapsedMs ?? (() => 0)
 	const names = new Map<string, string>()
+	const startedAt = new Map<string, number>()
 	const waiting = new Set<string>()
 	let steps = 0
 	let toolCalls = 0
@@ -67,10 +72,12 @@ export function createTurnObserver(
 
 	const settle = (toolCallId: string, outcome: ToolSettledEvent['outcome']) => {
 		waiting.delete(toolCallId)
+		const started = startedAt.get(toolCallId)
 		handlers.onToolSettled?.({
 			toolName: names.get(toolCallId) ?? 'unknown',
 			toolCallId,
-			outcome
+			outcome,
+			durationMs: started === undefined ? undefined : elapsedMs() - started
 		})
 	}
 
@@ -88,6 +95,7 @@ export function createTurnObserver(
 					},
 					'tool-input-available': (input) => {
 						names.set(input.toolCallId, input.toolName)
+						startedAt.set(input.toolCallId, elapsedMs())
 						toolCalls += 1
 						waiting.add(input.toolCallId)
 					},
@@ -126,9 +134,10 @@ export function createTurnObserver(
 		failed(error) {
 			lastErrorWasTimeout = isMastraTimeoutError(error)
 		},
-		summary({ ending, userStopped }) {
+		summary({ ending, userStopped, interrupted = false }) {
 			return {
 				outcome: outcomeOf({
+					interrupted,
 					wasStopped: userStopped || ending === 'cancelled',
 					sawTripwire,
 					sawError,
@@ -150,11 +159,13 @@ export function createTurnObserver(
 }
 
 function outcomeOf(seen: {
+	readonly interrupted: boolean
 	readonly wasStopped: boolean
 	readonly sawTripwire: boolean
 	readonly sawError: boolean
 	readonly lastErrorWasTimeout: boolean
 }): TurnOutcome {
+	if (seen.interrupted) return 'interrupted'
 	if (seen.wasStopped) return 'stopped'
 	if (seen.sawTripwire) return 'budget_stop'
 	if (seen.sawError) return seen.lastErrorWasTimeout ? 'timeout' : 'error'

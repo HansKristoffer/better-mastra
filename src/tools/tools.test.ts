@@ -9,7 +9,12 @@ import {
 	deferredToolSearch,
 	rankToolsByName
 } from './deferredTools.js'
-import { defineTool, toToolSet } from './defineTool.js'
+import {
+	defineTool,
+	TOOL_ERROR_SENTENCE,
+	ToolRefusal,
+	toToolSet
+} from './defineTool.js'
 import { markDryRun } from './dryRun.js'
 import { buildToolManifest, renderToolManifestSource } from './manifest.js'
 import { toJsonProjection } from './projection.js'
@@ -28,6 +33,40 @@ async function run(
 }
 
 describe('defineTool', () => {
+	test("with maskErrors should let a refusal's message through and hide any other error", async () => {
+		// Given a tool that refuses bad input and fails on anything else
+		const logged: unknown[] = []
+		const definition = defineTool({
+			tool: {
+				id: 'budget_rename',
+				description: 'Renames the budget.',
+				inputSchema: z.object({ budgetId: z.string() }),
+				execute: async ({ budgetId }: { budgetId: string }) => {
+					if (budgetId === 'missing')
+						throw new ToolRefusal('No budget has that id.')
+					throw new Error('relation "budgets" does not exist')
+				}
+			},
+			tier: 'read',
+			meta: { permission: 'manage' },
+			maskErrors: { onError: (error) => logged.push(error) }
+		})
+
+		// When the model calls it both ways, then the model reads the refusal
+		// and the fixed sentence, and the log the real error
+		await expect(
+			run(definition.tool, { budgetId: 'missing' }, contextFor({}))
+		).rejects.toThrow('No budget has that id.')
+		await expect(
+			run(definition.tool, { budgetId: 'b-1' }, contextFor({}))
+		).rejects.toThrow(TOOL_ERROR_SENTENCE)
+		expect(String(logged[0])).toContain('relation "budgets" does not exist')
+		expect(definition.meta).toEqual({ permission: 'manage' })
+		expect(buildToolManifest([definition]).budget_rename).not.toHaveProperty(
+			'meta'
+		)
+	})
+
 	test('should hide inputs from the model and fill them from the request context', async () => {
 		// Given a tool whose workspace comes from the turn
 		let received: unknown

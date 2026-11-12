@@ -7,6 +7,7 @@ import { InMemoryStore } from '@mastra/core/storage'
 import {
 	type AnswerRating,
 	createThreadHandlers,
+	ownsThread,
 	sweepAbandonedRuns,
 	sweepOldThreads
 } from './threads.js'
@@ -262,6 +263,23 @@ describe('createThreadHandlers', () => {
 		expect((await threads.get(SCOPE, { threadId }))?.ratings).toEqual({
 			[answer?.id ?? '']: { rating: 'down', reason: 'Too long' }
 		})
+	})
+})
+
+describe('ownsThread', () => {
+	test('should answer for the owner, refuse another resource, and leave a new thread undecided', async () => {
+		const harness = createHarness()
+		await readTurn(await harness.run({ messages: [userMessage('Hej')] }))
+		const { threadId, resourceId } = harness.threadKey
+		const memory = harness.memory
+
+		expect(await ownsThread({ memory, threadId, resourceId })).toBe(true)
+		expect(
+			await ownsThread({ memory, threadId, resourceId: 'org-1:user-2' })
+		).toBe(false)
+		expect(
+			await ownsThread({ memory, threadId: 'never-sent', resourceId })
+		).toBeUndefined()
 	})
 })
 

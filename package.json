@@ -73,6 +73,10 @@
 			"types": "./dist/turn/index.d.ts",
 			"import": "./dist/turn/index.js"
 		},
+		"./protocol": {
+			"types": "./dist/protocol/index.d.ts",
+			"import": "./dist/protocol/index.js"
+		},
 		"./hono": {
 			"types": "./dist/hono/index.d.ts",
 			"import": "./dist/hono/index.js"
@@ -135,7 +139,6 @@
 		"@ai-sdk/provider": "^4.0.0",
 		"@mastra/ai-sdk": "^1.11.1",
 		"@mastra/core": "^1.76.0",
-		"@mastra/evals": "^1.10.7",
 		"@mastra/hono": "^1.7.18",
 		"@mastra/libsql": "^1.26.0",
 		"@mastra/memory": "^1.37.0",
@@ -165,13 +168,22 @@
 		"@ai-sdk/openai-compatible": {
 			"optional": true
 		},
-		"@mastra/evals": {
+		"@ai-sdk/provider": {
+			"optional": true
+		},
+		"@mastra/ai-sdk": {
+			"optional": true
+		},
+		"@mastra/core": {
 			"optional": true
 		},
 		"@mastra/hono": {
 			"optional": true
 		},
 		"@mastra/libsql": {
+			"optional": true
+		},
+		"@mastra/memory": {
 			"optional": true
 		},
 		"@mastra/pg": {
@@ -184,6 +196,9 @@
 			"optional": true
 		},
 		"@openrouter/ai-sdk-provider": {
+			"optional": true
+		},
+		"ai": {
 			"optional": true
 		},
 		"hono": {
@@ -202,6 +217,9 @@
 			"optional": true
 		},
 		"vue": {
+			"optional": true
+		},
+		"zod": {
 			"optional": true
 		}
 	},

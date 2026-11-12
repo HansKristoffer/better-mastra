@@ -26,6 +26,7 @@ import { DRY_RUN_KEY, dryRunResult } from '../tools/dryRun.js'
  */
 export const EVAL_DRY_RUN_KEY = DRY_RUN_KEY
 
+/** @deprecated `isDryRun` from `better-mastra/tools`, which reads the same key. */
 export function isEvalDryRun(
 	requestContext: { get(key: string): unknown } | undefined,
 	key = EVAL_DRY_RUN_KEY
@@ -33,20 +34,23 @@ export function isEvalDryRun(
 	return requestContext?.get(key) === true
 }
 
-/** The tool, answering with a dry-run marker inside an eval run instead of writing. */
+/**
+ * The tool, answering with a dry-run marker inside an eval run instead of
+ * writing. A copy of the same class, so a Mastra `Tool` stays one.
+ * @deprecated `defineTool` from `better-mastra/tools` honours the dry run itself.
+ */
 export function withEvalDryRun<T extends Pick<Tool, 'id' | 'execute'>>(
 	tool: T,
 	key = EVAL_DRY_RUN_KEY
 ): T {
 	const execute = tool.execute
 	if (!execute) return tool
-	return {
-		...tool,
+	return Object.assign(Object.create(Object.getPrototypeOf(tool)), tool, {
 		execute: ((input, context) =>
 			isEvalDryRun(context?.requestContext, key)
 				? Promise.resolve(dryRunResult(tool.id))
 				: execute(input, context)) as typeof execute
-	}
+	}) as T
 }
 
 /** Token usage of one model call or one turn, as the turn reports it. */

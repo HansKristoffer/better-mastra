@@ -37,7 +37,10 @@ const EXPIRED_CODE = 'change_expired'
  * above, and for an unknown code on 409, 429 or 5xx.
  */
 export const classifyChatError: ClassifyChatError = ({ status, body }) => {
-	const code = (body as { error?: unknown } | null | undefined)?.error
+	const { error: code, retryAfterSeconds } = (body ?? {}) as {
+		error?: unknown
+		retryAfterSeconds?: unknown
+	}
 
 	if (typeof code !== 'string') {
 		return undefined
@@ -49,7 +52,8 @@ export const classifyChatError: ClassifyChatError = ({ status, body }) => {
 			isOneOf(RETRYABLE_CODES, code) ||
 			(code !== EXPIRED_CODE &&
 				(status === 409 || status === 429 || status >= 500)),
-		expired: code === EXPIRED_CODE
+		expired: code === EXPIRED_CODE,
+		...(typeof retryAfterSeconds === 'number' && { retryAfterSeconds })
 	}
 }
 

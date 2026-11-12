@@ -140,9 +140,13 @@ export interface ChatSessionOptions<TResumeData = unknown> {
 	}
 	/** Messages to start with, such as the thread's stored page. */
 	readonly messages?: UIMessage[]
-	/** The JSON body of one request; the request as it is when left out. */
+	/**
+	 * The JSON body of one request; the request as it is when left out.
+	 * `body` is that default, to spread and add the app's own fields to.
+	 */
 	readonly prepareBody?: (
-		request: ChatRequest<TResumeData>
+		request: ChatRequest<TResumeData>,
+		body: ChatRequestBody
 	) => object | Promise<object>
 	/** The client actions requests offer and the session carries out, read per request: the screen on top may change. */
 	readonly clientActions?:
@@ -160,6 +164,15 @@ export interface ChatSessionOptions<TResumeData = unknown> {
 		readonly toolCallId: string
 		readonly toolName: string
 		readonly output: unknown
+	}) => void
+	/**
+	 * A request ended with its answer, so the server stored it: refresh the
+	 * thread list or a draft. Not for a stopped or failed request, nor for a
+	 * reattach that found nothing running.
+	 */
+	readonly onSaved?: (saved: {
+		readonly threadId: string
+		readonly message: UIMessage | undefined
 	}) => void
 	readonly onFailure?: (report: ChatFailureReport) => void
 	readonly onData?: ChatInit<UIMessage>['onData']
@@ -317,7 +330,13 @@ export function createChatSession<TResumeData = unknown>(
 					clientTools: toClientToolDefs(clientActions())
 				}
 
-				return { body: await (options.prepareBody ?? defaultBody)(request) }
+				const body = defaultBody(request)
+
+				return {
+					body: options.prepareBody
+						? await options.prepareBody(request, body)
+						: body
+				}
 			}
 		}),
 		onError: (error) => {
@@ -615,6 +634,10 @@ export function createChatSession<TResumeData = unknown>(
 
 		const isAnswered = !end.isAbort && !end.isError
 		const calls = isAnswered ? actionCalls : []
+
+		if (isAnswered) {
+			options.onSaved?.({ threadId, message: chat.lastMessage })
+		}
 		const waiting =
 			isAnswered && chat.lastMessage?.role === 'assistant'
 				? readWaitingChanges(chat.lastMessage)
@@ -977,8 +1000,17 @@ export function createChatSessions(
 	}
 }
 
+/** The body a request sends by default, the shape `chatTurnBodySchema` parses. */
+export interface ChatRequestBody {
+	readonly threadId: string
+	readonly messages: UIMessage[]
+	readonly trigger: ChatRequest['trigger']
+	readonly resume?: RunResume
+	readonly clientTools?: readonly ClientToolDef[]
+}
+
 /** The request as the body, with `resume` and `clientTools` only when there are any. */
-function defaultBody(request: ChatRequest): object {
+function defaultBody(request: ChatRequest): ChatRequestBody {
 	return {
 		threadId: request.threadId,
 		messages: request.messages,

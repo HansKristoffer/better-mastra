@@ -114,6 +114,20 @@ const THUMBS_PER_READ = 100
 /** The workflows an agent run is stored as: its loop and its execution, under one run id. */
 const AGENT_RUN_WORKFLOWS = ['agentic-loop', 'executionWorkflow'] as const
 
+/**
+ * Whether a thread belongs to a memory resource, as `createChatRoute`'s
+ * `ownsThread` answers: `undefined` when no such thread exists yet.
+ */
+export async function ownsThread(input: {
+	readonly memory: Pick<MastraMemory, 'getThreadById'>
+	readonly threadId: string
+	readonly resourceId: string
+}): Promise<boolean | undefined> {
+	const thread = await input.memory.getThreadById({ threadId: input.threadId })
+
+	return thread ? thread.resourceId === input.resourceId : undefined
+}
+
 export function createThreadHandlers<TScope>(
 	options: ThreadHandlersOptions<TScope>
 ) {

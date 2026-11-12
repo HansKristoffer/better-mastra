@@ -12,7 +12,7 @@ import {
 	type AiBillingError,
 	toAiBillingError
 } from '../models/billing-error.js'
-import type { ReasoningEffort } from '../models/effort.js'
+import type { LlmEffort } from '../models/effort.js'
 import {
 	BatchUnanswered,
 	isBatchingModelCalls
@@ -123,7 +123,7 @@ type CallOptions<TContext> = {
 	 * How much the model may think. Leave unset on Anthropic models, where an
 	 * effort switches extended thinking on.
 	 */
-	reasoning?: ReasoningEffort
+	reasoning?: LlmEffort
 	/** Set `0` where the output feeds the next call's prompt. */
 	temperature?: number
 	/** Bounds each direct attempt; a batch wait has none (the batch window bounds it). */
@@ -158,8 +158,11 @@ export function withUsage<TContext>(input: {
 	/** Admission for direct provider calls (`createModelBudget`). */
 	budget?: ModelBudget
 	onBillingError?: (error: AiBillingError, context: TContext) => void
+	/** A usage row was not written: the sink or the cost lookup threw. Without it the row is dropped silently. */
+	onSinkError?: (error: unknown) => void
 }) {
 	const { llms, sink, budget } = input
+	const sinkFailed = (error: unknown) => input.onSinkError?.(error)
 
 	function report(
 		record: Omit<UsageRecord<TContext>, 'costUsd' | 'costEstimated'>,
@@ -179,7 +182,7 @@ export function withUsage<TContext>(input: {
 			.then((cost) =>
 				sink({ ...record, costUsd: cost.usd, costEstimated: cost.estimated })
 			)
-			.catch(() => undefined)
+			.catch(sinkFailed)
 	}
 
 	function reportGenerate(
@@ -218,7 +221,7 @@ export function withUsage<TContext>(input: {
 
 	async function generate<T>(call: {
 		model: string
-		reasoning: ReasoningEffort | undefined
+		reasoning: LlmEffort | undefined
 		signal: AbortSignal | undefined
 		timeoutMs: number | undefined
 		batchable: boolean
@@ -356,11 +359,13 @@ export function withUsage<TContext>(input: {
 	/**
 	 * Meters a `streamText` or Mastra agent stream once it finishes; never
 	 * blocks the turn. An aborted run rejects `totalUsage`: nothing to meter.
+	 * A run that already finished passes its values as they are, such as the
+	 * turn's `sinks.usage` event.
 	 */
 	function meterStream(
 		stream: {
-			totalUsage: PromiseLike<RunUsage | undefined>
-			steps?: PromiseLike<readonly unknown[]>
+			totalUsage: PromiseLike<RunUsage | undefined> | RunUsage | undefined
+			steps?: PromiseLike<readonly unknown[]> | readonly unknown[]
 		},
 		call: { model: string; usage: TContext } & RecordExtras
 	) {
@@ -390,6 +395,8 @@ export function withUsage<TContext>(input: {
 }
 
 /** Null rather than throwing: the tokens are known, and losing the row would cost money. */
-async function settledSteps(steps: PromiseLike<readonly unknown[]>) {
+async function settledSteps(
+	steps: PromiseLike<readonly unknown[]> | readonly unknown[]
+) {
 	return (await tryCatch(async () => steps)).data
 }

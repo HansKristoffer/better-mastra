@@ -4,6 +4,9 @@ import type { InputProcessorOrWorkflow } from '@mastra/core/processors'
 import type { RequestContext } from '@mastra/core/request-context'
 import type { LanguageModel, UIMessage } from 'ai'
 
+import type { ChatErrorCode } from '../protocol/index.js'
+import { chatErrorCodes } from '../protocol/index.js'
+
 /** The thread one turn runs on and the memory resource it belongs to. */
 export interface ThreadKey {
 	readonly threadId: string
@@ -60,7 +63,7 @@ export interface ChatTurnPlan {
 	readonly maxOutputTokens?: number
 	/**
 	 * Set by the server; nothing a client sends reaches it. The AI SDK's
-	 * shape, as `createLlmRegistry().resolve()` returns it.
+	 * shape, as `createLlmRegistry().resolveLlm()` returns it.
 	 */
 	readonly providerOptions?: SharedV4ProviderOptions | ProviderOptions
 	/** Per-turn input processors, ahead of the agent's own. */
@@ -81,24 +84,19 @@ export interface ChatResume {
 	readonly data: Record<string, unknown>
 }
 
-/** The fixed codes every refusal carries. */
-export const chatErrorCodes = [
-	'invalid_request',
-	'unauthenticated',
-	'forbidden',
-	'unavailable',
-	'consent_required',
-	'not_found',
-	'turn_in_progress',
-	'change_expired',
-	'usage_limited',
-	'temporarily_unavailable'
-] as const
-export type ChatErrorCode = (typeof chatErrorCodes)[number]
+export { type ChatErrorCode, chatErrorCodes }
 
-/** A built-in code, or an app's own code with its status. */
+/**
+ * A built-in code, or an app's own code with its status. `retryAfterSeconds`
+ * goes out as `Retry-After` and in the body, so the client can say when.
+ */
 export type ChatRefusal =
-	ChatErrorCode | { readonly code: string; readonly status: number }
+	| ChatErrorCode
+	| {
+			readonly code: string
+			readonly status: number
+			readonly retryAfterSeconds?: number
+	  }
 
 const plans = new WeakMap<object, ChatTurnPlan>()
 

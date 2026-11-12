@@ -21,6 +21,7 @@ import {
 	createMcpRelay,
 	type McpRelay,
 	type McpRelayErrorEvent,
+	type McpRelayOptions,
 	type ToolsServer,
 	withRelayedTools
 } from './index'
@@ -46,10 +47,15 @@ function startRemote() {
 			'file_feedback',
 			{
 				description: 'File what the reporter told you.',
-				inputSchema: z.object({ title: z.string() })
+				inputSchema: z.object({ title: z.string(), app: z.string().optional() })
 			},
-			async ({ title }) => ({
-				content: [{ type: 'text', text: `Filed #12: ${title}` }]
+			async ({ title, app }) => ({
+				content: [
+					{
+						type: 'text',
+						text: `Filed #12: ${title}${app ? ` in ${app}` : ''}`
+					}
+				]
 			})
 		)
 		return server
@@ -135,7 +141,13 @@ async function consumerOf(host: ReturnType<typeof startHost>, userId: string) {
 	return client
 }
 
-function setup(options: { prefix?: string; hostTools?: string[] } = {}) {
+function setup(
+	options: {
+		prefix?: string
+		hostTools?: string[]
+		relay?: Partial<McpRelayOptions<{ userId: string }>>
+	} = {}
+) {
 	const remote = startRemote()
 	const errors: { error: unknown; event: McpRelayErrorEvent }[] = []
 	const relay = createMcpRelay<{ userId: string }>({
@@ -144,7 +156,8 @@ function setup(options: { prefix?: string; hostTools?: string[] } = {}) {
 		headers: async ({ userId }) => ({
 			Authorization: `Bearer ${TOKENS[userId] ?? 'rpt_unknown'}`
 		}),
-		onError: (error, event) => errors.push({ error, event })
+		onError: (error, event) => errors.push({ error, event }),
+		...options.relay
 	})
 	const host = startHost(relay, options.hostTools)
 	servers.push(remote.http, host)
@@ -252,6 +265,87 @@ describe('mcp-relay', () => {
 		expect(relisted.tools.map((tool) => tool.name)).toContain(
 			'feedloop_file_feedback'
 		)
+	})
+
+	test('offers only the picked tools under their host names, with a hidden input filled per caller', async () => {
+		const { remote, host } = setup({
+			relay: {
+				tools: { file_feedback: { as: 'send_feedback' } },
+				hiddenInputs: { app: ({ userId }) => `app-of-${userId}` }
+			}
+		})
+		const consumer = await consumerOf(host, 'ada')
+
+		const { tools } = await consumer.listTools()
+		const result = await consumer.callTool({
+			name: 'send_feedback',
+			arguments: { title: 'Export fails', app: 'written by the model' }
+		})
+
+		expect(tools.map((tool) => tool.name)).toEqual([
+			'list_sprays',
+			'send_feedback'
+		])
+		expect(Object.keys(tools[1]?.inputSchema.properties ?? {})).toEqual([
+			'title'
+		])
+		expect(textOf(result)).toBe('Filed #12: Export fails in app-of-ada')
+		expect(remote.calls).toEqual([
+			{ tool: 'file_feedback', authorization: 'Bearer rpt_ada' }
+		])
+	})
+
+	test('known tools are offered at once while the remote is down, and a call says it could not be reached', async () => {
+		const { remote, relay } = setup({
+			relay: {
+				known: {
+					tools: [
+						{
+							name: 'file_feedback',
+							inputSchema: { type: 'object', properties: { title: {} } }
+						}
+					],
+					instructions: GUIDE
+				}
+			}
+		})
+		remote.state.down = true
+
+		const tools = await relay.tools()
+		const result = await relay.callTool(
+			'feedloop_file_feedback',
+			{ title: 'Export fails' },
+			{ userId: 'ada' }
+		)
+
+		expect(tools.map((tool) => tool.name)).toEqual(['feedloop_file_feedback'])
+		expect(await relay.instructions()).toBe(GUIDE)
+		expect(result.isError).toBe(true)
+		expect(textOf(result)).toContain('HTTP 503')
+	})
+
+	test('a discovery that takes too long is given up on within its one deadline', async () => {
+		const hanging = Bun.serve({
+			port: 0,
+			fetch: () => new Promise<Response>(() => {})
+		})
+		servers.push(hanging)
+		const errors: unknown[] = []
+		const relay = createMcpRelay({
+			url: new URL('/mcp', hanging.url),
+			headers: () => ({}),
+			discovery: { timeoutMs: 50 },
+			onError: (error) => errors.push(error)
+		})
+
+		const started = Date.now()
+		const tools = await relay.tools()
+		const called = await relay.callTool('file_feedback', {}, undefined)
+
+		expect(tools).toEqual([])
+		expect(Date.now() - started).toBeLessThan(1_000)
+		expect(errors).toHaveLength(1)
+		expect(textOf(called)).toContain('could not be reached')
 	})
 
 	test('a relayed tool named like a host tool fails the listing', async () => {

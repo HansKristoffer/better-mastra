@@ -18,10 +18,10 @@ import {
 } from '@mastra/core/processors'
 import { must } from 'hanzio'
 
+import { TOOL_CALL_BUDGET_STOP_REASON } from '../protocol/index.js'
 import { findTurnPlan } from './types.js'
 
-/** The tripwire reason the app reads when a turn is stopped at the tool-call budget. */
-export const TOOL_CALL_BUDGET_STOP_REASON = 'tool_call_budget'
+export { TOOL_CALL_BUDGET_STOP_REASON }
 
 /** Sent on the last step, because a tool call on the last step ends the turn with an empty reply. */
 export const LAST_STEP_SIGNAL =

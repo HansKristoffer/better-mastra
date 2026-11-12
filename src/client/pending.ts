@@ -8,6 +8,10 @@
 import { getToolName, isToolUIPart, type UIMessage } from 'ai'
 import { isRecord, typedSwitch } from 'hanzio'
 
+import { APPROVAL_ID_SEPARATOR } from '../protocol/index.js'
+
+export { APPROVAL_ID_SEPARATOR }
+
 // TYPES
 
 /** A change waiting for the user in the thread, as the server lists it (Mastra's `listSuspendedRuns`). */
@@ -39,9 +43,6 @@ type ToolPart = Extract<MessagePart, { readonly toolCallId: string }>
 
 /** The part `@mastra/ai-sdk` streams, and stores, for a tool that suspended its run. */
 export const SUSPENDED_PART_TYPE = 'data-tool-call-suspended'
-
-/** `@mastra/ai-sdk` names an approval `<runId>::<toolCallId>`, and reads its answer back by that id. */
-export const APPROVAL_ID_SEPARATOR = '::'
 
 // FUNCTIONS
 
@@ -272,5 +273,20 @@ function isPendingRunPart(
 	return pendingChanges.some(
 		(change) =>
 			change.kind === 'suspended' && change.toolCallId === data?.toolCallId
+	)
+}
+
+/** The approval the user turn waits for, the first one when several do; null when it waits for none. */
+export function pendingApproval(turn: {
+	readonly kind: string
+	readonly changes?: readonly PendingChange[]
+}): Extract<PendingChange, { kind: 'approval' }> | null {
+	if (turn.kind !== 'waiting') return null
+
+	return (
+		turn.changes?.find(
+			(change): change is Extract<PendingChange, { kind: 'approval' }> =>
+				change.kind === 'approval'
+		) ?? null
 	)
 }

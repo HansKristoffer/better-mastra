@@ -48,11 +48,16 @@ export const ESTIMATED_MODEL_PRICING: ModelPricing = Object.freeze({
 	}
 })
 
-/** Token totals for a call. `inputTokens` includes cache reads and writes. */
+/**
+ * Token totals for a call. `inputTokens` includes cache reads and writes.
+ * Cache reads go as `cachedInputTokens` or as `cacheReadTokens`, the name
+ * `readStreamTextUsage` gives them, so its result is a total as it is.
+ */
 export type LlmUsageTotals = {
 	inputTokens: number | null
 	outputTokens: number | null
 	cachedInputTokens?: number | null | undefined
+	cacheReadTokens?: number | null | undefined
 	cacheWriteTokens?: number | null | undefined
 }
 
@@ -66,7 +71,7 @@ export function estimateModelCostUsd(
 	if (!rates || !usage) return null
 	if (usage.inputTokens === null && usage.outputTokens === null) return null
 
-	const cacheRead = usage.cachedInputTokens ?? 0
+	const cacheRead = usage.cachedInputTokens ?? usage.cacheReadTokens ?? 0
 	const cacheWrite = usage.cacheWriteTokens ?? 0
 	const plainInput = Math.max(
 		0,

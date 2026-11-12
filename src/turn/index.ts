@@ -14,6 +14,13 @@ export {
 } from './changes.js'
 export { chatErrorResponse, chatRefusal } from './errors.js'
 export {
+	chatResumeSchema,
+	chatTurnBodySchema,
+	type ChatTurnBodyInput,
+	turnOutcomes,
+	uiMessageSchema
+} from '../protocol/index.js'
+export {
 	createTurnObserver,
 	type ToolSettledEvent,
 	type TurnObserver,
@@ -78,6 +85,7 @@ export {
 	createThreadHandlers,
 	type DeleteThreadResult,
 	deleteThreadEverywhere,
+	ownsThread,
 	sweepAbandonedRuns,
 	type AbandonedRun,
 	sweepOldThreads,

@@ -2,7 +2,12 @@ import type { LanguageModelV4 } from '@ai-sdk/provider'
 import type { MastraLanguageModel } from '@mastra/core/agent'
 import { wrapLanguageModel } from 'ai'
 import { must } from 'hanzio'
-import { type ReasoningEffort, splitModelEffort } from './effort.js'
+import type { LlmEffort } from './effort.js'
+import {
+	BUILT_IN_ROUTES,
+	type BuiltInRoute,
+	parseModelId as parseIdOf
+} from './modelId.js'
 import {
 	defaultOpenRouterRouting,
 	type OpenRouterRouting
@@ -22,16 +27,7 @@ import {
 	silentLogger
 } from './route.js'
 
-export const BUILT_IN_ROUTES = [
-	'vertex-eu',
-	'openrouter',
-	'openai-direct',
-	'anthropic-direct',
-	'requesty',
-	'inception'
-] as const
-
-export type BuiltInRoute = (typeof BUILT_IN_ROUTES)[number]
+export { BUILT_IN_ROUTES, type BuiltInRoute }
 
 /** API keys per route. A route without a key is not loaded, nor is its SDK. */
 export type LlmKeys = {
@@ -61,7 +57,7 @@ export type LlmRegistryOptions = {
 
 export type ResolveLlmOptions = {
 	/** Used unless the id pins an effort with `@low|medium|high`. */
-	reasoning?: ReasoningEffort | undefined
+	reasoning?: LlmEffort | undefined
 	/** Caps every call's output; a call asking for more gets the cap. */
 	maxOutputTokens?: number | undefined
 }
@@ -74,9 +70,6 @@ export type ResolvedLlm = {
 }
 
 export type LlmRegistry = Awaited<ReturnType<typeof createLlmRegistry>>
-
-const defaultRoute = (modelId: string) =>
-	modelId.includes('/') ? 'openrouter' : 'vertex-eu'
 
 /** Loads a route's SDK only when its key is set, so missing optional peers never break startup. */
 async function loadBuiltInRoutes(
@@ -144,27 +137,13 @@ export async function createLlmRegistry(options: LlmRegistryOptions) {
 		)),
 		...options.routes
 	}
-	const knownRoutes = new Set<string>([
-		...BUILT_IN_ROUTES,
-		...Object.keys(options.routes ?? {})
-	])
-	const fallbackRoute = options.defaultRoute ?? defaultRoute
+	const parseOptions = {
+		routes: Object.keys(options.routes ?? {}),
+		...(options.defaultRoute && { defaultRoute: options.defaultRoute })
+	}
 
 	function parseModelId(modelId: string) {
-		const separator = modelId.indexOf('/')
-		const prefix = separator < 0 ? modelId : modelId.slice(0, separator)
-		const prefixed = knownRoutes.has(prefix)
-		const route = prefixed ? prefix : fallbackRoute(modelId)
-		const withEffort = prefixed
-			? separator < 0
-				? ''
-				: modelId.slice(separator + 1)
-			: modelId
-		if (!withEffort.trim() || withEffort !== withEffort.trim()) {
-			throw new Error(`Missing or invalid model ID for ${route}`)
-		}
-		const { modelId: providerModelId, effort } = splitModelEffort(withEffort)
-		return { route, providerModelId, effort }
+		return parseIdOf(modelId, parseOptions)
 	}
 
 	function routeFor(modelId: string) {

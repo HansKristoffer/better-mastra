@@ -1,7 +1,11 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { RedisClient } from 'bun'
 
-import { admitUserRequest, type RunRedisScript } from './userRequests.js'
+import {
+	admissionRefusal,
+	admitUserRequest,
+	type RunRedisScript
+} from './userRequests.js'
 
 const WINDOWS = [
 	{ name: 'minute', seconds: 60, limit: 2 },
@@ -99,5 +103,35 @@ describe.skipIf(!url)('admitUserRequest on real Redis', () => {
 		const refused = results[2] as { retryAfterSeconds: number }
 		expect(refused.retryAfterSeconds).toBeGreaterThan(0)
 		expect(refused.retryAfterSeconds).toBeLessThanOrEqual(60)
+	})
+})
+
+describe('admissionRefusal', () => {
+	test('should refuse a limited request with when to try again, and let an admitted one through', () => {
+		const options = { whenUnavailable: 'refuse' } as const
+
+		expect(admissionRefusal({ kind: 'admitted' }, options)).toBeUndefined()
+		expect(
+			admissionRefusal({ kind: 'limited', retryAfterSeconds: 42 }, options)
+		).toEqual({ code: 'usage_limited', status: 429, retryAfterSeconds: 42 })
+	})
+
+	test('should fail open or closed as the app chose, and report the outage either way', () => {
+		const heard: unknown[] = []
+		const down = { kind: 'unavailable', error: new Error('down') } as const
+
+		expect(
+			admissionRefusal(down, {
+				whenUnavailable: 'admit',
+				onUnavailable: (error) => heard.push(error)
+			})
+		).toBeUndefined()
+		expect(
+			admissionRefusal(down, {
+				whenUnavailable: 'refuse',
+				onUnavailable: (error) => heard.push(error)
+			})
+		).toBe('temporarily_unavailable')
+		expect(heard).toEqual([down.error, down.error])
 	})
 })

