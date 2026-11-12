@@ -7,6 +7,8 @@
 import { createHmac } from 'node:crypto'
 import { raceAbort } from 'hanzio'
 
+import type { ChatRefusal } from '../turn/types.js'
+
 /** One counting window: at most `limit` requests in `seconds`. */
 export interface UserRequestWindow {
 	/** The key suffix, such as `minute` or `day`. */
@@ -91,4 +93,36 @@ export async function admitUserRequest(input: {
 	} catch (error) {
 		return { kind: 'unavailable', error }
 	}
+}
+
+/**
+ * An admission as the turn's `admit` answers: a limited request is refused
+ * with `usage_limited` and its `Retry-After`, an admitted one goes ahead.
+ * When Redis failed or did not answer, `whenUnavailable` decides, and there
+ * is no default: `'admit'` lets the request through (fail open), `'refuse'`
+ * answers `temporarily_unavailable` (fail closed). `onUnavailable` hears of
+ * it either way, for the log.
+ */
+export function admissionRefusal(
+	admission: UserRequestAdmission,
+	options: {
+		readonly whenUnavailable: 'admit' | 'refuse'
+		readonly onUnavailable?: (error: unknown) => void
+	}
+): ChatRefusal | undefined {
+	if (admission.kind === 'admitted') return undefined
+
+	if (admission.kind === 'limited') {
+		return {
+			code: 'usage_limited',
+			status: 429,
+			retryAfterSeconds: admission.retryAfterSeconds
+		}
+	}
+
+	options.onUnavailable?.(admission.error)
+
+	return options.whenUnavailable === 'refuse'
+		? 'temporarily_unavailable'
+		: undefined
 }

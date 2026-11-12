@@ -40,6 +40,8 @@ export interface ChatRefusal {
 	readonly canTryAgain: boolean
 	/** The approval or suspended run the request answered no longer waits. */
 	readonly expired?: boolean
+	/** When the server said to try again, such as a usage limit's reset. */
+	readonly retryAfterSeconds?: number
 }
 
 /** The counters of the user turn that is running. */
