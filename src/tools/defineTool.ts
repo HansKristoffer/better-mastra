@@ -25,9 +25,37 @@ export type ToolTier = 'read' | 'approval' | (string & {})
 /** Where the tool runs: on the server, or without `execute` in the client (`addToolOutput`). */
 export type ToolKind = 'server' | 'client'
 
+/**
+ * An error whose message the model may read as it is: input the tool cannot
+ * act on, a missing permission. With `maskErrors`, every other error a tool
+ * throws reaches the model as one fixed sentence.
+ */
+export class ToolRefusal extends Error {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options)
+		this.name = 'ToolRefusal'
+	}
+}
+
+/** What the model reads for a masked error, unless the definition says otherwise. */
+export const TOOL_ERROR_SENTENCE =
+	'The tool failed for a reason on our side. Do not retry it; tell the user it did not work.'
+
+/** What `maskErrors` does with an error that is not a `ToolRefusal`. */
+export interface ToolErrorMasking {
+	/** What the model reads instead. Default `TOOL_ERROR_SENTENCE`. */
+	readonly sentence?: string
+	/** The error the model does not see, for the log. */
+	readonly onError?: (
+		error: unknown,
+		event: { readonly tool: string; readonly requestContext?: RequestContext }
+	) => void
+}
+
 export interface ToolDefinition<
 	TTier extends ToolTier = ToolTier,
-	TCard extends string = string
+	TCard extends string = string,
+	TMeta = undefined
 > {
 	/** The tool, or `createTool`'s options for it. */
 	readonly tool: AnyTool | CreateToolOptions
@@ -50,11 +78,20 @@ export interface ToolDefinition<
 	readonly toModelOutput?: (output: never) => unknown
 	/** JSON-only extras for the client manifest, such as how a confirm card shows the input. */
 	readonly manifest?: Readonly<Record<string, unknown>>
+	/** The server's own data about the tool (a gate, a permission); never reaches the manifest. */
+	readonly meta?: TMeta
+	/**
+	 * Hides what the tool's errors say from the model, the stored thread and
+	 * the client: a `ToolRefusal`'s message and an abort pass through, any
+	 * other error becomes one fixed sentence. `true` uses the defaults.
+	 */
+	readonly maskErrors?: boolean | ToolErrorMasking
 }
 
 export interface DefinedTool<
 	TTier extends ToolTier = ToolTier,
-	TCard extends string = string
+	TCard extends string = string,
+	TMeta = unknown
 > {
 	/** The name the model, the stream and the manifest know the tool by. */
 	readonly name: string
@@ -64,6 +101,7 @@ export interface DefinedTool<
 	readonly card: TCard | 'generic'
 	readonly invalidates: readonly string[]
 	readonly manifest: Readonly<Record<string, unknown>>
+	readonly meta: TMeta
 }
 
 /**
@@ -73,8 +111,11 @@ export interface DefinedTool<
  */
 export function defineTool<
 	const TTier extends ToolTier,
-	const TCard extends string = 'generic'
->(definition: ToolDefinition<TTier, TCard>): DefinedTool<TTier, TCard> {
+	const TCard extends string = 'generic',
+	TMeta = undefined
+>(
+	definition: ToolDefinition<TTier, TCard, TMeta>
+): DefinedTool<TTier, TCard, TMeta> {
 	const base = isTool(definition.tool)
 		? definition.tool
 		: createTool(definition.tool)
@@ -91,6 +132,15 @@ export function defineTool<
 	const toModelOutput = definition.toModelOutput
 	// Only a read is safe to run in an eval's dry run.
 	const honoursDryRun = definition.tier !== 'read'
+	const masking =
+		definition.maskErrors === true ? {} : definition.maskErrors || undefined
+	const run = (input: unknown, context: { requestContext?: RequestContext }) =>
+		honoursDryRun && isDryRun(context?.requestContext)
+			? dryRunResult(base.id)
+			: baseExecute!(
+					fillHiddenInputs(input, hidden, context?.requestContext),
+					context as never
+				)
 
 	const tool = createTool({
 		...(base as CreateToolOptions),
@@ -103,16 +153,21 @@ export function defineTool<
 		requireApproval:
 			definition.tier === 'approval' || base.requireApproval === true,
 		...(baseExecute && {
-			execute: (
-				input: unknown,
-				context: { requestContext?: RequestContext }
-			) =>
-				honoursDryRun && isDryRun(context?.requestContext)
-					? dryRunResult(base.id)
-					: baseExecute(
-							fillHiddenInputs(input, hidden, context?.requestContext),
-							context as never
-						)
+			execute: masking
+				? async (
+						input: unknown,
+						context: {
+							requestContext?: RequestContext
+							abortSignal?: AbortSignal
+						}
+					) => {
+						try {
+							return await run(input, context)
+						} catch (error) {
+							throw maskedError(error, base.id, context, masking)
+						}
+					}
+				: run
 		}),
 		...(toModelOutput && {
 			toModelOutput: (output: unknown) => {
@@ -136,8 +191,33 @@ export function defineTool<
 		tier: definition.tier,
 		card: definition.card ?? 'generic',
 		invalidates: definition.invalidates ?? [],
-		manifest: definition.manifest ?? {}
+		manifest: definition.manifest ?? {},
+		meta: definition.meta as TMeta
 	}
+}
+
+function maskedError(
+	error: unknown,
+	tool: string,
+	context:
+		| { requestContext?: RequestContext; abortSignal?: AbortSignal }
+		| undefined,
+	masking: ToolErrorMasking
+): unknown {
+	const aborted =
+		context?.abortSignal?.aborted === true ||
+		(error instanceof Error && error.name === 'AbortError')
+
+	if (error instanceof ToolRefusal || aborted) return error
+
+	masking.onError?.(error, {
+		tool,
+		...(context?.requestContext && { requestContext: context.requestContext })
+	})
+
+	return new ToolRefusal(masking.sentence ?? TOOL_ERROR_SENTENCE, {
+		cause: error
+	})
 }
 
 /** The Mastra tools of the definitions by name, and each one's tier, for a turn plan. */

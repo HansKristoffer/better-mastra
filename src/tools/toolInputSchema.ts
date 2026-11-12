@@ -167,6 +167,16 @@ export function coerceDateStrings(
 	)
 }
 
+/**
+ * A JSON Schema as a tool input, such as an MCP tool's `inputSchema`. It does
+ * not validate: the service behind the tool checks its own input.
+ */
+export function jsonSchemaInput(
+	schema: Readonly<Record<string, unknown>>
+): ToolInputSchema {
+	return standardSchema({ ...schema }, (value) => ({ value }))
+}
+
 function standardSchema(
 	jsonSchema: JsonSchema,
 	validate: (value: unknown) => ValidationResult
