@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { UIMessage } from 'ai'
 
+import { createResumableStreams } from '../resumable/index.js'
 import { asStepModel } from './agent.js'
 import {
 	classifyTurnChanges,
@@ -240,6 +241,90 @@ describe('runChatTurn', () => {
 		expect(
 			candidate.doStreamCalls[0]?.prompt.at(-1)?.providerOptions
 		).toMatchObject({ anthropic: { cacheControl: { type: 'ephemeral' } } })
+	})
+
+	test('should stream, store and report the same text when an output processor rewrites it', async () => {
+		// Given a model that writes dashes across two deltas, and a per-turn processor that replaces them
+		const [streamStart, textStart, , ...rest] = textReply('')
+		const finished: string[] = []
+		const harness = createHarness({
+			replies: [
+				[
+					streamStart!,
+					textStart!,
+					{ type: 'text-delta', id: 'text-1', delta: 'Mad \u2014 1.250 kr. ' },
+					{ type: 'text-delta', id: 'text-1', delta: 'Bolig \u2013 8.000 kr.' },
+					...rest
+				]
+			],
+			overrides: {
+				sinks: { turnFinished: (event) => finished.push(event.answerText) }
+			}
+		})
+		const prepare = harness.deps.prepare
+		harness.deps.prepare = async (input) => {
+			const prepared = await prepare(input)
+
+			return {
+				...prepared,
+				plan: {
+					...prepared.plan,
+					outputProcessors: [
+						{
+							id: 'plain-dashes',
+							processOutputStream: async ({ part }) =>
+								part.type === 'text-delta'
+									? {
+											...part,
+											payload: {
+												...part.payload,
+												text: part.payload.text.replace(/[\u2013\u2014]/g, '-')
+											}
+										}
+									: part
+						}
+					]
+				}
+			}
+		}
+
+		// When the user asks, on a server that keeps the turn resumable
+		const resumable = createResumableStreams({})
+		const turn = await harness.run({
+			messages: [userMessage('Hvad bruger jeg?')]
+		})
+
+		if (turn.kind !== 'stream') throw new Error('The turn was refused.')
+
+		const live = await resumable.start({
+			threadKey: turn.threadKey.threadId,
+			stream: turn.stream,
+			abort: new AbortController()
+		})
+		const { message } = await readTurn({ ...turn, stream: live })
+		const replayed = await readTurn({
+			...turn,
+			stream: (await resumable.reconnect(turn.threadKey.threadId))!
+		})
+		await resumable.close()
+
+		// Then the client, a reconnecting client, the stored thread and the turn's own report hold the rewritten text
+		const expected = 'Mad - 1.250 kr. Bolig - 8.000 kr.'
+		const textOf = (parts: readonly { type: string; text?: string }[] = []) =>
+			parts
+				.flatMap((part) => (part.type === 'text' ? [part.text] : []))
+				.join('')
+		const { messages: stored } = await harness.memory.recall({
+			threadId: harness.threadKey.threadId,
+			resourceId: harness.threadKey.resourceId
+		})
+
+		expect(textOf(message?.parts)).toBe(expected)
+		expect(textOf(replayed.message?.parts)).toBe(expected)
+		expect(
+			textOf(stored.find(({ role }) => role === 'assistant')?.content.parts)
+		).toBe(expected)
+		expect(finished).toEqual([expected])
 	})
 
 	test('should stop a turn over its tool-call budget before calling the model', async () => {

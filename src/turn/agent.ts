@@ -11,6 +11,7 @@ import type { MastraMemory } from '@mastra/core/memory'
 import type {
 	ErrorProcessorOrWorkflow,
 	InputProcessorOrWorkflow,
+	OutputProcessorOrWorkflow,
 	ProcessInputStepResult
 } from '@mastra/core/processors'
 import type { LanguageModel } from 'ai'
@@ -43,6 +44,8 @@ export interface CreateChatAgentOptions {
 	readonly stopAfterTools?: readonly string[]
 	/** Extra input processors, after the budget stop and the signals. */
 	readonly processors?: readonly InputProcessorOrWorkflow[]
+	/** Output processors of every turn, after the plan's own. */
+	readonly outputProcessors?: readonly OutputProcessorOrWorkflow[]
 	readonly errorProcessors?: readonly ErrorProcessorOrWorkflow[]
 	/** A whole run; keep it below the server's shutdown drain. Default 80 s. */
 	readonly turnTimeoutMs?: number
@@ -111,6 +114,10 @@ export function createChatAgent(options: CreateChatAgentOptions): Agent {
 		inputProcessors: ({ requestContext }) => [
 			...(findTurnPlan(requestContext)?.inputProcessors ?? []),
 			...staticProcessors
+		],
+		outputProcessors: ({ requestContext }) => [
+			...(findTurnPlan(requestContext)?.outputProcessors ?? []),
+			...(options.outputProcessors ?? [])
 		],
 		errorProcessors: [
 			new RetryBeforeAnswerText(),

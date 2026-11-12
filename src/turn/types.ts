@@ -1,6 +1,9 @@
 import type { SharedV4ProviderOptions } from '@ai-sdk/provider'
 import type { AgentExecutionOptions, ToolsInput } from '@mastra/core/agent'
-import type { InputProcessorOrWorkflow } from '@mastra/core/processors'
+import type {
+	InputProcessorOrWorkflow,
+	OutputProcessorOrWorkflow
+} from '@mastra/core/processors'
 import type { RequestContext } from '@mastra/core/request-context'
 import type { LanguageModel, UIMessage } from 'ai'
 
@@ -80,6 +83,15 @@ export interface ChatTurnPlan {
 	readonly providerOptions?: SharedV4ProviderOptions | ProviderOptions
 	/** Per-turn input processors, ahead of the agent's own. */
 	readonly inputProcessors?: readonly InputProcessorOrWorkflow[]
+	/**
+	 * Per-turn output processors, ahead of the agent's own: what code can fix
+	 * in the answer without a rule in the prompt. A `processOutputStream` that
+	 * rewrites a `text-delta` changes the text the client streams, the text
+	 * the thread stores and the text the turn reports alike. It sees one
+	 * delta at a time, so a rewrite of something longer than a character must
+	 * keep the unfinished end of a delta back in `state` until the next one.
+	 */
+	readonly outputProcessors?: readonly OutputProcessorOrWorkflow[]
 }
 
 /** The minimum chat body: the AI SDK's messages, and a suspended run to resume. */
