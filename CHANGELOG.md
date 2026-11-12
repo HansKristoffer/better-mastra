@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.7.0](https://github.com/HansKristoffer/better-mastra/compare/v0.6.0...v0.7.0) (2026-11-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* `@mastra/core`, `@mastra/memory`, `@mastra/ai-sdk`, `@ai-sdk/provider`, `ai` and `zod` are optional peers. An app that relied on its package manager installing them must list them, as the README's install line already does.
+* **turn:** a too-long message is refused with `message_too_long` instead of `invalid_request`, and messages up to 32,000 characters are accepted where 4,000 was the default.
+* **resumable:** `drainTimeoutMs` defaults to 90 s (was 30 s), past the agent's 80 s turn timeout. `TurnOutcome` has a new value, `interrupted`. `ResumableStreams` has a new member, `draining`, which a hand-written implementation must add.
+* **protocol:** `clientToolDefSchema` refuses a name every provider refuses (anything but letters, digits, `_` and `-`, starting with a letter or `_`, at most 64) and a description over 2,000 characters.
+
+### Features
+
+* **client:** onSaved, the default body for prepareBody, pendingApproval and createToolRefresh ([1d12c11](https://github.com/HansKristoffer/better-mastra/commit/1d12c11ec859412fcc5e5e4b3c2d244b32eb942e))
+* **evals:** a judge call carries its own context; withEvalDryRun keeps the class ([84edf49](https://github.com/HansKristoffer/better-mastra/commit/84edf49977675fbd98b9cc51a8d204f391ed11a4))
+* every Mastra and AI SDK peer is optional; /protocol is exported ([06f5b73](https://github.com/HansKristoffer/better-mastra/commit/06f5b73ee8d51fc300a533669d4dbda22fedb099))
+* **mcp-relay:** discovery never holds up the host; pick, rename and hide inputs ([e7b3203](https://github.com/HansKristoffer/better-mastra/commit/e7b3203395c2b766ef51c9e7a1f300596e098e51))
+* **models:** parseModelId without the registry, and reasoning: 'medium' ([7fa1e17](https://github.com/HansKristoffer/better-mastra/commit/7fa1e1777ef3c32aa49f08d07501f416f1d0f226))
+* **protocol:** one web-safe home for the chat's wire contract ([c2461ff](https://github.com/HansKristoffer/better-mastra/commit/c2461ff0ff8b8c7a1a9ea0fe6b97c39652d1266e))
+* **resumable:** turn new turns away while draining, and say who aborted a turn ([8c5b6e0](https://github.com/HansKristoffer/better-mastra/commit/8c5b6e0c442ea22df6f39aa1a0c023fd5e71057d))
+* **tools:** maskErrors and ToolRefusal, server-only meta, jsonSchemaInput ([792d5ce](https://github.com/HansKristoffer/better-mastra/commit/792d5ce0efa456de3b851d53bc1b4d73e0e27fad))
+* **tools:** tool manifest CLI takes --name, --type and --check ([40b6555](https://github.com/HansKristoffer/better-mastra/commit/40b6555fd91fe08b559726d480cd17bc9e7bdce3))
+* **turn:** ownsThread for the chat route, and how long each tool took ([802e5b6](https://github.com/HansKristoffer/better-mastra/commit/802e5b64394811b2ef8e3d92a6c4a3e0f444c8ed))
+* **turn:** typed usage on the finished turn, message_too_long, fewer reads ([30070b4](https://github.com/HansKristoffer/better-mastra/commit/30070b4ab6eebf3047c3ce56678168b6f6606525))
+* **usage:** admissionRefusal, and refusals that say when to try again ([bf5a83e](https://github.com/HansKristoffer/better-mastra/commit/bf5a83ecb1b53001dc49c38d91e351d71df06cd4))
+
 ## [0.6.0](https://github.com/HansKristoffer/better-mastra/compare/v0.5.1...v0.6.0) (2026-11-09)
 
 
