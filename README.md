@@ -139,10 +139,24 @@ Also here: `withPromptCache` / `promptCacheMiddleware` for provider prompt cachi
 - **`defineRequestContext(schema)`**: typed request context values; `defineRequestContextHolder` for values that must never be serialized into a snapshot or span.
 - **`createThreadHandlers`**: list, read and delete the caller's threads, and rate answers. `ownsThread({ memory, threadId, resourceId })` is the check `createChatRoute` needs with `resumable`.
 - **`sweepOldThreads`** and **`sweepAbandonedRuns`**: nothing runs them for you. Without a scheduled job of yours, old threads (with the customer text they quote) and suspended approvals stay in the `mastra` schema for good.
-- **`createReplySuggestionsAgent`**: short replies offered after an answer.
+- **`createReplySuggestionsAgent`**: short replies offered after an answer. They stream after the answer's `finish`, so the answer never waits for them: the chat session ends its turn when the answer is complete and takes the replies as they arrive. `replySuggestions: { holdFinish: true }` keeps the `finish` until they are in, for a client that stops reading there.
 - **`defineModelArms`**: model experiments by thread: a thread keeps its arm for life.
 
 The plan splits instructions three ways so the provider's cache keeps hitting: `instructions` (stable, cached), `perRequestInstructions` (per thread), and `signal` (per request, sent after the user's message and never stored).
+
+`instructions` is a string, or a list of stable blocks that each become a system message ending in a cache breakpoint. Put what every user shares first and what one workspace shares after it, and the first block and the tools are read from the provider's cache across users:
+
+```ts
+plan: {
+	instructions: [rulesAndCatalogue, workspaceFacts], // shared by everyone, then per workspace
+	perRequestInstructions: threadFacts, // no marker
+	signal: `Now on ${page}.`
+}
+```
+
+Anthropic takes four breakpoints per request and the conversation uses two, so at most two blocks are marked: of more, only the last two are, and the earlier ones still sit in the cached prefix. Join blocks yourself to choose where the two breakpoints go.
+
+`prepare` gets the stored `thread` the turn already read for its ownership check, so it need not read it again. After the answer the turn reads the thread once more only when it has a title or a `threadMetadata` value the thread does not hold yet. `asStepModel(model)` types a model for a processor that swaps the step's model (`processInputStep` returning `{ model }`).
 
 ## Tools (`better-mastra/tools`)
 
@@ -165,6 +179,8 @@ const { tools: toolset, toolTiers } = toToolSet(tools) // for the turn plan
 ```
 
 `better-mastra-tool-manifest src/tools.ts src/generated/tool-manifest.ts` writes the client's manifest from the same definitions; `--name` names the export, `--type Manifest:./types` annotates it with your type, and `--check` (for CI) fails when the file is out of date. On the client, `createToolRefresh(toolManifest, { tasks: refetchTasks })` is an `onToolResult` that refetches what each tool `invalidates`, typed so a namespace without a refetch fails the typecheck.
+
+`toolInputSchema(zodSchema)` describes a zod input for the model: dates as ISO strings, and without the regular expression zod writes for every string format (190 characters for a UUID, 330 for a datetime, on every request). A standard format loses its `pattern` and its `format`, except a date or time format, which is how the model knows what to write; a pattern you wrote with `.regex()` stays. The server validates with the zod schema either way. `{ stringChecks: 'full' }` sends zod's JSON Schema as it is.
 
 A tool without `execute` is a client tool. `meta` keeps your server's own data on a definition (a gate, a permission) without it reaching the manifest. `deferredTool` and `deferredToolSearch` keep a large tool catalog out of the prompt without breaking Anthropic's prompt cache; `markDryRun` turns every write into a marker for evals. `jsonSchemaInput(schema)` takes a JSON Schema, such as an MCP tool's, as a tool input.
 
@@ -238,7 +254,7 @@ await storage.init() // once, in the process that migrates
 await shutdown({ mastra, memory, storage })
 ```
 
-`pgStorage` keeps Mastra in its own schema (`mastra`, plus `mastra_observability`), turns keep-alive on and logs a severed idle connection instead of crashing. `createMemory` keeps message history in thread scope; pass `observer` to turn on observational memory. `checkHealth({ checks })` pings stores and checks provider keys without spending tokens.
+`pgStorage` keeps Mastra in its own schema (`mastra`, plus `mastra_observability`), turns keep-alive on and logs a severed idle connection instead of crashing. `storage.postgres` is the same store typed as `@mastra/pg`'s `PostgresStoreVNext` (`PostgresStore` with `observabilitySchema: false`), for code that names that type. `createMemory` keeps message history in thread scope; pass `observer` to turn on observational memory. `checkHealth({ checks })` pings stores and checks provider keys without spending tokens.
 
 `pgStorage` and `libsqlStorage` from the package root are the same presets loaded on call (they return promises); they stay for compatibility.
 
@@ -326,6 +342,8 @@ Failure behaviour: a buffer over `maxBufferBytes` (2 MB) keeps streaming but new
 
 ## Usage and limits (`better-mastra/usage`)
 
+`readUsageBreakdown({ mastra, groupBy, from, to })` gives tokens and recorded cost per user, thread or agent from Mastra's metrics, with `cacheReadTokens` and `cacheWriteTokens` beside the input total.
+
 `withUsage({ llms, sink, onSinkError })` returns `generateText`, `generateObject` and `meterStream` that report every run's tokens and cost to your sink; `meterStream` also takes a finished run's values, such as the turn's `usage`. A sink that throws loses its row: log it with `onSinkError`. `createModelBudget` caps concurrent background model calls per provider and backs off on 429s.
 
 `admitUserRequest` charges one request against every window of a user's operation at once, or refuses it with the seconds until the fullest window has room. The keys hold an HMAC of the user id, never the id itself. Pass any Redis client's `EVAL`:
@@ -394,6 +412,25 @@ bunx --bun better-mastra-evals --suite smoke --model google/gemini-3.5-flash --m
 ```
 
 Several `--model` flags print a model comparison; `--compare` diffs against a saved report.
+
+For Mastra's own `runEvals` and dataset experiments:
+
+- `createNoToolErrorsScorer()` scores 1 when no tool call failed. A call that waits for the user's approval is the answer's proposal, not a failure, which `checks.noToolErrors()` from `@mastra/evals` counts it as. `readRunOutput(output)` gives `failedCalls` and `waitingCalls` too.
+- `createCalledToolScorer('budget_update')` has the tool's name in its id, so several of them score one run; `checks.calledTool()` scorers share one id and overwrite each other. `createChecksScorer` scores a whole case as one 1 or 0.
+- `createExperimentTask({ agent, prepare })` is an experiment `task` that runs each item with a request context you prepared, as your production turn does. An experiment's agent target builds the context from plain values, so a turn plan or a caller kept beside it is missing.
+
+```ts
+await dataset.startExperiment({
+	task: createExperimentTask({
+		agent,
+		prepare: async ({ groundTruth, metadata }) => {
+			const { requestContext, memory } = await prepareTurnFor(metadata)
+			return { requestContext, memory, toolMocks: mocksOf(groundTruth) }
+		}
+	}),
+	scorers: [createNoToolErrorsScorer(), createCalledToolScorer('budget_update')]
+})
+```
 
 ## MCP relay (`better-mastra/mcp-relay`)
 
