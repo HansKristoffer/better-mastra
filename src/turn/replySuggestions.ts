@@ -14,16 +14,13 @@ import type { LanguageModel, UIMessageChunk } from 'ai'
 import { z } from 'zod'
 import { timeoutSignal } from 'hanzio'
 
+import {
+	ANSWER_COMPLETE_PART,
+	REPLY_SUGGESTIONS_PART
+} from '../protocol/index.js'
 import { asAgentModel } from './agent.js'
 
-/** The data part's type on the answer's stream. */
-export const REPLY_SUGGESTIONS_PART = 'data-reply-suggestions'
-
-/**
- * The transient part sent right before the replies: the answer is complete,
- * though its finish waits for them, so a client can show it as done.
- */
-export const ANSWER_COMPLETE_PART = 'data-answer-complete'
+export { ANSWER_COMPLETE_PART, REPLY_SUGGESTIONS_PART }
 
 export const REPLY_SUGGESTIONS_MAX = 3
 

@@ -11,3 +11,10 @@ export * from './reveal.js'
 export * from './screen-context.js'
 export * from './session.js'
 export * from './turn.js'
+export {
+	type ChatErrorCode,
+	chatErrorCodes,
+	TOOL_CALL_BUDGET_STOP_REASON,
+	type TurnOutcome,
+	turnOutcomes
+} from '../protocol/index.js'

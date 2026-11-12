@@ -14,7 +14,15 @@ import {
 } from 'ai'
 import { typedSwitch } from 'hanzio'
 
+import {
+	ANSWER_COMPLETE_PART,
+	REPLY_SUGGESTIONS_PART,
+	TRIPWIRE_PART,
+	USER_MESSAGE_PART
+} from '../protocol/index.js'
 import { readSuspendedRun } from './pending.js'
+
+export { ANSWER_COMPLETE_PART, REPLY_SUGGESTIONS_PART, USER_MESSAGE_PART }
 
 // TYPES
 
@@ -48,19 +56,7 @@ export interface RequestMessageOptions {
 
 const OBSERVATIONAL_MEMORY_PART_PREFIX = 'data-om-'
 
-/** The transient data part a server streams after an answer: up to three replies the user can tap to send. */
-export const REPLY_SUGGESTIONS_PART = 'data-reply-suggestions'
-
-/** The transient data part a server streams before the replies: the answer is complete, though its finish waits for them. */
-export const ANSWER_COMPLETE_PART = 'data-answer-complete'
-
 export const REPLY_SUGGESTIONS_MAX = 3
-
-/** The transient data part a turn streams right after its start: the user's message, for a client that reattaches before the thread stores it. */
-export const USER_MESSAGE_PART = 'data-user-message'
-
-/** The tripwire part a run that a processor stopped ends with; its `reason` says why. */
-const TRIPWIRE_PART = 'data-tripwire'
 
 /** The longest reply offered, in characters; a longer one is dropped. */
 export const REPLY_SUGGESTION_MAX_LENGTH = 80

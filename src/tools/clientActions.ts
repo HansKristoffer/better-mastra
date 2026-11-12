@@ -8,18 +8,11 @@
 
 import { createTool } from '@mastra/core/tools'
 import type { JSONSchema7 } from 'json-schema'
-import { z } from 'zod'
 import { keyBy, mapValues } from 'hanzio'
 
-export const clientToolDefSchema = z.object({
-	name: z.string().min(1),
-	description: z.string().min(1),
-	/** The action's input as JSON Schema, so the model sees typed parameters. */
-	jsonSchema: z.record(z.string(), z.unknown()),
-	requiresApproval: z.boolean().optional()
-})
+import { type ClientToolDef, clientToolDefSchema } from '../protocol/index.js'
 
-export type ClientToolDef = z.infer<typeof clientToolDefSchema>
+export { type ClientToolDef, clientToolDefSchema }
 
 const PERMISSIVE_OBJECT_SCHEMA: JSONSchema7 = {
 	type: 'object',

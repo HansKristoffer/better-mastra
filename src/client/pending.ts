@@ -8,6 +8,10 @@
 import { getToolName, isToolUIPart, type UIMessage } from 'ai'
 import { isRecord, typedSwitch } from 'hanzio'
 
+import { APPROVAL_ID_SEPARATOR } from '../protocol/index.js'
+
+export { APPROVAL_ID_SEPARATOR }
+
 // TYPES
 
 /** A change waiting for the user in the thread, as the server lists it (Mastra's `listSuspendedRuns`). */
@@ -39,9 +43,6 @@ type ToolPart = Extract<MessagePart, { readonly toolCallId: string }>
 
 /** The part `@mastra/ai-sdk` streams, and stores, for a tool that suspended its run. */
 export const SUSPENDED_PART_TYPE = 'data-tool-call-suspended'
-
-/** `@mastra/ai-sdk` names an approval `<runId>::<toolCallId>`, and reads its answer back by that id. */
-export const APPROVAL_ID_SEPARATOR = '::'
 
 // FUNCTIONS
 

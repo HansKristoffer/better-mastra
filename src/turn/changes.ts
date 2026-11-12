@@ -12,7 +12,10 @@ import type { RequestContext } from '@mastra/core/request-context'
 import { isToolUIPart, type UIMessage } from 'ai'
 import { sortBy, typedSwitch } from 'hanzio'
 
+import { APPROVAL_ID_SEPARATOR } from '../protocol/index.js'
 import type { ChatResume, ThreadKey } from './types.js'
+
+export { APPROVAL_ID_SEPARATOR }
 
 /** A change waiting for the user, found with `listSuspendedRuns`. */
 export type PendingChange =
@@ -45,9 +48,6 @@ export type TurnChanges =
 	| { readonly kind: 'continuation' }
 	/** The request answers something that does not wait in the caller's thread. */
 	| { readonly kind: 'expired' }
-
-/** `@mastra/ai-sdk` names an approval `<runId>::<toolCallId>` and reads its answer back by that id. */
-export const APPROVAL_ID_SEPARATOR = '::'
 
 /** What the model reads in place of a declined approval's result when the user wrote a new message instead. */
 export const MOVED_ON_REASON =

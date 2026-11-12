@@ -10,6 +10,8 @@
 
 import type { UIMessage, UIMessageChunk } from 'ai'
 
+import { USER_MESSAGE_PART } from '../protocol/index.js'
+
 /** How the stream ended for the client: read to the end, or the client went away first. */
 export type TurnStreamEnding = 'finished' | 'cancelled'
 
@@ -33,15 +35,10 @@ type SourceRead =
 	| { readonly kind: 'failed'; readonly error: unknown }
 
 /** The default only error text a client receives; the real error stays in the server log. */
+export { USER_MESSAGE_PART }
+
 export const TURN_ERROR_SENTENCE =
 	'The assistant could not answer right now. Please try again.'
-
-/**
- * The transient part that carries the turn's user message, right after the
- * answer's start. Mastra stores the message when the run ends, so a client
- * that reattaches mid-answer reads the question from here.
- */
-export const USER_MESSAGE_PART = 'data-user-message'
 
 /** Observational memory stores its own bookkeeping as `data-om-*` parts. */
 const OBSERVATIONAL_MEMORY_PART_PREFIX = 'data-om-'
