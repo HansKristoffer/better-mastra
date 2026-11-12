@@ -3,6 +3,7 @@ import { RequestContext } from '@mastra/core/request-context'
 import { createTool } from '@mastra/core/tools'
 import { z } from 'zod'
 
+import { CHANGE_UNREAD_SENTENCE, tallyUndo, undoTarget } from './changes.js'
 import { buildClientActionTools } from './clientActions.js'
 import {
 	deferredTool,
@@ -10,6 +11,7 @@ import {
 	rankToolsByName
 } from './deferredTools.js'
 import {
+	type DefinedTool,
 	defineTool,
 	TOOL_ERROR_SENTENCE,
 	ToolRefusal,
@@ -321,6 +323,126 @@ describe('renderToolManifestSource', () => {
 			{ stdin: new TextEncoder().encode(source) }
 		)
 		expect(formatted.stdout.toString()).toBe(source)
+	})
+})
+
+describe('a write tool with a change', () => {
+	/** A budget whose amount a tool sets, with the record Undo needs. */
+	function budgetTool(budget: { amount: number }, guard?: () => string) {
+		const writes: number[] = []
+		const unread: unknown[] = []
+		const defined = defineTool({
+			tool: {
+				id: 'budget_set',
+				description: 'Sets the budget.',
+				inputSchema: z.object({ amount: z.number() }),
+				execute: async ({ amount }: { amount: number }) => {
+					writes.push(amount)
+					budget.amount = amount
+
+					return { saved: true }
+				}
+			},
+			tier: 'approval',
+			change: {
+				confirmFields: [{ path: 'amount', format: { kind: 'amount' } }],
+				...(guard && { guard }),
+				readBefore: async () => ({ amount: budget.amount }),
+				toResult: ({ input, before, output }) => {
+					if (input.amount === 13) throw new Error('The read back failed.')
+
+					return {
+						...output,
+						undo: { previous: before.amount, next: input.amount }
+					}
+				},
+				onUnread: (error) => unread.push(error)
+			}
+		})
+
+		return { defined, writes, unread }
+	}
+	const call = (tool: DefinedTool['tool'], amount: number) =>
+		tool.execute!({ amount }, { requestContext: new RequestContext() })
+
+	test('should return the result with its undo record, read before the write', async () => {
+		const budget = { amount: 100 }
+		const { defined } = budgetTool(budget)
+
+		expect(await call(defined.tool, 250)).toEqual({
+			saved: true,
+			undo: { previous: 100, next: 250 }
+		})
+		expect(defined.manifest).toEqual({
+			confirmFields: [{ path: 'amount', format: { kind: 'amount' } }]
+		})
+	})
+
+	test("should not write when the guard refuses, and give the model the guard's sentence", async () => {
+		const { defined, writes } = budgetTool(
+			{ amount: 100 },
+			() => 'The month is closed.'
+		)
+
+		await expect(call(defined.tool, 250)).rejects.toThrow(
+			'The month is closed.'
+		)
+		expect(writes).toEqual([])
+	})
+
+	test('should never say nothing changed once the write happened', async () => {
+		const budget = { amount: 100 }
+		const { defined, unread } = budgetTool(budget)
+
+		await expect(call(defined.tool, 13)).rejects.toThrow(CHANGE_UNREAD_SENTENCE)
+		expect(budget.amount).toBe(13)
+		expect(unread).toHaveLength(1)
+	})
+})
+
+describe('undoTarget', () => {
+	const undo = (current: number | undefined, write = async () => {}) =>
+		undoTarget({ read: async () => current, previous: 100, next: 250, write })
+
+	test('should write the previous value back only while the target holds the value the change wrote', async () => {
+		const written: number[] = []
+		const outcomes = [
+			await undo(250, async () => void written.push(100)),
+			// Undo ran before
+			await undo(100, async () => void written.push(100)),
+			// The user changed it since
+			await undo(400, async () => void written.push(100)),
+			await undo(undefined, async () => void written.push(100)),
+			await undo(250, async () => {
+				throw new Error('Refused.')
+			})
+		]
+
+		expect(outcomes).toEqual([
+			'undone',
+			'alreadyUndone',
+			'changedSince',
+			'changedSince',
+			'failed'
+		])
+		expect(written).toEqual([100])
+		expect(tallyUndo(outcomes)).toEqual({
+			undone: 1,
+			alreadyUndone: 1,
+			changedSince: 2,
+			failed: 1
+		})
+	})
+
+	test('should compare values whatever order their keys come back in', async () => {
+		expect(
+			await undoTarget({
+				read: async () => ({ b: 2, a: 1 }),
+				previous: { a: 0, b: 0 },
+				next: { a: 1, b: 2 },
+				write: async () => {}
+			})
+		).toBe('undone')
 	})
 })
 
