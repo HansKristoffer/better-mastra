@@ -42,7 +42,8 @@ describe('defineTool', () => {
 				description: 'Renames the budget.',
 				inputSchema: z.object({ budgetId: z.string() }),
 				execute: async ({ budgetId }: { budgetId: string }) => {
-					if (budgetId === 'missing') throw new ToolRefusal('No budget has that id.')
+					if (budgetId === 'missing')
+						throw new ToolRefusal('No budget has that id.')
 					throw new Error('relation "budgets" does not exist')
 				}
 			},
@@ -61,7 +62,9 @@ describe('defineTool', () => {
 		).rejects.toThrow(TOOL_ERROR_SENTENCE)
 		expect(String(logged[0])).toContain('relation "budgets" does not exist')
 		expect(definition.meta).toEqual({ permission: 'manage' })
-		expect(buildToolManifest([definition]).budget_rename).not.toHaveProperty('meta')
+		expect(buildToolManifest([definition]).budget_rename).not.toHaveProperty(
+			'meta'
+		)
 	})
 
 	test('should hide inputs from the model and fill them from the request context', async () => {

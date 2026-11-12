@@ -85,6 +85,7 @@ export {
 	createThreadHandlers,
 	type DeleteThreadResult,
 	deleteThreadEverywhere,
+	ownsThread,
 	sweepAbandonedRuns,
 	type AbandonedRun,
 	sweepOldThreads,

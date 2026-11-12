@@ -71,7 +71,8 @@ describe('runChatTurn', () => {
 			expect.objectContaining({
 				toolName: LOOKUP_TOOL,
 				outcome: 'success',
-				tier: 'read'
+				tier: 'read',
+				durationMs: expect.any(Number)
 			})
 		])
 		expect(harness.finished[0]).toMatchObject({ toolCalls: 1, steps: 2 })

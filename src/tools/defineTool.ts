@@ -200,8 +200,7 @@ function maskedError(
 	error: unknown,
 	tool: string,
 	context:
-		| { requestContext?: RequestContext; abortSignal?: AbortSignal }
-		| undefined,
+		{ requestContext?: RequestContext; abortSignal?: AbortSignal } | undefined,
 	masking: ToolErrorMasking
 ): unknown {
 	const aborted =

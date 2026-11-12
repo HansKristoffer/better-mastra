@@ -28,6 +28,8 @@ export interface ToolSettledEvent {
 	readonly toolName: string
 	readonly toolCallId: string
 	readonly outcome: 'success' | 'error' | 'denied'
+	/** From the model's finished call to its result; undefined for a call the stream never showed whole. */
+	readonly durationMs: number | undefined
 }
 
 export interface TurnObserver {
@@ -57,6 +59,7 @@ export function createTurnObserver(
 ): TurnObserver {
 	const elapsedMs = handlers.elapsedMs ?? (() => 0)
 	const names = new Map<string, string>()
+	const startedAt = new Map<string, number>()
 	const waiting = new Set<string>()
 	let steps = 0
 	let toolCalls = 0
@@ -69,10 +72,12 @@ export function createTurnObserver(
 
 	const settle = (toolCallId: string, outcome: ToolSettledEvent['outcome']) => {
 		waiting.delete(toolCallId)
+		const started = startedAt.get(toolCallId)
 		handlers.onToolSettled?.({
 			toolName: names.get(toolCallId) ?? 'unknown',
 			toolCallId,
-			outcome
+			outcome,
+			durationMs: started === undefined ? undefined : elapsedMs() - started
 		})
 	}
 
@@ -90,6 +95,7 @@ export function createTurnObserver(
 					},
 					'tool-input-available': (input) => {
 						names.set(input.toolCallId, input.toolName)
+						startedAt.set(input.toolCallId, elapsedMs())
 						toolCalls += 1
 						waiting.add(input.toolCallId)
 					},
