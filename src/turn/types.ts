@@ -63,7 +63,7 @@ export interface ChatTurnPlan {
 	readonly maxOutputTokens?: number
 	/**
 	 * Set by the server; nothing a client sends reaches it. The AI SDK's
-	 * shape, as `createLlmRegistry().resolve()` returns it.
+	 * shape, as `createLlmRegistry().resolveLlm()` returns it.
 	 */
 	readonly providerOptions?: SharedV4ProviderOptions | ProviderOptions
 	/** Per-turn input processors, ahead of the agent's own. */
