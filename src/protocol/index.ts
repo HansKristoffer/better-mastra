@@ -17,7 +17,7 @@ export const USER_MESSAGE_PART = 'data-user-message'
 /** The transient data part a server streams after an answer: up to three replies the user can tap to send. */
 export const REPLY_SUGGESTIONS_PART = 'data-reply-suggestions'
 
-/** The transient data part a server streams before the replies: the answer is complete, though its finish waits for them. */
+/** The transient data part a server streams before the replies: the answer is complete and stored, and only the replies follow on its stream. */
 export const ANSWER_COMPLETE_PART = 'data-answer-complete'
 
 /** The part a run that a processor stopped ends with; its `reason` says why. */

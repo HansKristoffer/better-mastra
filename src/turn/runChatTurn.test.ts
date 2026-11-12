@@ -266,7 +266,7 @@ describe('runChatTurn', () => {
 		expect(harness.finished[0]?.outcome).toBe('budget_stop')
 	})
 
-	test('should mark the answer complete, then offer reply suggestions as transient parts before the finish', async () => {
+	test('should finish the answer first, then mark it complete and offer reply suggestions as transient parts', async () => {
 		// Given a suggestions agent that offers two replies
 		const harness = createHarness({
 			suggestions: [
@@ -282,9 +282,12 @@ describe('runChatTurn', () => {
 			await harness.run({ messages: [userMessage('Mad?')] })
 		)
 
-		// Then the answer is marked complete, the replies follow after the lock is released, and the finish comes last
+		// Then the answer's finish is not held: the answer is marked complete after it, once the lock is released, and the replies come last
 		const types = chunks.map((chunk) => chunk.type)
-		expect(types.indexOf(ANSWER_COMPLETE_PART)).toBeGreaterThan(-1)
+		expect(types.indexOf('finish')).toBeGreaterThan(-1)
+		expect(types.indexOf('finish')).toBeLessThan(
+			types.indexOf(ANSWER_COMPLETE_PART)
+		)
 		expect(types.indexOf(ANSWER_COMPLETE_PART)).toBeLessThan(
 			types.indexOf(REPLY_SUGGESTIONS_PART)
 		)
@@ -295,6 +298,25 @@ describe('runChatTurn', () => {
 			data: { suggestions: ['Og i september?', 'Hvordan sparer jeg?'] },
 			transient: true
 		})
+		expect(chunks.at(-1)?.type).toBe(REPLY_SUGGESTIONS_PART)
+	})
+
+	test('should hold the finish until the reply suggestions are in when asked to', async () => {
+		const harness = createHarness({
+			suggestions: [textReply('{"suggestions":["Og i september?"]}')],
+			overrides: {
+				replySuggestions: { agentId: 'chat-suggestions', holdFinish: true }
+			}
+		})
+
+		const { chunks } = await readTurn(
+			await harness.run({ messages: [userMessage('Mad?')] })
+		)
+
+		const types = chunks.map((chunk) => chunk.type)
+		expect(types.indexOf(ANSWER_COMPLETE_PART)).toBeLessThan(
+			types.indexOf(REPLY_SUGGESTIONS_PART)
+		)
 		expect(chunks.at(-1)?.type).toBe('finish')
 	})
 

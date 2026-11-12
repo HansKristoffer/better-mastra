@@ -139,4 +139,49 @@ describe('the turn metadata and scoring', () => {
 		expect(scored).toHaveLength(2)
 		expect(scored[1]?.labels.arm).toBe(scored[0]?.labels.arm)
 	})
+
+	test('should read the thread again after the answer only when it has a title or a value to write', async () => {
+		// Given a turn that counts the thread reads made after it finished
+		const countReadsAfterFinish = async (
+			overrides: Parameters<typeof createHarness>[0],
+			turns: number
+		) => {
+			let reads = 0
+			let readsAtFinish = 0
+			const harness = createHarness({
+				...overrides,
+				overrides: {
+					...overrides?.overrides,
+					sinks: {
+						turnFinished: () => {
+							readsAtFinish = reads
+						}
+					}
+				}
+			})
+			const read = harness.memory.getThreadById.bind(harness.memory)
+			harness.memory.getThreadById = (args) => {
+				reads += 1
+
+				return read(args)
+			}
+			const messages = [userMessage('Første')]
+
+			for (let turn = 0; turn < turns; turn += 1) {
+				const { message } = await readTurn(await harness.run({ messages }))
+				messages.push(message!, userMessage('Næste'))
+			}
+
+			return reads - readsAtFinish
+		}
+
+		// A turn without a title or metadata reads nothing after the answer
+		expect(
+			await countReadsAfterFinish({ overrides: { deriveTitle: false } }, 1)
+		).toBe(0)
+		// A new thread gets its title, which takes the read
+		expect(await countReadsAfterFinish({}, 1)).toBe(1)
+		// A thread that has its title needs nothing more
+		expect(await countReadsAfterFinish({}, 2)).toBe(0)
+	})
 })

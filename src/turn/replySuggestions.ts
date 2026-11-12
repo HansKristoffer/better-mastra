@@ -2,9 +2,9 @@
  * The replies offered above the input after an answer: a fast model reads the
  * user's message and the answer, and returns up to three short replies the
  * user can tap, or none. They stream on the answer's own stream after its
- * thread lock is released, as the transient `data-reply-suggestions` part,
- * sent again each time the list grows. A failed or slow call offers nothing
- * and never fails the turn.
+ * `finish` and after its thread lock is released, as the transient
+ * `data-reply-suggestions` part, sent again each time the list grows. A
+ * failed or slow call offers nothing and never fails the turn.
  */
 
 import { Agent } from '@mastra/core/agent'

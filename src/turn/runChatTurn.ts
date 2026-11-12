@@ -190,7 +190,13 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 		 */
 		readonly messages: readonly UIMessage[]
 		readonly threadKey: ThreadKey
-		/** The stored thread; null before its first turn. Its metadata holds the model arm. */
+		/**
+		 * The stored thread as the turn read it for its ownership check, so
+		 * `prepare` need not read it again; null before its first turn. Its
+		 * metadata holds the model arm. It was read just before the thread lock
+		 * was claimed: what a turn that ended between that read and the claim
+		 * wrote is not in it.
+		 */
 		readonly thread: StorageThreadType | null
 		readonly signal: AbortSignal
 	}): Promise<PreparedChatTurn>
@@ -211,11 +217,18 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 	/** The thread's title from its messages, written once; `false` writes none. */
 	readonly deriveTitle?:
 		false | ((messages: readonly UIMessage[]) => string | null)
-	/** Replies offered after an answer, from this agent. */
+	/**
+	 * Replies offered after an answer, from this agent. They stream after the
+	 * answer's `finish`, so the answer never waits for them: the chat session
+	 * in `better-mastra/client` ends its turn at the answer and takes the
+	 * replies as they arrive.
+	 */
 	readonly replySuggestions?: {
 		readonly agentId: string
 		readonly timeoutMs?: number
 		readonly requestContext?: (scope: TScope) => AnyRequestContext
+		/** Holds the answer's `finish` until the replies are in, for a client that stops reading at `finish`. Default false. */
+		readonly holdFinish?: boolean
 	}
 	/** The only error text the client receives. */
 	readonly errorSentence?: string
@@ -526,17 +539,23 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 
 		deps.sinks?.turnFinished?.(finished)
 
-		// Awaited: the client refreshes its thread list when the stream closes.
-		await persistThreadMetadata({
-			memory: deps.memory,
-			key: threadKey,
-			title: deriveTitle === false ? null : deriveTitle(turn.messages),
-			...(prepared.threadMetadata && { metadata: prepared.threadMetadata })
-		}).catch((error: unknown) =>
-			logger.error('[better-mastra] the thread metadata was not written', {
-				error
-			})
-		)
+		const title = deriveTitle === false ? null : deriveTitle(turn.messages)
+
+		// Nothing to write means no read either: a thread that has its title
+		// and already holds the turn's values, or a turn that gives neither.
+		if (needsThreadMetadata(turn.thread, title, prepared.threadMetadata)) {
+			// Awaited: the client refreshes its thread list when the stream closes.
+			await persistThreadMetadata({
+				memory: deps.memory,
+				key: threadKey,
+				title,
+				...(prepared.threadMetadata && { metadata: prepared.threadMetadata })
+			}).catch((error: unknown) =>
+				logger.error('[better-mastra] the thread metadata was not written', {
+					error
+				})
+			)
+		}
 
 		if (finished.outcome === 'answered') deps.sinks?.scoreTurn?.(finished)
 	}
@@ -591,11 +610,32 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			}),
 			close,
 			...(epilogue && { epilogue }),
+			...(suggestions?.holdFinish && { holdFinish: true }),
 			...(deps.errorSentence && { errorSentence: deps.errorSentence }),
 			onInternalError: (error) =>
 				logger.error('[better-mastra] the turn stream failed', { error })
 		})
 	}
+}
+
+/**
+ * Whether the turn has a title or a metadata value the thread, as read when
+ * the turn started, does not hold yet. A thread that did not exist then needs
+ * whatever the turn gives.
+ */
+function needsThreadMetadata(
+	thread: StorageThreadType | null,
+	title: string | null,
+	metadata: Readonly<Record<string, unknown>> | undefined
+): boolean {
+	const needsTitle = Boolean(title) && !thread?.title?.trim()
+
+	return (
+		needsTitle ||
+		Object.entries(metadata ?? {}).some(
+			([key, value]) => thread?.metadata?.[key] !== value
+		)
+	)
 }
 
 /**
