@@ -355,6 +355,60 @@ describe('toolInputSchema', () => {
 			issues: [{ message: 'At most 2 items in one change.' }]
 		})
 	})
+
+	test('should leave out the regular expression and the name of a string format, and still validate with them', () => {
+		const input = z.object({
+			id: z.uuid().describe('The budget'),
+			from: z.string().datetime(),
+			day: z.iso.date(),
+			email: z.email(),
+			month: z.string().regex(/^\d{4}-\d{2}$/),
+			kind: z.enum(['fixed', 'variable']),
+			amount: z.number().min(0).max(100)
+		})
+		const properties = (schema: ReturnType<typeof toolInputSchema>) =>
+			(
+				schema['~standard'].jsonSchema.input({
+					target: 'draft-07'
+				} as never) as {
+					properties: Record<string, Record<string, unknown>>
+				}
+			).properties
+		const compact = toolInputSchema(input)
+
+		// A standard format loses its regular expression; only a date or time keeps its name
+		expect(properties(compact)).toEqual({
+			id: { type: 'string', description: 'The budget' },
+			from: { type: 'string', format: 'date-time' },
+			day: { type: 'string', format: 'date' },
+			email: { type: 'string' },
+			// A pattern the schema's author wrote says what the string holds
+			month: { type: 'string', pattern: '^\\d{4}-\\d{2}$' },
+			kind: { type: 'string', enum: ['fixed', 'variable'] },
+			amount: { type: 'number', minimum: 0, maximum: 100 }
+		})
+		expect(JSON.stringify(properties(compact)).length).toBeLessThan(
+			JSON.stringify(
+				properties(toolInputSchema(input, { stringChecks: 'full' }))
+			).length / 3
+		)
+		expect(
+			properties(toolInputSchema(input, { stringChecks: 'full' })).id
+		).toMatchObject({ format: 'uuid', pattern: expect.any(String) })
+
+		// The server still checks the format
+		expect(
+			compact['~standard'].validate({
+				id: 'not-a-uuid',
+				from: '2026-10-20T10:00:00Z',
+				day: '2026-10-20',
+				email: 'a@b.dk',
+				month: '2026-10',
+				kind: 'fixed',
+				amount: 1
+			})
+		).toMatchObject({ issues: [{ path: ['id'] }] })
+	})
 })
 
 describe('toJsonProjection', () => {

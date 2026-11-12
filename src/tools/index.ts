@@ -41,6 +41,7 @@ export {
 	coerceDateStrings,
 	jsonSchemaInput,
 	type ToolInputSchema,
+	type ToolInputSchemaOptions,
 	toolInputSchema,
 	withHiddenInputs
 } from './toolInputSchema.js'
