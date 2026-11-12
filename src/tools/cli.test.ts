@@ -56,7 +56,10 @@ Arguments:
   [export]  Export holding the defineTool array (default: "tools")
 
 Options:
-  -h, --help  Show help
+  --name <string>  Name of the generated export (default: "toolManifest")
+  --type <string>  Annotate the export with <Type>:<module> instead of as const
+  --check          Write nothing; fail when <out> is out of date
+  -h, --help       Show help
 `,
 			stderr: ''
 		})
@@ -80,6 +83,35 @@ Options:
 		expect(readFileSync(join(dir, 'manifest.ts'), 'utf8')).toBe(
 			renderToolManifestSource(buildToolManifest([tool]))
 		)
+	})
+
+	test('names and types the export, and checks it without writing', () => {
+		const args = [
+			'tools.ts',
+			'typed.ts',
+			'assistantTools',
+			'--name',
+			'coworkerTools',
+			'--type',
+			'CoworkerManifest:./types'
+		]
+		expect(cli(...args, '--check')).toEqual({
+			exitCode: 1,
+			stdout: '',
+			stderr:
+				'typed.ts is out of date: run better-mastra-tool-manifest without --check.\n'
+		})
+		expect(cli(...args).exitCode).toBe(0)
+		const written = readFileSync(join(dir, 'typed.ts'), 'utf8')
+		expect(written).toContain("import type { CoworkerManifest } from './types'")
+		expect(written).toContain(
+			'export const coworkerTools: CoworkerManifest = {'
+		)
+		expect(cli(...args, '--check')).toEqual({
+			exitCode: 0,
+			stdout: 'typed.ts is up to date.\n',
+			stderr: ''
+		})
 	})
 
 	test('fails on a missing export', () => {
