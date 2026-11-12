@@ -156,6 +156,23 @@ plan: {
 
 Anthropic takes four breakpoints per request and the conversation uses two, so at most two blocks are marked: of more, only the last two are, and the earlier ones still sit in the cached prefix. Join blocks yourself to choose where the two breakpoints go.
 
+The plan also takes `outputProcessors`, for what code can fix in the answer without a rule in the prompt. A `processOutputStream` that rewrites a `text-delta` changes the text the client streams, a reconnect replays, the thread stores and `sinks.turnFinished` reports alike:
+
+```ts
+plan: {
+	// …
+	outputProcessors: [{
+		id: 'plain-dashes',
+		processOutputStream: async ({ part }) =>
+			part.type === 'text-delta'
+				? { ...part, payload: { ...part.payload, text: part.payload.text.replace(/[–—]/g, '-') } }
+				: part
+	}]
+}
+```
+
+It sees one delta at a time, so a rewrite of something longer than a character (an id to strip) must keep the unfinished end of a delta back in `state` until the next one arrives.
+
 `prepare` gets the stored `thread` the turn already read for its ownership check, so it need not read it again. After the answer the turn reads the thread once more only when it has a title or a `threadMetadata` value the thread does not hold yet. `asStepModel(model)` types a model for a processor that swaps the step's model (`processInputStep` returning `{ model }`).
 
 ## Tools (`better-mastra/tools`)
@@ -254,7 +271,7 @@ await storage.init() // once, in the process that migrates
 await shutdown({ mastra, memory, storage })
 ```
 
-`pgStorage` keeps Mastra in its own schema (`mastra`, plus `mastra_observability`), turns keep-alive on and logs a severed idle connection instead of crashing. `storage.postgres` is the same store typed as `@mastra/pg`'s `PostgresStoreVNext` (`PostgresStore` with `observabilitySchema: false`), for code that names that type. `createMemory` keeps message history in thread scope; pass `observer` to turn on observational memory. `checkHealth({ checks })` pings stores and checks provider keys without spending tokens.
+`pgStorage` keeps Mastra in its own schema (`mastra`, plus `mastra_observability`), turns keep-alive on and logs a severed idle connection instead of crashing. `storage.postgres` is the same store typed as `@mastra/pg`'s `PostgresStoreVNext` (`PostgresStore` with `observabilitySchema: false`), for code that names that type. `createMemory` keeps message history in thread scope; pass `observer` to turn on observational memory. `observationMessageTokens` (15,000) is when observations replace raw messages, and `reflectionObservationTokens` (Mastra's 40,000) is when the Reflector condenses the observations: lower it to keep a long-running thread's prompt small. `checkHealth({ checks })` pings stores and checks provider keys without spending tokens.
 
 `pgStorage` and `libsqlStorage` from the package root are the same presets loaded on call (they return promises); they stay for compatibility.
 
