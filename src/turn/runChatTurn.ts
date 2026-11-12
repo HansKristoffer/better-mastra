@@ -43,6 +43,7 @@ import {
 	toUserFacingMessage,
 	toUserFacingStream
 } from './stream.js'
+import type { RunUsage } from '../usage/stream.js'
 import { deriveThreadTitle, persistThreadMetadata } from './title.js'
 import {
 	type AnyRequestContext,
@@ -107,14 +108,24 @@ export interface TurnFinishedEvent<TScope> extends TurnSummary {
 	readonly newMessageText: string
 	/** Everything the answer wrote. Keep it out of analytics. */
 	readonly answerText: string
+	/**
+	 * The run's usage, as `sinks.usage` got it; undefined when the run
+	 * reported none before its stream closed, as a stopped run may not.
+	 */
+	readonly usage:
+		Pick<TurnUsageEvent<TScope>, 'totalUsage' | 'steps'> | undefined
 }
 
+/**
+ * The run's usage, in the shapes `readStreamTextUsage`, `llms.cost` and
+ * `withUsage().meterStream` take.
+ */
 export interface TurnUsageEvent<TScope> {
 	readonly scope: TScope
 	readonly threadKey: ThreadKey
 	readonly labels: TurnLabels
 	readonly modelId: string
-	readonly totalUsage: unknown
+	readonly totalUsage: RunUsage | undefined
 	readonly steps: readonly unknown[]
 }
 
@@ -196,7 +207,7 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 				) => Record<string, unknown>
 		  }
 	readonly sinks?: ChatTurnSinks<TScope>
-	onFirstText?(elapsedMs: number, scope: TScope): void
+	onFirstText?(elapsedMs: number, scope: TScope, labels: TurnLabels): void
 	/** The thread's title from its messages, written once; `false` writes none. */
 	readonly deriveTitle?:
 		false | ((messages: readonly UIMessage[]) => string | null)
@@ -208,7 +219,7 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 	}
 	/** The only error text the client receives. */
 	readonly errorSentence?: string
-	/** The longest user message, in characters. Default 4,000. */
+	/** The longest user message, in characters; a longer one is refused with `message_too_long`. Default 32,000. */
 	readonly maxMessageLength?: number
 	readonly sendReasoning?: boolean
 	readonly logger?: ChatTurnLogger
@@ -287,9 +298,10 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 	onScope: (scope: TScope) => void
 ): Promise<ChatTurnResult> {
 	const startedAt = (deps.now ?? Date.now)()
-	const messages = readMessages(request.body, deps.maxMessageLength ?? 4_000)
+	const messages = readMessages(request.body, deps.maxMessageLength ?? 32_000)
 
-	if (!messages) return refused('invalid_request')
+	if (messages === 'system') return refused('invalid_request')
+	if (messages === 'too_long') return refused('message_too_long')
 
 	const scope = await atStage('scope', () => deps.resolveScope(request))
 
@@ -360,6 +372,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	logger: ChatTurnLogger
 ): Promise<ChatTurnResult> {
 	const { request, scope, threadKey } = turn
+	const waiting = readWaitingChanges(turn, deps)
 	const prepared = await atStage('preparation', () =>
 		deps.prepare({
 			scope,
@@ -381,6 +394,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	const memory = { thread: threadKey.threadId, resource: threadKey.resourceId }
 	const { changes, pending } = await classifyChanges(
 		turn,
+		waiting,
 		requestContext,
 		memory,
 		deps,
@@ -405,7 +419,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	const elapsedMs = () => (deps.now ?? Date.now)() - turn.startedAt
 	const observer = createTurnObserver({
 		elapsedMs,
-		onFirstText: (ms) => deps.onFirstText?.(ms, scope),
+		onFirstText: (ms) => deps.onFirstText?.(ms, scope, labels),
 		onToolSettled: (event) =>
 			deps.sinks?.toolSettled?.({
 				...event,
@@ -419,6 +433,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	// tool's error is the model's to read and `sinks.toolSettled` reports it;
 	// only an `error` chunk is the turn failing.
 	const reportedErrors: unknown[] = []
+	let usage: TurnFinishedEvent<TScope>['usage']
 	const observeErrors = (chunk: UIMessageChunk) => {
 		if (chunk.type === 'tool-output-error') {
 			reportedErrors.shift()
@@ -454,15 +469,13 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			...(prepared.tracingOptions && {
 				tracingOptions: prepared.tracingOptions as never
 			}),
-			onFinish: (event: { totalUsage: unknown; steps: readonly unknown[] }) =>
-				deps.sinks?.usage?.({
-					scope,
-					threadKey,
-					labels,
-					modelId,
-					totalUsage: event.totalUsage,
-					steps: event.steps
-				})
+			onFinish: (event: {
+				totalUsage: RunUsage | undefined
+				steps: readonly unknown[]
+			}) => {
+				usage = { totalUsage: event.totalUsage, steps: event.steps }
+				deps.sinks?.usage?.({ scope, threadKey, labels, modelId, ...usage })
+			}
 		},
 		// Called for a tool's error too, right before its `tool-output-error`
 		// chunk: `observeErrors` decides which it was once the chunk passes.
@@ -499,7 +512,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		await turn.release()
 
 		const finished: TurnFinishedEvent<TScope> = {
-			...observer.summary({ ending, userStopped: request.signal.aborted }),
+			...observer.summary({ ending, ...stopOf(request.signal) }),
 			scope,
 			threadKey,
 			labels,
@@ -507,7 +520,8 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			durationMs: elapsedMs(),
 			ending,
 			newMessageText,
-			answerText: observer.writtenText()
+			answerText: observer.writtenText(),
+			usage
 		}
 
 		deps.sinks?.turnFinished?.(finished)
@@ -534,7 +548,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		(async (send: (chunk: UIMessageChunk) => void) => {
 			const { outcome } = observer.summary({
 				ending: 'finished',
-				userStopped: request.signal.aborted
+				...stopOf(request.signal)
 			})
 			const answer = observer.answerToFollow()
 			const question = newMessageText.trim()
@@ -614,8 +628,31 @@ async function forgetAnswerAfter(
 	}
 }
 
+/**
+ * The changes waiting in the thread, read while the turn is prepared; both
+ * only read. A thread never written has none, so its first turn reads
+ * nothing. Undefined when the app keeps no waiting changes.
+ */
+function readWaitingChanges<TAuth, TBody extends ChatTurnBody, TScope>(
+	turn: AdmittedTurn<TAuth, TBody, TScope>,
+	deps: ChatTurnDeps<TAuth, TBody, TScope>
+): Promise<readonly PendingChange[]> | undefined {
+	if (deps.pendingChanges === false) return undefined
+
+	if (turn.thread === null) return Promise.resolve([])
+
+	const read = atStage('thread', () =>
+		listPendingChanges(deps.mastra.getAgentById(deps.agentId), turn.threadKey)
+	)
+	// A failed preparation leaves it unawaited; awaiting it later still throws.
+	read.catch(() => {})
+
+	return read
+}
+
 async function classifyChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 	turn: AdmittedTurn<TAuth, TBody, TScope>,
+	waiting: Promise<readonly PendingChange[]> | undefined,
 	requestContext: RequestContext,
 	memory: { readonly thread: string; readonly resource: string },
 	deps: ChatTurnDeps<TAuth, TBody, TScope>,
@@ -627,7 +664,7 @@ async function classifyChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 }> {
 	const { body, signal } = turn.request
 
-	if (deps.pendingChanges === false) {
+	if (waiting === undefined) {
 		return {
 			changes: body.resume
 				? { kind: 'resume', resume: body.resume }
@@ -636,21 +673,18 @@ async function classifyChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 		}
 	}
 
-	const agent = deps.mastra.getAgentById(deps.agentId)
-	const pending = await atStage('thread', () =>
-		listPendingChanges(agent, turn.threadKey)
-	)
+	const pending = await waiting
 	const changes = classifyTurnChanges(
 		{ messages: turn.messages, resume: body.resume },
 		pending
 	)
 
 	if (changes.kind === 'newMessage' && changes.waiting.length > 0) {
-		const { movedOnData } = deps.pendingChanges ?? {}
+		const { movedOnData } = deps.pendingChanges || {}
 
 		await atStage('tool', () =>
 			moveOnFromWaitingChanges(changes.waiting, {
-				agent,
+				agent: deps.mastra.getAgentById(deps.agentId),
 				memory,
 				requestContext,
 				signal,
@@ -669,28 +703,43 @@ async function classifyChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 }
 
 /**
- * The messages the turn hands to Mastra, or undefined for a body a client must
- * never send: a system message, or a user message over the maximum length.
- * Observational memory's parts a client sent back are dropped. A client
- * tool's error reaches the model as Mastra's `error-text` result.
+ * The messages the turn hands to Mastra, or why the body is refused: a system
+ * message, which a client must never send, or a user message over the
+ * maximum length. Observational memory's parts a client sent back are
+ * dropped. A client tool's error reaches the model as Mastra's `error-text`
+ * result.
  */
 function readMessages(
 	body: ChatTurnBody,
 	maxMessageLength: number
-): UIMessage[] | undefined {
-	const isRefused = body.messages.some(
+): UIMessage[] | 'system' | 'too_long' {
+	if (body.messages.some((message) => message.role === 'system'))
+		return 'system'
+
+	const isTooLong = body.messages.some(
 		(message) =>
-			message.role === 'system' ||
-			(message.role === 'user' && textOf(message).length > maxMessageLength)
+			message.role === 'user' && textOf(message).length > maxMessageLength
 	)
 
-	return isRefused ? undefined : body.messages.map(toUserFacingMessage)
+	return isTooLong ? 'too_long' : body.messages.map(toUserFacingMessage)
 }
 
 function textOf(message: UIMessage | undefined): string {
 	return (message?.parts ?? [])
 		.flatMap((part) => (part.type === 'text' ? [part.text] : []))
 		.join('')
+}
+
+/** Who ended an aborted run: the server (`TurnAbortReason` `superseded` or `shutdown`) or the user, whose Stop or disconnect any other abort is. */
+function stopOf(signal: AbortSignal): {
+	readonly userStopped: boolean
+	readonly interrupted: boolean
+} {
+	const interrupted =
+		signal.aborted &&
+		(signal.reason === 'superseded' || signal.reason === 'shutdown')
+
+	return { userStopped: signal.aborted && !interrupted, interrupted }
 }
 
 async function atStage<T>(
