@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.9.0](https://github.com/HansKristoffer/better-mastra/compare/v0.8.0...v0.9.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* **models:** remove the prompt-cache module
+* **models:** better-mastra/models no longer exports cacheMarker, markConversationForCache, movePerTurnContext, PER_TURN_SYSTEM_MESSAGE_OPTIONS, perTurnSystemMessage, promptCacheMiddleware, withPromptCache or CacheProvider. The chat turn's own markers (better-mastra/turn) replace them, and the plan's signal replaces per-turn system messages.
+
+### Features
+
+* **react:** rules and markdownit on StreamingMarkdown ([5d73de4](https://github.com/HansKristoffer/better-mastra/commit/5d73de4c95dd4f1c955addf0b525dc7da8e1e894))
+* **resumable:** createThreadLock, one turn per thread across replicas ([3086ec2](https://github.com/HansKristoffer/better-mastra/commit/3086ec28dc232e08a2e13d6b11516ac4c6c87786))
+* **turn:** providerOptions on createReplySuggestionsAgent ([944e98b](https://github.com/HansKristoffer/better-mastra/commit/944e98b950d57e4196e82a8d0090532a7cd4706d))
+* **turn:** stageMs and streamStartedMs on the finished turn ([944e98b](https://github.com/HansKristoffer/better-mastra/commit/944e98b950d57e4196e82a8d0090532a7cd4706d))
+
+
+### Bug Fixes
+
+* **client:** no stray asterisk after a lone * in streaming markdown ([d9cc226](https://github.com/HansKristoffer/better-mastra/commit/d9cc2262060e07a5fd761929443352535b3f14d9))
+* **evals:** a turn that ends in an error part or times out is recorded as failed ([de3d656](https://github.com/HansKristoffer/better-mastra/commit/de3d656028a361beb8b7cbb65048c38ba37f3632))
+* failing sinks, Anthropic cache breakpoints and stale locks; feat: a thread lock ([b07fa7f](https://github.com/HansKristoffer/better-mastra/commit/b07fa7f93f633e0f40639eff6b7bf52d0dc40c3d))
+* **mcp-relay:** the tool allowlist matches own keys only ([a7dce81](https://github.com/HansKristoffer/better-mastra/commit/a7dce81b8cac079d5665032529e49417ea3fa4a3))
+* **models:** at most four cache breakpoints on the direct Anthropic route ([ff80d84](https://github.com/HansKristoffer/better-mastra/commit/ff80d84f914e39a6158b98b2f8e6b7caa2d68e32))
+* **resumable:** a turn another one replaced leaves the newer turn's locator alone ([3086ec2](https://github.com/HansKristoffer/better-mastra/commit/3086ec28dc232e08a2e13d6b11516ac4c6c87786))
+* **turn:** a sink that throws no longer cuts the answer or keeps the thread lock ([944e98b](https://github.com/HansKristoffer/better-mastra/commit/944e98b950d57e4196e82a8d0090532a7cd4706d))
+* **usage:** see a 429 or a 402 behind the AI SDK's own retries ([34f4203](https://github.com/HansKristoffer/better-mastra/commit/34f4203ccafac6343ff7880a84238caf5957666f))
+
+
+### Performance Improvements
+
+* **react:** the markdown renderer keeps its parser and renderer across reveal steps ([5d73de4](https://github.com/HansKristoffer/better-mastra/commit/5d73de4c95dd4f1c955addf0b525dc7da8e1e894))
+
+
+### Code Refactoring
+
+* **models:** remove the prompt-cache module ([ff80d84](https://github.com/HansKristoffer/better-mastra/commit/ff80d84f914e39a6158b98b2f8e6b7caa2d68e32))
+
 ## [0.8.0](https://github.com/HansKristoffer/better-mastra/compare/v0.7.0...v0.8.0) (2026-11-13)
 
 
