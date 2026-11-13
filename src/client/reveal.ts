@@ -26,6 +26,8 @@ export const MAX_FADING_WORDS = 24
 
 /** A blank line before text that starts at the margin: an indented line after a blank line continues a list item. */
 const PARAGRAPH_BREAK = /\n{2,}(?=\S)/
+/** A blank line: where one paragraph's emphasis ends. */
+const PARAGRAPH_GAP = /\n[ \t]*\n/
 const CODE_FENCE = '```'
 
 /** Schemes and shapes a chat link may use. Anything else loses its href. */
@@ -179,9 +181,12 @@ function closeOpenMarkers(text: string): string {
 
 	const outsideFences = text.replaceAll(CODE_FENCE, '')
 	const inlineCode = countOccurrences(outsideFences, '`') % 2 === 1 ? '`' : ''
-	const outsideCode = outsideFences
+	// Emphasis never crosses a blank line, so only the last paragraph can
+	// leave any open; an asterisk between spaces is a sign, not a marker.
+	const outsideCode = (outsideFences.split(PARAGRAPH_GAP).at(-1) ?? '')
 		.replace(/`[^`]*`?/g, '')
 		.replace(/^[ \t]*[*+-][ \t]+/gm, '')
+		.replace(/(^|\s)\*(?=\s|$)/g, '$1')
 	const bold = countOccurrences(outsideCode, '**') % 2 === 1 ? '**' : ''
 	const italic =
 		countOccurrences(outsideCode.replaceAll('**', ''), '*') % 2 === 1 ? '*' : ''
