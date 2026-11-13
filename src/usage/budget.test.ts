@@ -132,3 +132,38 @@ test('an already-aborted import rejects new admission', async () => {
 		).rejects.toThrow('cancelled import')
 	})
 })
+
+test('a 429 the AI SDK retried first still counts as rate limited', async () => {
+	// Given a provider call that ends as the SDK's RetryError around a 429
+	const budget = createModelBudget()
+	const { APICallError, RetryError } = await import('ai')
+	const rateLimited = new APICallError({
+		message: 'Too many requests',
+		url: 'https://openrouter.ai/api/v1/chat/completions',
+		requestBodyValues: {},
+		statusCode: 429,
+		responseHeaders: { 'retry-after': '1' }
+	})
+
+	// When it fails inside a budget
+	await budget.withBudget(new AbortController().signal, async () => {
+		await expect(
+			budget.runProviderCall(
+				async () => {
+					throw new RetryError({
+						message: 'Failed after 3 attempts.',
+						reason: 'maxRetriesExceeded',
+						errors: [rateLimited, rateLimited, rateLimited]
+					})
+				},
+				{ provider: 'openrouter' }
+			)
+		).rejects.toThrow('Failed after 3 attempts.')
+
+		// Then the lane knows it was a rate limit
+		expect(budget.readMetrics()[0]).toMatchObject({
+			failed: 1,
+			rateLimited: 1
+		})
+	})
+})
