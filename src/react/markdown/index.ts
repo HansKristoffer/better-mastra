@@ -25,10 +25,12 @@ import {
 	View
 } from 'react-native'
 import MarkdownDisplay, {
+	MarkdownIt,
 	type MarkdownProps,
 	type RenderRules,
 	renderRules
 } from 'react-native-markdown-display'
+import { once } from 'hanzio'
 
 import {
 	createWordFadeTracker,
@@ -59,6 +61,15 @@ export interface StreamingMarkdownProps {
 	readonly onLinkPress?: (url: string) => boolean
 	/** Which links are safe: `'all'` (default) web, mail, phone and relative links (`isSafeUrl`), `'web'` only `http(s)` (`isWebUrl`). */
 	readonly safeLinks?: 'all' | 'web'
+	/**
+	 * The app's own render rules (a code block, a table), for the streaming
+	 * and the finished answer alike. Keep the object's identity stable: a new
+	 * one rebuilds every paragraph's renderer. Images still never load, and
+	 * while the answer streams the fade draws `text` and `body` itself.
+	 */
+	readonly rules?: RenderRules
+	/** The app's own markdown-it parser; keep its identity stable too. Default: the renderer's own settings, built once. */
+	readonly markdownit?: MarkdownProps['markdownit']
 }
 
 /**
@@ -78,8 +89,21 @@ interface FadePass {
 
 /** The package's default export: a CommonJS module, so the NodeNext build cannot see its type. */
 const Markdown = MarkdownDisplay as unknown as ComponentType<
-	MarkdownProps & { readonly children?: string }
+	MarkdownProps & {
+		readonly children?: string
+		readonly allowedImageHandlers?: readonly string[]
+		readonly topLevelMaxExceededItem?: ReactNode
+	}
 >
+
+/**
+ * The renderer's props it otherwise builds anew on every render (a parser,
+ * a list, an element), each of which makes it rebuild its whole renderer:
+ * with these the last paragraph only parses again on a reveal step.
+ */
+const defaultParser = once(() => MarkdownIt({ typographer: true }))
+const NO_IMAGE_HANDLERS: readonly string[] = []
+const NO_OVERFLOW_ITEM = null
 
 /** The answer never loads an image, whatever its markdown says. */
 const NO_IMAGES: RenderRules = { image: () => null }
@@ -104,7 +128,9 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
 	style,
 	reducedMotion = false,
 	onLinkPress,
-	safeLinks = 'all'
+	safeLinks = 'all',
+	rules,
+	markdownit
 }: StreamingMarkdownProps): ReactNode {
 	const shown = useWordReveal(text, streaming)
 	const source = streaming ? trimIncompleteMarkdown(shown) : shown
@@ -124,7 +150,9 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
 				source: paragraph,
 				style,
 				fadeIn,
-				onLinkPress: opensLink
+				onLinkPress: opensLink,
+				rules,
+				markdownit
 			})
 		)
 	)
@@ -134,24 +162,35 @@ const MarkdownParagraph = memo(function MarkdownParagraph({
 	source,
 	style,
 	fadeIn,
-	onLinkPress
+	onLinkPress,
+	rules: appRules,
+	markdownit
 }: {
 	readonly source: string
 	readonly style: MarkdownStyles | undefined
 	readonly fadeIn: boolean
 	readonly onLinkPress: (url: string) => boolean
+	readonly rules: RenderRules | undefined
+	readonly markdownit: MarkdownProps['markdownit'] | undefined
 }): ReactNode {
 	// A paragraph on screen before the fade starts has been read; one mounted
 	// while it runs fades from its first word.
 	const [pass] = useState(() => createFadePass({ settled: !fadeIn }))
 	const rules = useMemo(
-		() => (fadeIn ? fadeRules(pass) : NO_IMAGES),
-		[fadeIn, pass]
+		() => ({ ...appRules, ...(fadeIn ? fadeRules(pass) : NO_IMAGES) }),
+		[appRules, fadeIn, pass]
 	)
 
 	return createElement(
 		Markdown,
-		{ ...(style ? { style } : {}), rules, onLinkPress },
+		{
+			...(style ? { style } : {}),
+			rules,
+			onLinkPress,
+			markdownit: markdownit ?? defaultParser(),
+			allowedImageHandlers: NO_IMAGE_HANDLERS,
+			topLevelMaxExceededItem: NO_OVERFLOW_ITEM
+		},
 		source
 	)
 })
