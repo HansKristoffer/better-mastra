@@ -1,4 +1,4 @@
-import { APICallError } from 'ai'
+import { APICallError, RetryError } from 'ai'
 
 /**
  * A provider pre-rejects a request its balance cannot cover with HTTP 402
@@ -20,7 +20,17 @@ export class AiBillingError extends Error {
 
 export function toAiBillingError(error: unknown) {
 	if (error instanceof AiBillingError) return error
-	if (APICallError.isInstance(error) && error.statusCode === 402)
-		return new AiBillingError(error.statusCode, error)
+	const attempt = lastAttemptError(error)
+	if (APICallError.isInstance(attempt) && attempt.statusCode === 402)
+		return new AiBillingError(attempt.statusCode, attempt)
 	return null
+}
+
+/**
+ * The provider's own error. The AI SDK retries a failed call twice by default
+ * and then throws a `RetryError`, which has no status of its own: the last
+ * attempt's error is the one that says why.
+ */
+export function lastAttemptError(error: unknown): unknown {
+	return RetryError.isInstance(error) ? error.lastError : error
 }

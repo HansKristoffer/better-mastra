@@ -224,6 +224,9 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 					)
 					for await (const snapshot of readUIMessageStream({
 						stream: observed,
+						// Without it an error part, or a stream that fails or times
+						// out, only ends the read: the turn would count as answered.
+						terminateOnError: true,
 						...(resuming && assistant ? { message: assistant } : {})
 					})) {
 						assistant = snapshot

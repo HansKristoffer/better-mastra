@@ -1,8 +1,10 @@
 import { createAnthropic } from '@ai-sdk/anthropic'
-import type { SharedV4ProviderOptions } from '@ai-sdk/provider'
+import type {
+	LanguageModelV4Prompt,
+	SharedV4ProviderOptions
+} from '@ai-sdk/provider'
 import { wrapLanguageModel } from 'ai'
 import type { LlmEffort } from '../effort.js'
-import { movePerTurnContext } from '../prompt-cache.js'
 import { type LlmRoute, withoutTemperature } from '../route.js'
 
 /** Sonnet 5.5 rejects `thinking: disabled`; Haiku 5.5 accepts it but rejects `between_tools`. */
@@ -16,8 +18,13 @@ const NO_SAMPLING_MODELS = new Set(['claude-sonnet-5-5', 'claude-haiku-5-5'])
  * `cacheControl` at the request level is Anthropic's automatic mode, where the
  * breakpoint sits on the last block and moves forward, so a turn's tool hops
  * and every later turn read the conversation so far at 0.1x input price
- * (writes cost 1.25x). Set on every call, and per-turn context is moved
- * behind the cached history (`movePerTurnContext`).
+ * (writes cost 1.25x). Set on every call whose prompt carries no cache marker
+ * of its own.
+ *
+ * A prompt that arrives with markers of its own (the chat turn marks its
+ * instruction blocks and the conversation) is left to them: the automatic breakpoint
+ * takes one of Anthropic's four slots, and with four markers placed already
+ * the request is refused.
  */
 export function anthropicRoute(apiKey: string): LlmRoute {
 	// Pinned: the SDK otherwise honours ANTHROPIC_BASE_URL, which a developer's
@@ -42,11 +49,12 @@ export function anthropicRoute(apiKey: string): LlmRoute {
 						...(NO_SAMPLING_MODELS.has(modelId)
 							? withoutTemperature(params)
 							: params),
-						prompt: movePerTurnContext(params.prompt, 'anthropic'),
 						providerOptions: {
 							...params.providerOptions,
 							anthropic: {
-								cacheControl: { type: 'ephemeral' },
+								...(!placesCacheMarkers(params.prompt) && {
+									cacheControl: { type: 'ephemeral' }
+								}),
 								...params.providerOptions?.anthropic
 							}
 						}
@@ -55,6 +63,19 @@ export function anthropicRoute(apiKey: string): LlmRoute {
 			}),
 		reasoningOptions: anthropicReasoningOptions
 	}
+}
+
+/** Whether any message of the prompt, or any part of one, carries Anthropic's cache marker. */
+function placesCacheMarkers(prompt: LanguageModelV4Prompt): boolean {
+	const isMarked = (options: SharedV4ProviderOptions | undefined) =>
+		options?.anthropic?.cacheControl !== undefined
+
+	return prompt.some(
+		(message) =>
+			isMarked(message.providerOptions) ||
+			(typeof message.content !== 'string' &&
+				message.content.some((part) => isMarked(part.providerOptions)))
+	)
 }
 
 /**

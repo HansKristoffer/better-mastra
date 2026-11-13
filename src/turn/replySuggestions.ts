@@ -16,16 +16,21 @@ import { timeoutSignal } from 'hanzio'
 
 import {
 	ANSWER_COMPLETE_PART,
-	REPLY_SUGGESTIONS_PART
+	REPLY_SUGGESTION_MAX_LENGTH,
+	REPLY_SUGGESTIONS_MAX,
+	REPLY_SUGGESTIONS_PART,
+	toReplySuggestions
 } from '../protocol/index.js'
 import { asAgentModel } from './agent.js'
+import type { ChatTurnPlan, ProviderOptions } from './types.js'
 
-export { ANSWER_COMPLETE_PART, REPLY_SUGGESTIONS_PART }
-
-export const REPLY_SUGGESTIONS_MAX = 3
-
-/** The longest reply offered, in characters; a longer one is dropped. */
-export const REPLY_SUGGESTION_MAX_LENGTH = 80
+export {
+	ANSWER_COMPLETE_PART,
+	REPLY_SUGGESTION_MAX_LENGTH,
+	REPLY_SUGGESTIONS_MAX,
+	REPLY_SUGGESTIONS_PART,
+	toReplySuggestions
+}
 
 /** One id, so each new list replaces the one before it in the client. */
 const REPLY_SUGGESTIONS_PART_ID = 'reply-suggestions'
@@ -45,13 +50,25 @@ export function createReplySuggestionsAgent(input: {
 	readonly name?: string
 	readonly instructions: string
 	readonly model: () => LanguageModel
+	/**
+	 * The model's options on every call, as `resolveLlm()` returns them. Set
+	 * the reasoning effort here: a model left at its provider's default may
+	 * think for longer than the replies are worth waiting for.
+	 */
+	readonly providerOptions?: ChatTurnPlan['providerOptions']
 }): Agent {
 	return new Agent({
 		id: input.id,
 		name: input.name ?? input.id,
 		instructions: input.instructions,
 		model: () => asAgentModel(input.model()),
-		maxRetries: 0
+		maxRetries: 0,
+		...(input.providerOptions && {
+			// Mastra types each provider's options; the AI SDK's are the same record, untyped.
+			defaultOptions: {
+				providerOptions: input.providerOptions as ProviderOptions
+			}
+		})
 	})
 }
 
@@ -61,25 +78,6 @@ export function toReplySuggestionsMessage(
 	answer: string
 ): string {
 	return `User: ${question}\nAssistant: ${answer}`
-}
-
-/** The replies worth offering from a model's list, in its order: trimmed, not too long, no repeats, at most three. */
-export function toReplySuggestions(
-	suggestions: readonly (string | undefined)[]
-): readonly string[] {
-	const replies: string[] = []
-
-	for (const suggestion of suggestions) {
-		const reply = suggestion?.trim() ?? ''
-		const isOffered =
-			reply.length > 0 &&
-			reply.length <= REPLY_SUGGESTION_MAX_LENGTH &&
-			!replies.some((offered) => offered.toLowerCase() === reply.toLowerCase())
-
-		if (isOffered) replies.push(reply)
-	}
-
-	return replies.slice(0, REPLY_SUGGESTIONS_MAX)
 }
 
 /** Streams the replies into `send`, each chunk the whole list so far; sends nothing when the model offers none, fails or runs out of time. */

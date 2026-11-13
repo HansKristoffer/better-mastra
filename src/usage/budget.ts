@@ -7,6 +7,7 @@ import {
 	sortBy,
 	startTimer
 } from 'hanzio'
+import { lastAttemptError } from '../models/billing-error.js'
 import { isBatchingModelCalls } from '../models/openrouter-batch.js'
 
 /**
@@ -90,8 +91,9 @@ export function localConcurrencyLimit(max: number): ConcurrencyLimit {
 	})
 }
 
-/** A 429 as the AI SDK throws it (`APICallError`) or any error shaped like it. */
-function rateLimitRetryAfter(error: unknown): string | null | undefined {
+/** A 429 as the AI SDK throws it (`APICallError`, also behind its own retries) or any error shaped like it. */
+function rateLimitRetryAfter(thrown: unknown): string | null | undefined {
+	const error = lastAttemptError(thrown)
 	if (!isRecord(error)) return undefined
 	const { statusCode, responseHeaders } = error as {
 		statusCode?: unknown

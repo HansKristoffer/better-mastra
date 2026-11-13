@@ -508,6 +508,39 @@ test('a new turn on the thread aborts the one still running', async () => {
 	next.end()
 })
 
+test("a superseded turn's end leaves the locator of the turn that replaced it alone", async () => {
+	// Given a locator kept in the app's thread lock, so its lifetime is the lock's
+	const expired: number[] = []
+	const { a } = setup({
+		graceMs: 30_000,
+		locatorTtlMs: 90_000,
+		locator: {
+			read: async () => null,
+			write: async () => {},
+			expire: async (_threadKey, ttlMs) => void expired.push(ttlMs)
+		}
+	})
+	const old = source()
+	const oldResponse = await a.streams.start({ threadKey: 't', ...old })
+	old.begin()
+
+	// When a new turn takes the thread and the old one ends
+	const next = source()
+	const nextResponse = await a.streams.start({ threadKey: 't', ...next })
+	await collect(oldResponse)
+	await tick()
+
+	// Then the old turn has not shortened the lock the new turn runs under
+	expect(expired).toEqual([])
+
+	// And the new turn's own end still starts the grace period
+	next.begin()
+	next.end()
+	await collect(nextResponse)
+	await tick()
+	expect(expired).toEqual([30_000])
+})
+
 test('reasoning and tool input deltas are merged in the replay', async () => {
 	const { a } = setup()
 	const turn = source()
@@ -663,6 +696,7 @@ function fakeUpstash() {
 			values.set(key, value)
 			return replaced === undefined ? null : parsed(replaced)
 		},
+		eval: async () => 0,
 		del: async (key) => void values.delete(key),
 		pexpire: async () => 1,
 		expire: async () => 1,

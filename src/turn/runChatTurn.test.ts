@@ -976,3 +976,111 @@ describe('runChatTurn logging', () => {
 		})
 	})
 })
+
+describe('runChatTurn with a port that fails', () => {
+	const fail = () => {
+		throw new Error('the sink failed')
+	}
+	const reject = async () => {
+		throw new Error('the sink rejected')
+	}
+	const askWithTool = (
+		overrides: NonNullable<Parameters<typeof createHarness>[0]>['overrides']
+	) =>
+		createHarness({
+			replies: [
+				toolCallReply(LOOKUP_TOOL, { category: 'mad' }),
+				textReply('Du har brugt 1.250 kr.')
+			],
+			...(overrides && { overrides })
+		})
+
+	test.each([
+		['sinks.toolSettled', { sinks: { toolSettled: fail } }],
+		['onFirstText', { onFirstText: fail }],
+		['sinks.usage', { sinks: { usage: fail } }],
+		['sinks.turnFinished', { sinks: { turnFinished: fail } }],
+		['sinks.scoreTurn', { sinks: { scoreTurn: fail } }],
+		['an async sinks.turnFinished', { sinks: { turnFinished: reject } }],
+		['deriveTitle', { deriveTitle: fail }]
+	] as const)(
+		'should finish the answer, release the lock and log the error when %s throws',
+		async (_name, overrides) => {
+			// Given a turn whose reporting fails
+			const harness = askWithTool(overrides)
+
+			// When the user asks something that takes a tool call
+			const { message, chunks } = await readTurn(
+				await harness.run({ messages: [userMessage('Hvad har jeg brugt?')] })
+			)
+
+			// Then the whole answer still arrives, without an error part
+			expect(message?.parts).toContainEqual(
+				expect.objectContaining({
+					type: 'text',
+					text: 'Du har brugt 1.250 kr.'
+				})
+			)
+			expect(chunks.map((chunk) => chunk.type)).not.toContain('error')
+			expect(chunks.at(-1)?.type).toBe('finish')
+			// And the thread is free for the next turn
+			expect(harness.releases).toEqual([harness.threadKey.threadId])
+			// And the failure is in the log rather than lost
+			expect(harness.errors.map(String)).toContainEqual(
+				expect.stringMatching(/the sink (failed|rejected)/)
+			)
+		}
+	)
+
+	test('should still title the thread when sinks.turnFinished throws', async () => {
+		// Given a turn whose finished-turn sink fails
+		const harness = askWithTool({ sinks: { turnFinished: fail } })
+
+		// When the first turn of the thread ends
+		await readTurn(
+			await harness.run({ messages: [userMessage('Hvad har jeg brugt?')] })
+		)
+
+		// Then the thread has its title
+		const thread = await harness.memory.getThreadById({
+			threadId: harness.threadKey.threadId
+		})
+		expect(thread?.title).toBe('Hvad har jeg brugt?')
+	})
+})
+
+describe('runChatTurn timings', () => {
+	test('should report how long each stage took before the stream started', async () => {
+		// Given a turn whose gate and preparation each take a known time on a clock the test drives
+		let clock = 1_000
+		const wait = (ms: number) => async () => {
+			clock += ms
+		}
+		const harness = createHarness({ replies: [textReply('Hej!')] })
+		const { prepare } = harness.deps
+		Object.assign(harness.deps, {
+			now: () => clock,
+			gate: async () => {
+				await wait(7)()
+
+				return undefined
+			},
+			prepare: async (input: Parameters<typeof prepare>[0]) => {
+				await wait(40)()
+
+				return prepare(input)
+			}
+		})
+
+		// When the turn runs to its end
+		await readTurn(await harness.run({ messages: [userMessage('Hej')] }))
+
+		// Then the finished turn says where the time before the stream went
+		const [finished] = harness.finished
+		expect(finished?.stageMs).toMatchObject({ gate: 7, preparation: 40 })
+		expect(Object.keys(finished?.stageMs ?? {})).toEqual(
+			expect.arrayContaining(['scope', 'thread', 'thread_lock', 'model'])
+		)
+		expect(finished?.streamStartedMs).toBe(47)
+	})
+})

@@ -104,6 +104,19 @@ export interface TurnFinishedEvent<TScope> extends TurnSummary {
 	readonly labels: TurnLabels
 	readonly modelId: string
 	readonly durationMs: number
+	/**
+	 * How long each stage took before the stream started, in milliseconds,
+	 * for finding where the wait before the first token goes: `scope`, `gate`,
+	 * `thread` (the turn's own reads), `thread_lock`, `usage_limit`,
+	 * `preparation`, `tool` (declining what waited) and `model` (Mastra
+	 * starting the run: its own thread and history reads). A port the app
+	 * left out takes no time; `preparation` and the read of the waiting
+	 * changes run side by side, so the stages can add up to more than
+	 * `streamStartedMs`.
+	 */
+	readonly stageMs: Readonly<Partial<Record<ChatTurnStage, number>>>
+	/** From the request to the stream being handed back; `timeToFirstTextMs` less this is the wait on the model. */
+	readonly streamStartedMs: number
 	readonly ending: TurnStreamEnding
 	/** The user's new message; empty when the request continues a turn. */
 	readonly newMessageText: string
@@ -130,7 +143,10 @@ export interface TurnUsageEvent<TScope> {
 	readonly steps: readonly unknown[]
 }
 
-/** Where a turn reports to; each sink is fire and forget and must not throw. */
+/**
+ * Where a turn reports to; each sink is fire and forget. One that throws or
+ * rejects is logged and the turn goes on.
+ */
 export interface ChatTurnSinks<TScope> {
 	toolSettled?(
 		event: ToolSettledEvent & {
@@ -143,7 +159,7 @@ export interface ChatTurnSinks<TScope> {
 	usage?(event: TurnUsageEvent<TScope>): void
 	/**
 	 * An answered turn, after its thread is written, for live scoring in the
-	 * background. Sample here (`Math.random() < share`); it must not throw.
+	 * background. Sample here (`Math.random() < share`).
 	 */
 	scoreTurn?(event: TurnFinishedEvent<TScope>): void
 }
@@ -326,7 +342,9 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 	logger: ChatTurnLogger,
 	onScope: (scope: TScope) => void
 ): Promise<ChatTurnResult> {
-	const startedAt = (deps.now ?? Date.now)()
+	const now = deps.now ?? Date.now
+	const startedAt = now()
+	const { atStage, stageMs } = stageClock(now)
 	const messages = readMessages(request.body, deps.maxMessageLength ?? 32_000)
 
 	if (messages === 'system') return refusedWith(deps, 'invalid_request')
@@ -374,7 +392,17 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 		}
 
 		return await startTurn(
-			{ request, scope, threadKey, thread, messages, startedAt, release },
+			{
+				request,
+				scope,
+				threadKey,
+				thread,
+				messages,
+				startedAt,
+				release,
+				atStage,
+				stageMs
+			},
 			deps,
 			logger
 		)
@@ -392,6 +420,8 @@ interface AdmittedTurn<TAuth, TBody extends ChatTurnBody, TScope> {
 	readonly messages: UIMessage[]
 	readonly startedAt: number
 	readonly release: () => Promise<void>
+	readonly atStage: StageClock['atStage']
+	readonly stageMs: StageClock['stageMs']
 }
 
 /** Preparation, the waiting changes, then Mastra's stream. A failure here releases the lock. */
@@ -400,7 +430,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	deps: ChatTurnDeps<TAuth, TBody, TScope>,
 	logger: ChatTurnLogger
 ): Promise<ChatTurnResult> {
-	const { request, scope, threadKey } = turn
+	const { request, scope, threadKey, atStage } = turn
 	const waiting = readWaitingChanges(turn, deps)
 	const prepared = await atStage('preparation', () =>
 		deps.prepare({
@@ -446,16 +476,20 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		(typeof plan.model === 'string' ? plan.model : plan.model.modelId)
 	const resume = changes.kind === 'resume' ? changes.resume : undefined
 	const elapsedMs = () => (deps.now ?? Date.now)() - turn.startedAt
+	const report = reporterOf(logger)
 	const observer = createTurnObserver({
 		elapsedMs,
-		onFirstText: (ms) => deps.onFirstText?.(ms, scope, labels),
+		onFirstText: (ms) =>
+			report('onFirstText', () => deps.onFirstText?.(ms, scope, labels)),
 		onToolSettled: (event) =>
-			deps.sinks?.toolSettled?.({
-				...event,
-				scope,
-				tier: plan.toolTiers?.[event.toolName],
-				labels
-			})
+			report('sinks.toolSettled', () =>
+				deps.sinks?.toolSettled?.({
+					...event,
+					scope,
+					tier: plan.toolTiers?.[event.toolName],
+					labels
+				})
+			)
 	})
 
 	// What `onError` saw, oldest first, until the chunk it made passes: a
@@ -478,54 +512,68 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		})
 	}
 
-	const started = await handleChatStream({
-		mastra: deps.mastra,
-		agentId: deps.agentId,
-		version: 'v7',
-		sendReasoning: deps.sendReasoning ?? false,
-		params: {
-			// Built field by field: Mastra hands every params field it does not
-			// know to the agent ahead of its defaults, so nothing else of the body
-			// may reach it.
-			messages: (pending
-				? withoutStaleAnswers(prepared.messages ?? turn.messages, pending)
-				: [...(prepared.messages ?? turn.messages)]) as never[],
-			memory,
-			requestContext,
-			abortSignal: request.signal,
-			...(request.body.trigger && { trigger: request.body.trigger }),
-			...(resume && { runId: resume.runId, resumeData: resume.data }),
-			...(prepared.tracingOptions && {
-				tracingOptions: prepared.tracingOptions as never
-			}),
-			onFinish: (event: {
-				totalUsage: RunUsage | undefined
-				steps: readonly unknown[]
-			}) => {
-				usage = { totalUsage: event.totalUsage, steps: event.steps }
-				deps.sinks?.usage?.({ scope, threadKey, labels, modelId, ...usage })
-			}
-		},
-		// Called for a tool's error too, right before its `tool-output-error`
-		// chunk: `observeErrors` decides which it was once the chunk passes.
-		onError: (error) => {
-			reportedErrors.push(error)
+	const streamStart = atStage('model', () =>
+		handleChatStream({
+			mastra: deps.mastra,
+			agentId: deps.agentId,
+			version: 'v7',
+			sendReasoning: deps.sendReasoning ?? false,
+			params: {
+				// Built field by field: Mastra hands every params field it does not
+				// know to the agent ahead of its defaults, so nothing else of the body
+				// may reach it.
+				messages: (pending
+					? withoutStaleAnswers(prepared.messages ?? turn.messages, pending)
+					: [...(prepared.messages ?? turn.messages)]) as never[],
+				memory,
+				requestContext,
+				abortSignal: request.signal,
+				...(request.body.trigger && { trigger: request.body.trigger }),
+				...(resume && { runId: resume.runId, resumeData: resume.data }),
+				...(prepared.tracingOptions && {
+					tracingOptions: prepared.tracingOptions as never
+				}),
+				onFinish: (event: {
+					totalUsage: RunUsage | undefined
+					steps: readonly unknown[]
+				}) => {
+					const reported = { totalUsage: event.totalUsage, steps: event.steps }
 
-			return deps.errorSentence ?? TURN_ERROR_SENTENCE
-		}
-	}).then(
+					usage = reported
+					report('sinks.usage', () =>
+						deps.sinks?.usage?.({
+							scope,
+							threadKey,
+							labels,
+							modelId,
+							...reported
+						})
+					)
+				}
+			},
+			// Called for a tool's error too, right before its `tool-output-error`
+			// chunk: `observeErrors` decides which it was once the chunk passes.
+			onError: (error) => {
+				reportedErrors.push(error)
+
+				return deps.errorSentence ?? TURN_ERROR_SENTENCE
+			}
+		})
+	)
+	const started = await streamStart.then(
 		(stream) => stream as unknown as ReadableStream<UIMessageChunk>,
 		(error: unknown) => {
 			// A resume loads the run before the stream starts: a snapshot that is
 			// gone, or a tool that no longer resumes it, fails here.
-			if (resume === undefined) throw new ChatTurnStageError('model', error)
+			if (resume === undefined) throw error
 
 			logger.error('[better-mastra] a suspended tool call could not resume', {
-				error
+				error: error instanceof ChatTurnStageError ? error.failure : error
 			})
 			return undefined
 		}
 	)
+	const streamStartedMs = elapsedMs()
 
 	if (!started) {
 		await turn.release()
@@ -547,15 +595,20 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			labels,
 			modelId,
 			durationMs: elapsedMs(),
+			stageMs: { ...turn.stageMs },
+			streamStartedMs,
 			ending,
 			newMessageText,
 			answerText: observer.writtenText(),
 			usage
 		}
 
-		deps.sinks?.turnFinished?.(finished)
+		report('sinks.turnFinished', () => deps.sinks?.turnFinished?.(finished))
 
-		const title = deriveTitle === false ? null : deriveTitle(turn.messages)
+		const title =
+			deriveTitle === false
+				? null
+				: (report('deriveTitle', () => deriveTitle(turn.messages)) ?? null)
 
 		// Nothing to write means no read either: a thread that has its title
 		// and already holds the turn's values, or a turn that gives neither.
@@ -573,7 +626,9 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			)
 		}
 
-		if (finished.outcome === 'answered') deps.sinks?.scoreTurn?.(finished)
+		if (finished.outcome === 'answered') {
+			report('sinks.scoreTurn', () => deps.sinks?.scoreTurn?.(finished))
+		}
 	}
 
 	const suggestions = deps.replySuggestions
@@ -697,7 +752,7 @@ function readWaitingChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 
 	if (turn.thread === null) return Promise.resolve([])
 
-	const read = atStage('thread', () =>
+	const read = turn.atStage('thread', () =>
 		listPendingChanges(deps.mastra.getAgentById(deps.agentId), turn.threadKey)
 	)
 	// A failed preparation leaves it unawaited; awaiting it later still throws.
@@ -738,7 +793,7 @@ async function classifyChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 	if (changes.kind === 'newMessage' && changes.waiting.length > 0) {
 		const { movedOnData } = deps.pendingChanges || {}
 
-		await atStage('tool', () =>
+		await turn.atStage('tool', () =>
 			moveOnFromWaitingChanges(changes.waiting, {
 				agent: deps.mastra.getAgentById(deps.agentId),
 				memory,
@@ -798,16 +853,55 @@ function stopOf(signal: AbortSignal): {
 	return { userStopped: signal.aborted && !interrupted, interrupted }
 }
 
-async function atStage<T>(
-	stage: ChatTurnStage,
-	work: () => Promise<T>
-): Promise<T> {
-	try {
-		return await work()
-	} catch (error) {
-		throw error instanceof ChatTurnStageError
-			? error
-			: new ChatTurnStageError(stage, error)
+interface StageClock {
+	/** Runs one stage's work: a failure is thrown with its stage, and the time it took is added to the stage's total. */
+	atStage<T>(stage: ChatTurnStage, work: () => Promise<T>): Promise<T>
+	readonly stageMs: Partial<Record<ChatTurnStage, number>>
+}
+
+function stageClock(now: () => number): StageClock {
+	const stageMs: Partial<Record<ChatTurnStage, number>> = {}
+
+	return {
+		stageMs,
+		async atStage(stage, work) {
+			const startedAt = now()
+
+			try {
+				return await work()
+			} catch (error) {
+				throw error instanceof ChatTurnStageError
+					? error
+					: new ChatTurnStageError(stage, error)
+			} finally {
+				stageMs[stage] = (stageMs[stage] ?? 0) + now() - startedAt
+			}
+		}
+	}
+}
+
+/**
+ * Calls one of the app's ports that only reports (a sink, a callback) and
+ * returns what it returned. One that throws, or returns a promise that
+ * rejects, is logged with its name and gives undefined: reporting never ends
+ * a turn, cuts its stream or keeps its thread lock.
+ */
+function reporterOf(logger: ChatTurnLogger) {
+	return <T>(port: string, call: () => T): T | undefined => {
+		const failed = (error: unknown) =>
+			logger.error('[better-mastra] a turn port failed', { port, error })
+
+		try {
+			const result = call()
+
+			if (result instanceof Promise) result.catch(failed)
+
+			return result
+		} catch (error) {
+			failed(error)
+
+			return undefined
+		}
 	}
 }
 

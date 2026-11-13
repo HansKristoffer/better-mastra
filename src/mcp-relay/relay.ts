@@ -127,7 +127,10 @@ export function createMcpRelay<Caller>(
 		prior: PriorDiscovery | undefined
 	): Discovered => {
 		const picked = listed.flatMap((tool) => {
-			const choice = options.tools ? options.tools[tool.name] : true
+			// Own keys only: a remote tool named `constructor` or `toString` is not on the list.
+			const choice = !options.tools
+				? true
+				: Object.hasOwn(options.tools, tool.name) && options.tools[tool.name]
 			if (!choice) return []
 			const renamed = choice === true ? {} : choice
 			const name = renamed.as ?? prefix + tool.name

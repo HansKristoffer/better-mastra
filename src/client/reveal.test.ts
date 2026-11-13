@@ -58,6 +58,22 @@ describe('trimIncompleteMarkdown', () => {
 		])
 	})
 
+	test('should leave an asterisk that is not emphasis alone', () => {
+		// A multiplication sign, then more text in a later paragraph
+		const sum = 'Det koster 5 * 3 = 15 kr.\n\nNæste afsnit fortsætter'
+
+		expect(trimIncompleteMarkdown(sum)).toBe(sum)
+		expect(trimIncompleteMarkdown('5 * 3 er **femten')).toBe(
+			'5 * 3 er **femten**'
+		)
+	})
+
+	test('should close only the emphasis the last paragraph leaves open', () => {
+		expect(trimIncompleteMarkdown('Først *kursiv\n\nSå **fed')).toBe(
+			'Først *kursiv\n\nSå **fed**'
+		)
+	})
+
 	test('leaves out a list marker until its first word arrives', () => {
 		expect(trimIncompleteMarkdown('- Mad\n- ')).toBe('- Mad')
 		expect(trimIncompleteMarkdown('1. Mad\n2.')).toBe('1. Mad')

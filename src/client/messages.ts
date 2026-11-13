@@ -16,13 +16,27 @@ import { typedSwitch } from 'hanzio'
 
 import {
 	ANSWER_COMPLETE_PART,
+	isUserFacingPart,
+	REPLY_SUGGESTION_MAX_LENGTH,
+	REPLY_SUGGESTIONS_MAX,
 	REPLY_SUGGESTIONS_PART,
 	TRIPWIRE_PART,
+	toReplySuggestions,
+	toUserFacingMessage,
 	USER_MESSAGE_PART
 } from '../protocol/index.js'
 import { readSuspendedRun } from './pending.js'
 
-export { ANSWER_COMPLETE_PART, REPLY_SUGGESTIONS_PART, USER_MESSAGE_PART }
+export {
+	ANSWER_COMPLETE_PART,
+	isUserFacingPart,
+	REPLY_SUGGESTION_MAX_LENGTH,
+	REPLY_SUGGESTIONS_MAX,
+	REPLY_SUGGESTIONS_PART,
+	toReplySuggestions,
+	toUserFacingMessage,
+	USER_MESSAGE_PART
+}
 
 // TYPES
 
@@ -54,13 +68,6 @@ export interface RequestMessageOptions {
 
 // CONSTANTS
 
-const OBSERVATIONAL_MEMORY_PART_PREFIX = 'data-om-'
-
-export const REPLY_SUGGESTIONS_MAX = 3
-
-/** The longest reply offered, in characters; a longer one is dropped. */
-export const REPLY_SUGGESTION_MAX_LENGTH = 80
-
 /**
  * What the model reads for a server tool call a request left without a
  * result: Mastra drops a server result when a client action shares its step.
@@ -69,16 +76,6 @@ export const STRANDED_TOOL_ERROR =
 	'This tool call was interrupted because it ran in the same step as a client action. Call the tool again on its own to get the result.'
 
 // FUNCTIONS
-
-/** Whether a message part may reach the user: observational memory's `data-om-*` bookkeeping parts may not. */
-export function isUserFacingPart(part: { readonly type: string }): boolean {
-	return !part.type.startsWith(OBSERVATIONAL_MEMORY_PART_PREFIX)
-}
-
-/** The message with only its user-facing parts. */
-export function toUserFacingMessage<M extends UIMessage>(message: M): M {
-	return { ...message, parts: message.parts.filter(isUserFacingPart) }
-}
 
 /**
  * The blocks one message draws: its non-blank texts and its runs of tool
@@ -335,11 +332,6 @@ export function countShownParts(
 	).length
 }
 
-/**
- * The replies a reply-suggestions data part carries, trimmed, without empty,
- * too long or repeated ones, at most three; undefined when the data is not a
- * reply list.
- */
 /** The user message a `data-user-message` part carries, or undefined for any other data. */
 export function readUserMessage(data: unknown): UIMessage | undefined {
 	const message = (data as { message?: unknown } | null)?.message as
@@ -374,6 +366,11 @@ export function readStopReason(
 	return undefined
 }
 
+/**
+ * The replies a reply-suggestions data part carries, trimmed, without empty,
+ * too long or repeated ones, at most three; undefined when the data is not a
+ * reply list.
+ */
 export function readReplySuggestions(
 	data: unknown
 ): readonly string[] | undefined {
@@ -388,27 +385,6 @@ export function readReplySuggestions(
 			typeof suggestion === 'string' ? suggestion : undefined
 		)
 	)
-}
-
-/** The replies worth offering from a model's list, in its order. */
-export function toReplySuggestions(
-	suggestions: readonly (string | undefined)[]
-): readonly string[] {
-	const replies: string[] = []
-
-	for (const suggestion of suggestions) {
-		const reply = suggestion?.trim() ?? ''
-		const isOffered =
-			reply.length > 0 &&
-			reply.length <= REPLY_SUGGESTION_MAX_LENGTH &&
-			!replies.some((offered) => offered.toLowerCase() === reply.toLowerCase())
-
-		if (isOffered) {
-			replies.push(reply)
-		}
-	}
-
-	return replies.slice(0, REPLY_SUGGESTIONS_MAX)
 }
 
 function carriesClientResults(

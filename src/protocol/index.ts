@@ -23,6 +23,43 @@ export const ANSWER_COMPLETE_PART = 'data-answer-complete'
 /** The part a run that a processor stopped ends with; its `reason` says why. */
 export const TRIPWIRE_PART = 'data-tripwire'
 
+/** Observational memory stores its own bookkeeping as `data-om-*` parts. */
+const OBSERVATIONAL_MEMORY_PART_PREFIX = 'data-om-'
+
+/** Whether a message part or stream chunk may reach the user: observational memory's `data-om-*` bookkeeping may not. */
+export function isUserFacingPart(part: { readonly type: string }): boolean {
+	return !part.type.startsWith(OBSERVATIONAL_MEMORY_PART_PREFIX)
+}
+
+/** The message with only its user-facing parts. */
+export function toUserFacingMessage<M extends UIMessage>(message: M): M {
+	return { ...message, parts: message.parts.filter(isUserFacingPart) }
+}
+
+export const REPLY_SUGGESTIONS_MAX = 3
+
+/** The longest reply offered, in characters; a longer one is dropped. */
+export const REPLY_SUGGESTION_MAX_LENGTH = 80
+
+/** The replies worth offering from a model's list, in its order: trimmed, not too long, no repeats, at most three. */
+export function toReplySuggestions(
+	suggestions: readonly (string | undefined)[]
+): readonly string[] {
+	const replies: string[] = []
+
+	for (const suggestion of suggestions) {
+		const reply = suggestion?.trim() ?? ''
+		const isOffered =
+			reply.length > 0 &&
+			reply.length <= REPLY_SUGGESTION_MAX_LENGTH &&
+			!replies.some((offered) => offered.toLowerCase() === reply.toLowerCase())
+
+		if (isOffered) replies.push(reply)
+	}
+
+	return replies.slice(0, REPLY_SUGGESTIONS_MAX)
+}
+
 /** `@mastra/ai-sdk` names an approval `<runId>::<toolCallId>` and reads its answer back by that id. */
 export const APPROVAL_ID_SEPARATOR = '::'
 
