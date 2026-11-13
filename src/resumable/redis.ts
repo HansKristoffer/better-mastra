@@ -31,6 +31,24 @@ export interface ResumableRedis {
 	reader(): Promise<BlockingReader>
 }
 
+/**
+ * The Redis commands a thread lock needs (`createThreadLock`), which
+ * `bunRedis`, `ioRedis` and `upstashRedis` all have. The two owner-checked
+ * ones run as a script, so a lock that expired and was taken by another
+ * holder is never released or renewed by the one that lost it.
+ */
+export interface ThreadLockRedis {
+	/** `SET key value NX PX ttlMs`: true when the key was free and is now set. */
+	setIfAbsent(key: string, value: string, ttlMs: number): Promise<boolean>
+	/** Deletes the key only while it holds `value`. */
+	deleteIfEquals(key: string, value: string): Promise<void>
+	/** Sets the key's TTL only while it holds `value`: false when it holds another value or is gone. */
+	expireIfEquals(key: string, value: string, ttlMs: number): Promise<boolean>
+}
+
+const DELETE_IF_EQUALS = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0`
+const EXPIRE_IF_EQUALS = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('PEXPIRE', KEYS[1], ARGV[2]) end return 0`
+
 /** Stands in when there is no Redis: no locator is ever found, so every turn stays on its own process. */
 export const noRedis: ResumableRedis = {
 	set: async () => null,
@@ -59,8 +77,20 @@ function parseXread(reply: unknown): StreamEntry[] {
 function fromSend(
 	send: Send,
 	rest: Pick<ResumableRedis, 'subscribe' | 'reader'>
-): ResumableRedis {
+): ResumableRedis & ThreadLockRedis {
 	return {
+		setIfAbsent: async (key, value, ttlMs) =>
+			(await send('SET', [key, value, 'NX', 'PX', String(ttlMs)])) !== null,
+		deleteIfEquals: async (key, value) =>
+			void (await send('EVAL', [DELETE_IF_EQUALS, '1', key, value])),
+		expireIfEquals: async (key, value, ttlMs) =>
+			(await send('EVAL', [
+				EXPIRE_IF_EQUALS,
+				'1',
+				key,
+				value,
+				String(ttlMs)
+			])) === 1,
 		set: async (key, value, ttlMs) =>
 			((await send('SET', [key, value, 'PX', String(ttlMs), 'GET'])) as
 				string | null) ?? null,
@@ -105,15 +135,15 @@ type BunRedisConnection = Omit<BunRedisLike, 'duplicate'>
  * default `client.duplicate()`, or `connect` for a command client that cannot
  * duplicate itself, such as one wrapped to time its commands out.
  */
-export function bunRedis(client: BunRedisLike): ResumableRedis
+export function bunRedis(client: BunRedisLike): ResumableRedis & ThreadLockRedis
 export function bunRedis(
 	client: Pick<BunRedisLike, 'send'>,
 	options: { connect(): Promise<BunRedisConnection> }
-): ResumableRedis
+): ResumableRedis & ThreadLockRedis
 export function bunRedis(
 	client: Pick<BunRedisLike, 'send'> & Partial<Pick<BunRedisLike, 'duplicate'>>,
 	options?: { connect(): Promise<BunRedisConnection> }
-): ResumableRedis {
+): ResumableRedis & ThreadLockRedis {
 	const connect = async (): Promise<BunRedisConnection> => {
 		if (options) return options.connect()
 		if (!client.duplicate) {
@@ -153,7 +183,7 @@ interface IoRedisLike {
 }
 
 /** Adapter for `ioredis`. */
-export function ioRedis(client: IoRedisLike): ResumableRedis {
+export function ioRedis(client: IoRedisLike): ResumableRedis & ThreadLockRedis {
 	return fromSend((command, args) => client.call(command, ...args), {
 		async subscribe(channel, onMessage) {
 			const subscriber = client.duplicate()
@@ -183,8 +213,9 @@ export interface UpstashRedisLike {
 	set(
 		key: string,
 		value: string,
-		options: { px: number; get: true }
+		options: { px: number; get: true } | { px: number; nx: true }
 	): Promise<unknown>
+	eval(script: string, keys: string[], args: string[]): Promise<unknown>
 	del(key: string): Promise<unknown>
 	pexpire(key: string, milliseconds: number): Promise<unknown>
 	expire(key: string, seconds: number): Promise<unknown>
@@ -220,10 +251,17 @@ const asText = (value: unknown): string | null =>
 export function upstashRedis(
 	client: UpstashRedisLike | (() => UpstashRedisLike),
 	options: { pollMs?: number } = {}
-): ResumableRedis {
+): ResumableRedis & ThreadLockRedis {
 	const { pollMs = 200 } = options
 	const redis = once(() => (typeof client === 'function' ? client() : client))
 	return {
+		setIfAbsent: async (key, value, ttlMs) =>
+			(await redis().set(key, value, { px: ttlMs, nx: true })) !== null,
+		deleteIfEquals: async (key, value) =>
+			void (await redis().eval(DELETE_IF_EQUALS, [key], [value])),
+		expireIfEquals: async (key, value, ttlMs) =>
+			(await redis().eval(EXPIRE_IF_EQUALS, [key], [value, String(ttlMs)])) ===
+			1,
 		set: async (key, value, ttlMs) =>
 			asText(await redis().set(key, value, { px: ttlMs, get: true })),
 		get: async (key) => asText(await redis().get(key)),

@@ -7,12 +7,19 @@ import {
 	type StreamEntry
 } from './redis.js'
 
+export {
+	createThreadLock,
+	type ThreadLock,
+	type ThreadLockLogger,
+	type ThreadLockOptions
+} from './lock.js'
 export { bunRedis, ioRedis, upstashRedis } from './redis.js'
 export { replayPrefixOf } from './replay.js'
 export type {
 	BlockingReader,
 	ResumableRedis,
 	StreamEntry,
+	ThreadLockRedis,
 	UpstashRedisLike
 } from './redis.js'
 
@@ -371,7 +378,12 @@ export function createResumableStreams(
 		flush(run)
 		for (const listener of run.listeners) listener(null)
 		run.listeners.clear()
-		if (locatorStore.expire)
+		// A turn a newer one replaced, here or on another replica, must not
+		// shorten the newer turn's locator, which may be the app's thread lock.
+		const replaced =
+			runs.get(run.threadKey) !== run ||
+			run.abort.signal.reason === ('superseded' satisfies TurnAbortReason)
+		if (locatorStore.expire && !replaced)
 			void soft('pexpire', locatorStore.expire(run.threadKey, graceMs))
 		run.evictTimer = setTimeout(() => {
 			streams.delete(run.streamId)

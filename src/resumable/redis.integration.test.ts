@@ -5,8 +5,10 @@ import Redis from 'ioredis'
 import {
 	bunRedis,
 	createResumableStreams,
+	createThreadLock,
 	ioRedis,
-	type ResumableRedis
+	type ResumableRedis,
+	type ThreadLockRedis
 } from './index'
 
 const url = process.env.REDIS_URL
@@ -69,6 +71,43 @@ describe.skipIf(!url)('real Redis', () => {
 			expect(text(remote)).toBe('before after')
 			expect(remote.at(-1)?.type).toBe('abort')
 			await Promise.all([owner.close(), reader.close()])
+		}
+	)
+	// Claimed on one client, contended and renewed on the other: both adapters' SET NX and scripts.
+	test.each([
+		['bun → ioredis', bunRedis(bun), ioRedis(io)],
+		['ioredis → bun', ioRedis(io), bunRedis(bun)]
+	] as [string, ThreadLockRedis, ThreadLockRedis][])(
+		'a thread lock held across replicas (%s)',
+		async (_, holderRedis, otherRedis) => {
+			const keyPrefix = `thread-lock-test:${crypto.randomUUID()}:`
+			const holder = createThreadLock({
+				redis: holderRedis,
+				keyPrefix,
+				ttlMs: 300
+			})
+			const other = createThreadLock({
+				redis: otherRedis,
+				keyPrefix,
+				ttlMs: 300
+			})
+
+			const release = await holder({ threadId: 't' })
+			expect(release).not.toBeNull()
+			expect(await other({ threadId: 't' })).toBeNull()
+
+			// Past the TTL the renewal still holds it.
+			await new Promise((resolve) => setTimeout(resolve, 700))
+			expect(await other({ threadId: 't' })).toBeNull()
+
+			await release?.()
+			const next = await other({ threadId: 't' })
+			expect(next).not.toBeNull()
+
+			// A release by one that no longer holds it changes nothing.
+			await holderRedis.deleteIfEquals(`${keyPrefix}t`, 'not-the-token')
+			expect(await holder({ threadId: 't' })).toBeNull()
+			await next?.()
 		}
 	)
 })
