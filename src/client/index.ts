@@ -13,7 +13,11 @@ export * from './session.js'
 export * from './turn.js'
 export {
 	type ChatErrorCode,
+	type ChatErrorRefusal,
+	type ChatErrors,
 	chatErrorCodes,
+	chatErrorStatuses,
+	defineChatErrors,
 	TOOL_CALL_BUDGET_STOP_REASON,
 	type TurnOutcome,
 	turnOutcomes

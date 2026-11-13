@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import type { UIMessage } from 'ai'
 
+import { defineChatErrors } from '../protocol/index.js'
+import { createResumableStreams } from '../resumable/index.js'
+import { asStepModel } from './agent.js'
 import {
 	classifyTurnChanges,
 	type PendingChange,
@@ -14,6 +17,7 @@ import { TURN_ERROR_SENTENCE, USER_MESSAGE_PART } from './stream.js'
 import {
 	ASK_TOOL,
 	createHarness,
+	createScriptedModel,
 	DELETE_TOOL,
 	failingReply,
 	LOOKUP_TOOL,
@@ -162,6 +166,168 @@ describe('runChatTurn', () => {
 		})
 	})
 
+	test('should send each stable instruction block as its own system message, the last two with a cache marker', async () => {
+		// Given a plan with three stable blocks, an empty one and a per-request part
+		const harness = createHarness()
+		const prepare = harness.deps.prepare
+		harness.deps.prepare = async (input) => {
+			const prepared = await prepare(input)
+
+			return {
+				...prepared,
+				plan: {
+					...prepared.plan,
+					instructions: [
+						'Rules for everyone.',
+						'',
+						'This tenant.',
+						'This workspace.'
+					],
+					perRequestInstructions: 'This thread.'
+				}
+			}
+		}
+
+		// When the user asks
+		await readTurn(await harness.run({ messages: [userMessage('Mad?')] }))
+
+		// Then the blocks arrive in order, and only the last two stable ones are cache breakpoints
+		const system = (harness.model.doStreamCalls[0]?.prompt ?? []).filter(
+			(message) => message.role === 'system'
+		)
+		const marked = { anthropic: { cacheControl: { type: 'ephemeral' } } }
+
+		expect(system.map((message) => message.content)).toEqual([
+			'Rules for everyone.',
+			'This tenant.',
+			'This workspace.',
+			'This thread.'
+		])
+		expect(system[0]?.providerOptions?.anthropic).toBeUndefined()
+		expect(system[1]?.providerOptions).toMatchObject(marked)
+		expect(system[2]?.providerOptions).toMatchObject(marked)
+		expect(system[3]?.providerOptions?.anthropic).toBeUndefined()
+	})
+
+	test('should run a step on the model a processor swaps in, with the conversation cache markers', async () => {
+		// Given a per-turn processor that replaces the step's model
+		const harness = createHarness({ replies: [textReply('From the plan.')] })
+		const candidate = createScriptedModel([textReply('From the candidate.')])
+		const prepare = harness.deps.prepare
+		harness.deps.prepare = async (input) => {
+			const prepared = await prepare(input)
+
+			return {
+				...prepared,
+				plan: {
+					...prepared.plan,
+					inputProcessors: [
+						{
+							id: 'candidate-model',
+							processInputStep: async () => ({ model: asStepModel(candidate) })
+						}
+					]
+				}
+			}
+		}
+
+		// When the user asks
+		const { message } = await readTurn(
+			await harness.run({ messages: [userMessage('Mad?')] })
+		)
+
+		// Then the candidate answered, and its prompt carries the conversation's marker
+		expect(JSON.stringify(message)).toContain('From the candidate.')
+		expect(harness.model.doStreamCalls).toHaveLength(0)
+		expect(
+			candidate.doStreamCalls[0]?.prompt.at(-1)?.providerOptions
+		).toMatchObject({ anthropic: { cacheControl: { type: 'ephemeral' } } })
+	})
+
+	test('should stream, store and report the same text when an output processor rewrites it', async () => {
+		// Given a model that writes dashes across two deltas, and a per-turn processor that replaces them
+		const [streamStart, textStart, , ...rest] = textReply('')
+		const finished: string[] = []
+		const harness = createHarness({
+			replies: [
+				[
+					streamStart!,
+					textStart!,
+					{ type: 'text-delta', id: 'text-1', delta: 'Mad \u2014 1.250 kr. ' },
+					{ type: 'text-delta', id: 'text-1', delta: 'Bolig \u2013 8.000 kr.' },
+					...rest
+				]
+			],
+			overrides: {
+				sinks: { turnFinished: (event) => finished.push(event.answerText) }
+			}
+		})
+		const prepare = harness.deps.prepare
+		harness.deps.prepare = async (input) => {
+			const prepared = await prepare(input)
+
+			return {
+				...prepared,
+				plan: {
+					...prepared.plan,
+					outputProcessors: [
+						{
+							id: 'plain-dashes',
+							processOutputStream: async ({ part }) =>
+								part.type === 'text-delta'
+									? {
+											...part,
+											payload: {
+												...part.payload,
+												text: part.payload.text.replace(/[\u2013\u2014]/g, '-')
+											}
+										}
+									: part
+						}
+					]
+				}
+			}
+		}
+
+		// When the user asks, on a server that keeps the turn resumable
+		const resumable = createResumableStreams({})
+		const turn = await harness.run({
+			messages: [userMessage('Hvad bruger jeg?')]
+		})
+
+		if (turn.kind !== 'stream') throw new Error('The turn was refused.')
+
+		const live = await resumable.start({
+			threadKey: turn.threadKey.threadId,
+			stream: turn.stream,
+			abort: new AbortController()
+		})
+		const { message } = await readTurn({ ...turn, stream: live })
+		const replayed = await readTurn({
+			...turn,
+			stream: (await resumable.reconnect(turn.threadKey.threadId))!
+		})
+		await resumable.close()
+
+		// Then the client, a reconnecting client, the stored thread and the turn's own report hold the rewritten text
+		const expected = 'Mad - 1.250 kr. Bolig - 8.000 kr.'
+		const textOf = (parts: readonly { type: string; text?: string }[] = []) =>
+			parts
+				.flatMap((part) => (part.type === 'text' ? [part.text] : []))
+				.join('')
+		const { messages: stored } = await harness.memory.recall({
+			threadId: harness.threadKey.threadId,
+			resourceId: harness.threadKey.resourceId
+		})
+
+		expect(textOf(message?.parts)).toBe(expected)
+		expect(textOf(replayed.message?.parts)).toBe(expected)
+		expect(
+			textOf(stored.find(({ role }) => role === 'assistant')?.content.parts)
+		).toBe(expected)
+		expect(finished).toEqual([expected])
+	})
+
 	test('should stop a turn over its tool-call budget before calling the model', async () => {
 		// Given a trailing assistant message with more tool calls than 1 step × 3 allows
 		const harness = createHarness({ maxSteps: 1 })
@@ -186,7 +352,7 @@ describe('runChatTurn', () => {
 		expect(harness.finished[0]?.outcome).toBe('budget_stop')
 	})
 
-	test('should mark the answer complete, then offer reply suggestions as transient parts before the finish', async () => {
+	test('should finish the answer first, then mark it complete and offer reply suggestions as transient parts', async () => {
 		// Given a suggestions agent that offers two replies
 		const harness = createHarness({
 			suggestions: [
@@ -202,9 +368,12 @@ describe('runChatTurn', () => {
 			await harness.run({ messages: [userMessage('Mad?')] })
 		)
 
-		// Then the answer is marked complete, the replies follow after the lock is released, and the finish comes last
+		// Then the answer's finish is not held: the answer is marked complete after it, once the lock is released, and the replies come last
 		const types = chunks.map((chunk) => chunk.type)
-		expect(types.indexOf(ANSWER_COMPLETE_PART)).toBeGreaterThan(-1)
+		expect(types.indexOf('finish')).toBeGreaterThan(-1)
+		expect(types.indexOf('finish')).toBeLessThan(
+			types.indexOf(ANSWER_COMPLETE_PART)
+		)
 		expect(types.indexOf(ANSWER_COMPLETE_PART)).toBeLessThan(
 			types.indexOf(REPLY_SUGGESTIONS_PART)
 		)
@@ -215,7 +384,54 @@ describe('runChatTurn', () => {
 			data: { suggestions: ['Og i september?', 'Hvordan sparer jeg?'] },
 			transient: true
 		})
+		expect(chunks.at(-1)?.type).toBe(REPLY_SUGGESTIONS_PART)
+	})
+
+	test('should hold the finish until the reply suggestions are in when asked to', async () => {
+		const harness = createHarness({
+			suggestions: [textReply('{"suggestions":["Og i september?"]}')],
+			overrides: {
+				replySuggestions: { agentId: 'chat-suggestions', holdFinish: true }
+			}
+		})
+
+		const { chunks } = await readTurn(
+			await harness.run({ messages: [userMessage('Mad?')] })
+		)
+
+		const types = chunks.map((chunk) => chunk.type)
+		expect(types.indexOf(ANSWER_COMPLETE_PART)).toBeLessThan(
+			types.indexOf(REPLY_SUGGESTIONS_PART)
+		)
 		expect(chunks.at(-1)?.type).toBe('finish')
+	})
+
+	test("should answer its own refusals under the app's codes", async () => {
+		// Given an app that calls a thread of someone else `workspace_forbidden`
+		const errors = defineChatErrors({
+			codes: { workspace_forbidden: 403 },
+			rename: { forbidden: 'workspace_forbidden' }
+		})
+		const harness = createHarness({ overrides: { refusals: errors.refusals } })
+		await harness.memory.createThread({
+			threadId: harness.threadKey.threadId,
+			resourceId: 'someone-else'
+		})
+
+		// When the turn finds the thread is not the caller's
+		const result = await harness.run({ messages: [userMessage('Hej')] })
+
+		// Then the client reads the app's code, and a code that was not renamed stays
+		expect(result).toMatchObject({
+			kind: 'refused',
+			code: 'workspace_forbidden',
+			status: 403
+		})
+		expect(
+			await harness.run({
+				messages: [{ id: 's', role: 'system', parts: [] }]
+			})
+		).toMatchObject({ kind: 'refused', code: 'invalid_request' })
 	})
 
 	describe('refusals', () => {

@@ -17,7 +17,7 @@ export const USER_MESSAGE_PART = 'data-user-message'
 /** The transient data part a server streams after an answer: up to three replies the user can tap to send. */
 export const REPLY_SUGGESTIONS_PART = 'data-reply-suggestions'
 
-/** The transient data part a server streams before the replies: the answer is complete, though its finish waits for them. */
+/** The transient data part a server streams before the replies: the answer is complete and stored, and only the replies follow on its stream. */
 export const ANSWER_COMPLETE_PART = 'data-answer-complete'
 
 /** The part a run that a processor stopped ends with; its `reason` says why. */
@@ -46,6 +46,114 @@ export const chatErrorCodes = [
 	'temporarily_unavailable'
 ] as const
 export type ChatErrorCode = (typeof chatErrorCodes)[number]
+
+/** The HTTP status each built-in code is answered with. */
+export const chatErrorStatuses: Readonly<Record<ChatErrorCode, number>> = {
+	invalid_request: 400,
+	message_too_long: 413,
+	unauthenticated: 401,
+	forbidden: 403,
+	unavailable: 403,
+	consent_required: 403,
+	not_found: 404,
+	turn_in_progress: 409,
+	change_expired: 409,
+	usage_limited: 429,
+	temporarily_unavailable: 503
+}
+
+/** A refusal in an app's own code, as `gate`, `admit` and `refusals` take it. */
+export interface ChatErrorRefusal<TCode extends string = string> {
+	readonly code: TCode
+	readonly status: number
+	readonly retryAfterSeconds?: number
+}
+
+/** An app's refusal codes: the built-in ones it keeps, and its own. */
+export interface ChatErrors<TCode extends string> {
+	/** Every code a client can receive, for a schema or an exhaustive switch. */
+	readonly codes: readonly TCode[]
+	status(code: TCode): number
+	/** A refusal for `gate` or `admit`, in one of the app's codes. */
+	refusal(
+		code: TCode,
+		options?: { readonly retryAfterSeconds?: number }
+	): ChatErrorRefusal<TCode>
+	/**
+	 * The built-in refusals the app answers under a code of its own, for
+	 * `runChatTurn`'s and `createChatRoute`'s `refusals`.
+	 */
+	readonly refusals: Partial<Record<ChatErrorCode, ChatErrorRefusal<TCode>>>
+	/** The `{ error }` body of every refusal, for the client to parse. */
+	readonly bodySchema: z.ZodType<{
+		error: TCode
+		retryAfterSeconds?: number | undefined
+	}>
+}
+
+/**
+ * The refusal codes of one app: its own codes with their HTTP statuses, added
+ * to the built-in ones, and the built-in ones it answers under another name.
+ * A renamed built-in code never reaches the client, so it is not in `codes`.
+ *
+ * ```ts
+ * export const chatErrors = defineChatErrors({
+ *   codes: { workspace_forbidden: 403, chat_model_forbidden: 403 },
+ *   rename: { forbidden: 'workspace_forbidden', not_found: 'workspace_forbidden' }
+ * })
+ * ```
+ */
+export function defineChatErrors<
+	const TOwn extends Readonly<Record<string, number>>,
+	const TRename extends Partial<Record<ChatErrorCode, keyof TOwn & string>> =
+		Record<never, never>
+>(definition: {
+	readonly codes: TOwn
+	readonly rename?: TRename
+}): ChatErrors<Exclude<ChatErrorCode, keyof TRename> | (keyof TOwn & string)> {
+	type Code = Exclude<ChatErrorCode, keyof TRename> | (keyof TOwn & string)
+
+	const rename: Partial<Record<ChatErrorCode, string>> = definition.rename ?? {}
+	const statuses: Record<string, number> = {
+		...chatErrorStatuses,
+		...definition.codes
+	}
+	const codes = [
+		...chatErrorCodes.filter((code) => rename[code] === undefined),
+		...Object.keys(definition.codes).filter(
+			(code) => !(code in chatErrorStatuses)
+		)
+	] as Code[]
+	const status = (code: string) => {
+		const found = statuses[code]
+
+		if (found === undefined) throw new Error(`Unknown chat error code ${code}.`)
+
+		return found
+	}
+
+	return {
+		codes,
+		status,
+		refusal: (code, options) => ({
+			code,
+			status: status(code),
+			...(options?.retryAfterSeconds !== undefined && {
+				retryAfterSeconds: options.retryAfterSeconds
+			})
+		}),
+		refusals: Object.fromEntries(
+			Object.entries(rename).map(([builtIn, own]) => [
+				builtIn,
+				{ code: own as Code, status: status(own) }
+			])
+		),
+		bodySchema: z.object({
+			error: z.enum(codes as [Code, ...Code[]]),
+			retryAfterSeconds: z.number().optional()
+		}) as unknown as ChatErrors<Code>['bodySchema']
+	}
+}
 
 // OUTCOMES
 

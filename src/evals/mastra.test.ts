@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { MastraDBMessage } from '@mastra/core/agent'
+import { RequestContext } from '@mastra/core/request-context'
 import type { DatasetItem } from '@mastra/core/storage'
 import {
 	createAgentTestRun,
@@ -8,13 +9,18 @@ import {
 import type { EvalCase } from './case.js'
 import {
 	assertLocalDatabase,
+	type ExperimentTaskArgs,
 	caseOfRun,
+	createCalledToolScorer,
 	createChecksScorer,
+	createExperimentTask,
+	createNoToolErrorsScorer,
 	planDatasetSync,
 	readRunOutput,
 	replayRecordedTools,
 	threadTurnsToDatasetItems,
-	toDatasetItem
+	toDatasetItem,
+	traceOfRun
 } from './mastra.js'
 
 const GROCERIES: EvalCase = {
@@ -125,6 +131,206 @@ describe('the hard checks as a Mastra scorer', () => {
 				score: 0,
 				reason: 'does not call electricity_getPrices'
 			})
+		)
+	})
+})
+
+describe('a run that ends on a change waiting for approval', () => {
+	/** An answer whose write call waits for the user, as Mastra stores it, beside a call that failed. */
+	const proposal = createTestMessage({
+		id: 'proposal',
+		role: 'assistant',
+		content: '',
+		parts: [
+			{
+				type: 'tool-invocation' as const,
+				toolInvocation: {
+					state: 'call' as const,
+					toolCallId: 'call-write',
+					toolName: 'budget_update',
+					args: { amount: 500 }
+				}
+			}
+		]
+	})
+	proposal.content.metadata = {
+		pendingToolApprovals: {
+			budget_update: { toolCallId: 'call-write', toolName: 'budget_update' }
+		}
+	}
+	const stranded = createTestMessage({
+		id: 'stranded',
+		role: 'assistant',
+		content: '',
+		parts: [
+			{
+				type: 'tool-invocation' as const,
+				toolInvocation: {
+					state: 'call' as const,
+					toolCallId: 'call-read',
+					toolName: 'budget_get',
+					args: {}
+				}
+			}
+		]
+	})
+	const run = (output: MastraDBMessage[]) =>
+		createAgentTestRun({
+			inputMessages: [createTestMessage({ role: 'user', content: 'Sæt 500' })],
+			output
+		})
+
+	test('reads the waiting call as a proposal, not as a failed call or a result', () => {
+		const output = readRunOutput([proposal, stranded])
+
+		expect(output.calledTools).toEqual(['budget_update', 'budget_get'])
+		expect(output.waitingCalls.map((call) => call.toolName)).toEqual([
+			'budget_update'
+		])
+		expect(output.failedCalls.map((call) => call.toolName)).toEqual([
+			'budget_get'
+		])
+		expect(output.toolResults).toEqual([])
+		expect(traceOfRun({ output: [proposal] }).turns[0]).toMatchObject({
+			heldForApproval: ['budget_update'],
+			toolCalls: [{ name: 'budget_update', errorText: null }]
+		})
+	})
+
+	test('passes the no-tool-errors scorer, which a failed call does not', async () => {
+		const scorer = createNoToolErrorsScorer()
+
+		expect(await scorer.run(run([proposal]))).toEqual(
+			expect.objectContaining({ score: 1, reason: 'No tool call failed.' })
+		)
+		expect(await scorer.run(run([proposal, stranded]))).toEqual(
+			expect.objectContaining({
+				score: 0,
+				reason: 'Failed tool calls: budget_get.'
+			})
+		)
+	})
+
+	test('scores each called tool under its own id', async () => {
+		const update = createCalledToolScorer('budget_update')
+		const remove = createCalledToolScorer('budget_delete')
+
+		expect(update.id).not.toBe(remove.id)
+		expect(await update.run(run([proposal]))).toEqual(
+			expect.objectContaining({ score: 1 })
+		)
+		expect(await remove.run(run([proposal]))).toEqual(
+			expect.objectContaining({
+				score: 0,
+				reason: 'The run did not call budget_delete; it called budget_update.'
+			})
+		)
+	})
+})
+
+describe('an experiment task', () => {
+	const signal = createTestMessage({
+		id: 'signal',
+		role: 'system',
+		content: 'Now on the budget page.'
+	})
+
+	type ToolHook = (call: { toolName: string; input: unknown }) => unknown
+
+	/** An agent that records what each turn ran with, calls the tools it is told to, and answers with the turn's text. */
+	function fakeAgent(toolsToCall: readonly string[] = []) {
+		const calls: { turn: unknown; options: Record<string, unknown> }[] = []
+		const hookResults: unknown[] = []
+		const generate = async (
+			turn: unknown,
+			options: Record<string, unknown>
+		) => {
+			calls.push({ turn, options })
+
+			const hooks = options.hooks as { beforeToolCall: ToolHook } | undefined
+			for (const toolName of toolsToCall) {
+				hookResults.push(hooks?.beforeToolCall({ toolName, input: {} }))
+			}
+
+			return {
+				scoringData: {
+					output: [answer(`answer-${calls.length}`, `Svar på ${turn}`)]
+				}
+			}
+		}
+
+		return { calls, hookResults, agent: { generate } as never }
+	}
+
+	test('runs every turn of an item with the prepared request context, on one thread', async () => {
+		const { agent, calls } = fakeAgent()
+		const requestContext = new RequestContext()
+		const prepared: ExperimentTaskArgs[] = []
+		const task = createExperimentTask({
+			agent,
+			prepare: (args) => {
+				prepared.push(args)
+
+				return {
+					requestContext,
+					memory: { thread: 'eval-thread', resource: 'eval-resource' },
+					outputPrefix: [signal]
+				}
+			}
+		})
+
+		const output = await task({
+			input: ['Hvor meget?', { text: 'Og før?' }],
+			groundTruth: { caseId: GROCERIES.id }
+		})
+
+		// Then the item was prepared once, and each turn ran with that context and thread
+		expect(prepared).toHaveLength(1)
+		expect(calls.map((call) => call.turn)).toEqual(['Hvor meget?', 'Og før?'])
+		expect(
+			calls.every((call) => call.options.requestContext === requestContext)
+		).toBe(true)
+		expect(calls[0]?.options).toMatchObject({
+			memory: { thread: 'eval-thread', resource: 'eval-resource' },
+			returnScorerData: true
+		})
+		// And the scorers get the prefix first, then each turn's messages
+		expect(output.map((message) => message.id)).toEqual([
+			'signal',
+			'answer-1',
+			'answer-2'
+		])
+	})
+
+	test("fails the item when a call matches none of its mocks under policy 'deny'", async () => {
+		// Given an agent that calls a tool the item has no mock for
+		const { agent, hookResults } = fakeAgent(['budget_get'])
+		const task = createExperimentTask({
+			agent,
+			prepare: () => ({
+				requestContext: new RequestContext(),
+				toolMocks: { mocks: [], unmockedToolPolicy: 'deny' }
+			})
+		})
+
+		// Then the call never reaches the tool, and the item fails
+		await expect(task({ input: 'Hvor meget?' })).rejects.toThrow(
+			'The run called budget_get without a matching mock'
+		)
+		expect(hookResults).toEqual([
+			{ proceed: false, output: { error: 'TOOL_MOCK_NOT_DECLARED' } }
+		])
+	})
+
+	test('refuses an input that holds no message', async () => {
+		const { agent } = fakeAgent()
+		const task = createExperimentTask({
+			agent,
+			prepare: () => ({ requestContext: new RequestContext() })
+		})
+
+		await expect(task({ input: [{ page: 'budget' }] })).rejects.toThrow(
+			"An experiment item's input must be a message or a list of messages."
 		)
 	})
 })

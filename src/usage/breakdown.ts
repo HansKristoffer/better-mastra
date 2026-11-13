@@ -11,7 +11,12 @@ import { type Logger, silentLogger } from '../models/route.js'
 export type UsageBreakdownRow = {
 	/** The dimension's value (user id, thread id, agent name); undefined for calls recorded without one. */
 	readonly group: string | undefined
+	/** Every input token, those read from and written to the prompt cache included. */
 	readonly inputTokens: number
+	/** Of the input tokens, those read from the provider's prompt cache. */
+	readonly cacheReadTokens: number
+	/** Of the input tokens, those written to the provider's prompt cache. */
+	readonly cacheWriteTokens: number
 	readonly outputTokens: number
 	/** The cost Mastra recorded for the group (USD); undefined when it recorded none. */
 	readonly cost: number | undefined
@@ -26,8 +31,9 @@ export const USAGE_BREAKDOWN_MAX_GROUPS = 1_000
 
 /**
  * Tokens and cost per user, thread or agent from Mastra's automatic metrics,
- * over a window that ends before `to`. The cost is the one Mastra recorded
- * (the provider's reported cost, or Mastra's price list), never a guess.
+ * over a window that ends before `to`, with the share of the input the prompt
+ * cache served and stored. The cost is the one Mastra recorded (the
+ * provider's reported cost, or Mastra's price list), never a guess.
  */
 export async function readUsageBreakdown(input: {
 	readonly mastra: Pick<Mastra, 'getStorage'>
@@ -51,10 +57,13 @@ export async function readUsageBreakdown(input: {
 			limit: USAGE_BREAKDOWN_MAX_GROUPS
 		})
 
-	const [inputTotals, outputTotals] = await Promise.all([
-		readTotal(TokenMetrics.TOTAL_INPUT),
-		readTotal(TokenMetrics.TOTAL_OUTPUT)
-	])
+	const [inputTotals, outputTotals, cacheReads, cacheWrites] =
+		await Promise.all([
+			readTotal(TokenMetrics.TOTAL_INPUT),
+			readTotal(TokenMetrics.TOTAL_OUTPUT),
+			readTotal(TokenMetrics.INPUT_CACHE_READ),
+			readTotal(TokenMetrics.INPUT_CACHE_WRITE)
+		])
 
 	if (
 		[inputTotals, outputTotals].some(
@@ -67,8 +76,18 @@ export async function readUsageBreakdown(input: {
 		)
 	}
 
-	return toRows(groupBy, inputTotals, outputTotals)
+	return toRows(groupBy, {
+		inputTokens: inputTotals,
+		outputTokens: outputTotals,
+		cacheReadTokens: cacheReads,
+		cacheWriteTokens: cacheWrites
+	})
 }
+
+type TokenField = Exclude<keyof UsageBreakdownRow, 'group' | 'cost'>
+
+/** The cache metrics are parts of the input total, whose cost already counts them. */
+const COSTED_FIELDS: readonly TokenField[] = ['inputTokens', 'outputTokens']
 
 /**
  * One row per group. A group's cost is the sum of both totals' costs: Mastra
@@ -77,47 +96,49 @@ export async function readUsageBreakdown(input: {
  */
 function toRows(
 	groupBy: string,
-	inputTotals: MetricBreakdown,
-	outputTotals: MetricBreakdown
+	breakdowns: Readonly<Record<TokenField, MetricBreakdown>>
 ): readonly UsageBreakdownRow[] {
 	const rows = new Map<string | undefined, UsageBreakdownRow>()
 
-	const add = (
-		breakdown: MetricBreakdown,
-		tokens: 'inputTokens' | 'outputTokens'
-	) => {
-		for (const { dimensions, value, estimatedCost } of breakdown.groups) {
+	for (const tokens of Object.keys(breakdowns) as TokenField[]) {
+		for (const { dimensions, value, estimatedCost } of breakdowns[tokens]
+			.groups) {
 			const group = dimensions[groupBy] ?? undefined
 			const row = rows.get(group) ?? {
 				group,
 				inputTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
 				outputTokens: 0,
 				cost: undefined
 			}
 			const cost =
-				estimatedCost == null ? row.cost : (row.cost ?? 0) + estimatedCost
+				estimatedCost == null || !COSTED_FIELDS.includes(tokens)
+					? row.cost
+					: (row.cost ?? 0) + estimatedCost
 			rows.set(group, { ...row, [tokens]: row[tokens] + value, cost })
 		}
 	}
-
-	add(inputTotals, 'inputTokens')
-	add(outputTotals, 'outputTokens')
 
 	return [...rows.values()]
 }
 
 /** Groups without a recorded cost are left out, rather than counted as free. */
-function recordedCosts(rows: readonly UsageBreakdownRow[]) {
+function recordedCosts(rows: readonly Pick<UsageBreakdownRow, 'cost'>[]) {
 	return rows.flatMap((row) => (row.cost === undefined ? [] : [row.cost]))
 }
 
 /** The average recorded cost per group; undefined when no group has one. */
-export function averageCostPerGroup(rows: readonly UsageBreakdownRow[]) {
+export function averageCostPerGroup(
+	rows: readonly Pick<UsageBreakdownRow, 'cost'>[]
+) {
 	return averageOf(recordedCosts(rows))
 }
 
 /** The median recorded cost per group; undefined when no group has one. */
-export function medianCostPerGroup(rows: readonly UsageBreakdownRow[]) {
+export function medianCostPerGroup(
+	rows: readonly Pick<UsageBreakdownRow, 'cost'>[]
+) {
 	return medianOf(recordedCosts(rows))
 }
 

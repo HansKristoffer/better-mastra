@@ -1,6 +1,7 @@
 /**
  * Tool input schemas as Mastra takes them (a Standard Schema with JSON Schema
- * attached): a zod input described with every date as an ISO string, and any
+ * attached): a zod input described with every date as an ISO string and
+ * without the regular expressions zod writes for a string format, and any
  * schema with its hidden inputs removed. Validation checks the model's input
  * with the original schema but hands the raw input on, so a procedure parses
  * and transforms it once.
@@ -31,19 +32,57 @@ type ValidationResult =
 /** A Standard Schema with JSON Schema attached, the form Mastra accepts as a tool input. */
 export type ToolInputSchema = StandardSchemaWithJSON<unknown>
 
+export interface ToolInputSchemaOptions {
+	/** Caps every list, so one change stays one Undo. */
+	readonly maxArrayItems?: number | undefined
+	/**
+	 * What the model is told about a string format. `compact`, the default,
+	 * drops the `pattern` zod writes for a standard format (190 characters for
+	 * a UUID, 330 for a datetime, on every field, on every request) and the
+	 * `format` itself, except a date or time format, which is how the model
+	 * knows what to write. `full` sends zod's JSON Schema as it is. Either way
+	 * the input is validated with the zod schema.
+	 */
+	readonly stringChecks?: 'compact' | 'full' | undefined
+}
+
+/** The formats that tell the model what string to write. */
+const DATE_FORMATS: readonly string[] = [
+	'date-time',
+	'date',
+	'time',
+	'duration'
+]
+
+/**
+ * The standard formats whose `pattern` only repeats the format's name as a
+ * regular expression. A pattern a schema's author wrote (`.regex()`,
+ * `.startsWith()`) and the ones for ids without a standard format (`cuid`,
+ * `ulid`) stay: they are short, and nothing else says what the string holds.
+ */
+const NAMED_FORMATS: readonly string[] = [
+	...DATE_FORMATS,
+	'uuid',
+	'email',
+	'uri',
+	'ipv4',
+	'ipv6'
+]
+
 /** An ISO datetime that ends in an offset such as `+02:00`, or in no zone at all, not `Z`. */
 const NON_UTC_DATETIME = /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:[+-]\d{2}:?\d{2})?$/
 
 /**
  * A zod object input as a tool input: `z.date()` offered as an ISO string and
- * coerced back before validation, and with `maxArrayItems` every list capped.
- * Throws for an input that is not an object, a programming error.
+ * coerced back before validation, string formats described compactly
+ * (`stringChecks`), and with `maxArrayItems` every list capped. Throws for an
+ * input that is not an object, a programming error.
  */
 export function toolInputSchema(
 	schema: z.ZodType,
-	options: { readonly maxArrayItems?: number | undefined } = {}
+	options: ToolInputSchemaOptions = {}
 ): ToolInputSchema {
-	const jsonSchema = toToolJsonSchema(schema, options.maxArrayItems)
+	const jsonSchema = toToolJsonSchema(schema, options)
 
 	if (jsonSchema.type !== 'object') {
 		throw new Error('A tool must take an object input.')
@@ -196,7 +235,7 @@ function standardSchema(
 // the model can only send its string branch.
 function toToolJsonSchema(
 	schema: z.ZodType,
-	maxArrayItems: number | undefined
+	{ maxArrayItems, stringChecks = 'compact' }: ToolInputSchemaOptions
 ): JsonSchema {
 	const { $schema: _, ...jsonSchema } = z.toJSONSchema(schema, {
 		io: 'input',
@@ -208,6 +247,16 @@ function toToolJsonSchema(
 			if (def.type === 'date') {
 				node.type = 'string'
 				node.format = 'date-time'
+			}
+
+			if (
+				stringChecks === 'compact' &&
+				typeof node.format === 'string' &&
+				NAMED_FORMATS.includes(node.format)
+			) {
+				delete node.pattern
+
+				if (!DATE_FORMATS.includes(node.format)) delete node.format
 			}
 
 			if (def.type === 'array' && maxArrayItems !== undefined) {

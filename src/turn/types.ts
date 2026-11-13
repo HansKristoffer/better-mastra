@@ -1,6 +1,9 @@
 import type { SharedV4ProviderOptions } from '@ai-sdk/provider'
 import type { AgentExecutionOptions, ToolsInput } from '@mastra/core/agent'
-import type { InputProcessorOrWorkflow } from '@mastra/core/processors'
+import type {
+	InputProcessorOrWorkflow,
+	OutputProcessorOrWorkflow
+} from '@mastra/core/processors'
 import type { RequestContext } from '@mastra/core/request-context'
 import type { LanguageModel, UIMessage } from 'ai'
 
@@ -37,8 +40,20 @@ export type AnyRequestContext = RequestContext<any>
  * never reaches a run snapshot, a trace span or a score row.
  */
 export interface ChatTurnPlan {
-	/** The stable instructions: the one system message with a cache marker. */
-	readonly instructions: string
+	/**
+	 * The stable instructions. A string is one system message with a cache
+	 * marker. A list is one system message per block, in order, each ending in
+	 * a cache breakpoint: put what every user shares first (rules, a catalogue)
+	 * and what one tenant or workspace shares after it, so the first block and
+	 * the tools are read from the provider's cache across users.
+	 *
+	 * Anthropic takes four breakpoints per request and the conversation uses
+	 * two (`withConversationCache`), so at most two blocks carry a marker: of
+	 * more, only the last two do. The earlier ones still sit in the cached
+	 * prefix; join blocks yourself to choose where the two breakpoints go. An
+	 * empty block is left out.
+	 */
+	readonly instructions: string | readonly string[]
 	/**
 	 * A second system message without a cache marker. It goes before the
 	 * history, so when it changes the provider's cache of the history is
@@ -68,6 +83,15 @@ export interface ChatTurnPlan {
 	readonly providerOptions?: SharedV4ProviderOptions | ProviderOptions
 	/** Per-turn input processors, ahead of the agent's own. */
 	readonly inputProcessors?: readonly InputProcessorOrWorkflow[]
+	/**
+	 * Per-turn output processors, ahead of the agent's own: what code can fix
+	 * in the answer without a rule in the prompt. A `processOutputStream` that
+	 * rewrites a `text-delta` changes the text the client streams, the text
+	 * the thread stores and the text the turn reports alike. It sees one
+	 * delta at a time, so a rewrite of something longer than a character must
+	 * keep the unfinished end of a delta back in `state` until the next one.
+	 */
+	readonly outputProcessors?: readonly OutputProcessorOrWorkflow[]
 }
 
 /** The minimum chat body: the AI SDK's messages, and a suspended run to resume. */
@@ -97,6 +121,18 @@ export type ChatRefusal =
 			readonly status: number
 			readonly retryAfterSeconds?: number
 	  }
+
+/** How many stable instruction blocks carry a cache marker: Anthropic's four breakpoints less the conversation's two. */
+export const MAX_CACHED_INSTRUCTION_BLOCKS = 2
+
+/** The plan's stable instructions as blocks, in order: a string is one block, and an empty block of a list is left out. */
+export function stableInstructionBlocks(
+	instructions: ChatTurnPlan['instructions']
+): readonly string[] {
+	return typeof instructions === 'string'
+		? [instructions]
+		: instructions.filter((block) => block.trim() !== '')
+}
 
 const plans = new WeakMap<object, ChatTurnPlan>()
 

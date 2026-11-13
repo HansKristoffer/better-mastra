@@ -3,6 +3,7 @@ import { RequestContext } from '@mastra/core/request-context'
 import { createTool } from '@mastra/core/tools'
 import { z } from 'zod'
 
+import { CHANGE_UNREAD_SENTENCE, tallyUndo, undoTarget } from './changes.js'
 import { buildClientActionTools } from './clientActions.js'
 import {
 	deferredTool,
@@ -10,6 +11,7 @@ import {
 	rankToolsByName
 } from './deferredTools.js'
 import {
+	type DefinedTool,
 	defineTool,
 	TOOL_ERROR_SENTENCE,
 	ToolRefusal,
@@ -324,6 +326,126 @@ describe('renderToolManifestSource', () => {
 	})
 })
 
+describe('a write tool with a change', () => {
+	/** A budget whose amount a tool sets, with the record Undo needs. */
+	function budgetTool(budget: { amount: number }, guard?: () => string) {
+		const writes: number[] = []
+		const unread: unknown[] = []
+		const defined = defineTool({
+			tool: {
+				id: 'budget_set',
+				description: 'Sets the budget.',
+				inputSchema: z.object({ amount: z.number() }),
+				execute: async ({ amount }: { amount: number }) => {
+					writes.push(amount)
+					budget.amount = amount
+
+					return { saved: true }
+				}
+			},
+			tier: 'approval',
+			change: {
+				confirmFields: [{ path: 'amount', format: { kind: 'amount' } }],
+				...(guard && { guard }),
+				readBefore: async () => ({ amount: budget.amount }),
+				toResult: ({ input, before, output }) => {
+					if (input.amount === 13) throw new Error('The read back failed.')
+
+					return {
+						...output,
+						undo: { previous: before.amount, next: input.amount }
+					}
+				},
+				onUnread: (error) => unread.push(error)
+			}
+		})
+
+		return { defined, writes, unread }
+	}
+	const call = (tool: DefinedTool['tool'], amount: number) =>
+		tool.execute!({ amount }, { requestContext: new RequestContext() })
+
+	test('should return the result with its undo record, read before the write', async () => {
+		const budget = { amount: 100 }
+		const { defined } = budgetTool(budget)
+
+		expect(await call(defined.tool, 250)).toEqual({
+			saved: true,
+			undo: { previous: 100, next: 250 }
+		})
+		expect(defined.manifest).toEqual({
+			confirmFields: [{ path: 'amount', format: { kind: 'amount' } }]
+		})
+	})
+
+	test("should not write when the guard refuses, and give the model the guard's sentence", async () => {
+		const { defined, writes } = budgetTool(
+			{ amount: 100 },
+			() => 'The month is closed.'
+		)
+
+		await expect(call(defined.tool, 250)).rejects.toThrow(
+			'The month is closed.'
+		)
+		expect(writes).toEqual([])
+	})
+
+	test('should never say nothing changed once the write happened', async () => {
+		const budget = { amount: 100 }
+		const { defined, unread } = budgetTool(budget)
+
+		await expect(call(defined.tool, 13)).rejects.toThrow(CHANGE_UNREAD_SENTENCE)
+		expect(budget.amount).toBe(13)
+		expect(unread).toHaveLength(1)
+	})
+})
+
+describe('undoTarget', () => {
+	const undo = (current: number | undefined, write = async () => {}) =>
+		undoTarget({ read: async () => current, previous: 100, next: 250, write })
+
+	test('should write the previous value back only while the target holds the value the change wrote', async () => {
+		const written: number[] = []
+		const outcomes = [
+			await undo(250, async () => void written.push(100)),
+			// Undo ran before
+			await undo(100, async () => void written.push(100)),
+			// The user changed it since
+			await undo(400, async () => void written.push(100)),
+			await undo(undefined, async () => void written.push(100)),
+			await undo(250, async () => {
+				throw new Error('Refused.')
+			})
+		]
+
+		expect(outcomes).toEqual([
+			'undone',
+			'alreadyUndone',
+			'changedSince',
+			'changedSince',
+			'failed'
+		])
+		expect(written).toEqual([100])
+		expect(tallyUndo(outcomes)).toEqual({
+			undone: 1,
+			alreadyUndone: 1,
+			changedSince: 2,
+			failed: 1
+		})
+	})
+
+	test('should compare values whatever order their keys come back in', async () => {
+		expect(
+			await undoTarget({
+				read: async () => ({ b: 2, a: 1 }),
+				previous: { a: 0, b: 0 },
+				next: { a: 1, b: 2 },
+				write: async () => {}
+			})
+		).toBe('undone')
+	})
+})
+
 describe('toolInputSchema', () => {
 	test('should offer dates as strings and cap the lists of a write', () => {
 		const schema = toolInputSchema(
@@ -354,6 +476,60 @@ describe('toolInputSchema', () => {
 		).toMatchObject({
 			issues: [{ message: 'At most 2 items in one change.' }]
 		})
+	})
+
+	test('should leave out the regular expression and the name of a string format, and still validate with them', () => {
+		const input = z.object({
+			id: z.uuid().describe('The budget'),
+			from: z.string().datetime(),
+			day: z.iso.date(),
+			email: z.email(),
+			month: z.string().regex(/^\d{4}-\d{2}$/),
+			kind: z.enum(['fixed', 'variable']),
+			amount: z.number().min(0).max(100)
+		})
+		const properties = (schema: ReturnType<typeof toolInputSchema>) =>
+			(
+				schema['~standard'].jsonSchema.input({
+					target: 'draft-07'
+				} as never) as {
+					properties: Record<string, Record<string, unknown>>
+				}
+			).properties
+		const compact = toolInputSchema(input)
+
+		// A standard format loses its regular expression; only a date or time keeps its name
+		expect(properties(compact)).toEqual({
+			id: { type: 'string', description: 'The budget' },
+			from: { type: 'string', format: 'date-time' },
+			day: { type: 'string', format: 'date' },
+			email: { type: 'string' },
+			// A pattern the schema's author wrote says what the string holds
+			month: { type: 'string', pattern: '^\\d{4}-\\d{2}$' },
+			kind: { type: 'string', enum: ['fixed', 'variable'] },
+			amount: { type: 'number', minimum: 0, maximum: 100 }
+		})
+		expect(JSON.stringify(properties(compact)).length).toBeLessThan(
+			JSON.stringify(
+				properties(toolInputSchema(input, { stringChecks: 'full' }))
+			).length / 3
+		)
+		expect(
+			properties(toolInputSchema(input, { stringChecks: 'full' })).id
+		).toMatchObject({ format: 'uuid', pattern: expect.any(String) })
+
+		// The server still checks the format
+		expect(
+			compact['~standard'].validate({
+				id: 'not-a-uuid',
+				from: '2026-10-20T10:00:00Z',
+				day: '2026-10-20',
+				email: 'a@b.dk',
+				month: '2026-10',
+				kind: 'fixed',
+				amount: 1
+			})
+		).toMatchObject({ issues: [{ path: ['id'] }] })
 	})
 })
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { PostgresStore, PostgresStoreVNext } from '@mastra/pg'
 import { Pool } from 'pg'
 import { libsqlStorage } from '../libsql/index'
 import { pgStorage } from '../pg/index'
@@ -34,6 +35,24 @@ describe('pgStorage', () => {
 			})
 		)
 		await storage.close()
+	})
+
+	test("gives the same store typed as @mastra/pg's class, by its observability schema", async () => {
+		const vnext = pgStorage({ connectionString: CONNECTION })
+		const plain = pgStorage({
+			connectionString: CONNECTION,
+			observabilitySchema: false
+		})
+		// Fails the typecheck if the store comes back opaque again.
+		const typed: [PostgresStoreVNext, PostgresStore] = [
+			vnext.postgres,
+			plain.postgres
+		]
+
+		expect(typed[0]).toBeInstanceOf(PostgresStoreVNext)
+		expect(typed[1]).toBeInstanceOf(PostgresStore)
+		expect(vnext.postgres as unknown).toBe(vnext.store)
+		await Promise.all([vnext.close(), plain.close()])
 	})
 
 	test.each([0, -1, 2.5])('refuses a pool size of %p', (poolMax) => {

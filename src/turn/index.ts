@@ -1,5 +1,6 @@
 export {
 	asAgentModel,
+	asStepModel,
 	type CreateChatAgentOptions,
 	createChatAgent
 } from './agent.js'
@@ -12,11 +13,16 @@ export {
 	type PendingChange,
 	type TurnChanges
 } from './changes.js'
+export { parseChatTurnBody } from './body.js'
 export { chatErrorResponse, chatRefusal } from './errors.js'
 export {
+	type ChatErrorRefusal,
+	type ChatErrors,
+	chatErrorStatuses,
 	chatResumeSchema,
 	chatTurnBodySchema,
 	type ChatTurnBodyInput,
+	defineChatErrors,
 	turnOutcomes,
 	uiMessageSchema
 } from '../protocol/index.js'
@@ -111,7 +117,9 @@ export {
 	chatErrorCodes,
 	findTurnPlan,
 	type LanguageModelObject,
+	MAX_CACHED_INSTRUCTION_BLOCKS,
 	type ProviderOptions,
 	rememberTurnPlan,
+	stableInstructionBlocks,
 	type ThreadKey
 } from './types.js'

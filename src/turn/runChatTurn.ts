@@ -47,6 +47,7 @@ import type { RunUsage } from '../usage/stream.js'
 import { deriveThreadTitle, persistThreadMetadata } from './title.js'
 import {
 	type AnyRequestContext,
+	type ChatErrorCode,
 	type ChatRefusal,
 	type ChatTurnBody,
 	type ChatTurnPlan,
@@ -190,7 +191,13 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 		 */
 		readonly messages: readonly UIMessage[]
 		readonly threadKey: ThreadKey
-		/** The stored thread; null before its first turn. Its metadata holds the model arm. */
+		/**
+		 * The stored thread as the turn read it for its ownership check, so
+		 * `prepare` need not read it again; null before its first turn. Its
+		 * metadata holds the model arm. It was read just before the thread lock
+		 * was claimed: what a turn that ended between that read and the claim
+		 * wrote is not in it.
+		 */
 		readonly thread: StorageThreadType | null
 		readonly signal: AbortSignal
 	}): Promise<PreparedChatTurn>
@@ -211,12 +218,26 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 	/** The thread's title from its messages, written once; `false` writes none. */
 	readonly deriveTitle?:
 		false | ((messages: readonly UIMessage[]) => string | null)
-	/** Replies offered after an answer, from this agent. */
+	/**
+	 * Replies offered after an answer, from this agent. They stream after the
+	 * answer's `finish`, so the answer never waits for them: the chat session
+	 * in `better-mastra/client` ends its turn at the answer and takes the
+	 * replies as they arrive.
+	 */
 	readonly replySuggestions?: {
 		readonly agentId: string
 		readonly timeoutMs?: number
 		readonly requestContext?: (scope: TScope) => AnyRequestContext
+		/** Holds the answer's `finish` until the replies are in, for a client that stops reading at `finish`. Default false. */
+		readonly holdFinish?: boolean
 	}
+	/**
+	 * The built-in refusals the turn answers itself, in the app's codes: a
+	 * thread that is not the caller's (`forbidden`), a turn already running
+	 * (`turn_in_progress`) and the rest of `chatErrorCodes`. Each defaults to
+	 * the built-in code; `defineChatErrors(...).refusals` builds the map.
+	 */
+	readonly refusals?: Partial<Record<ChatErrorCode, ChatRefusal>>
 	/** The only error text the client receives. */
 	readonly errorSentence?: string
 	/** The longest user message, in characters; a longer one is refused with `message_too_long`. Default 32,000. */
@@ -280,7 +301,7 @@ export async function runChatTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			error: staged?.failure ?? error
 		})
 
-		return refused('temporarily_unavailable')
+		return refusedWith(deps, 'temporarily_unavailable')
 	}
 }
 
@@ -289,6 +310,14 @@ export function refused(refusal: ChatRefusal): ChatTurnResult {
 	const { code, status } = chatRefusal(refusal)
 
 	return { kind: 'refused', code, status, response: chatErrorResponse(refusal) }
+}
+
+/** A refusal the turn decides itself, under the app's code for it when it has one. */
+function refusedWith(
+	deps: { readonly refusals?: Partial<Record<ChatErrorCode, ChatRefusal>> },
+	code: ChatErrorCode
+): ChatTurnResult {
+	return refused(deps.refusals?.[code] ?? code)
 }
 
 async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
@@ -300,12 +329,12 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 	const startedAt = (deps.now ?? Date.now)()
 	const messages = readMessages(request.body, deps.maxMessageLength ?? 32_000)
 
-	if (messages === 'system') return refused('invalid_request')
-	if (messages === 'too_long') return refused('message_too_long')
+	if (messages === 'system') return refusedWith(deps, 'invalid_request')
+	if (messages === 'too_long') return refusedWith(deps, 'message_too_long')
 
 	const scope = await atStage('scope', () => deps.resolveScope(request))
 
-	if (scope === undefined) return refused('forbidden')
+	if (scope === undefined) return refusedWith(deps, 'forbidden')
 
 	onScope(scope)
 
@@ -323,14 +352,14 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 
 	// A thread that exists must belong to the turn's resource; one that does not yet is the caller's to create.
 	if (thread && thread.resourceId !== threadKey.resourceId) {
-		return refused('forbidden')
+		return refusedWith(deps, 'forbidden')
 	}
 
 	const lock = await atStage('thread_lock', async () =>
 		deps.lock ? deps.lock(threadKey) : async () => {}
 	)
 
-	if (!lock) return refused('turn_in_progress')
+	if (!lock) return refusedWith(deps, 'turn_in_progress')
 
 	const release = releaseOnce(lock, logger)
 
@@ -403,7 +432,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 
 	if (changes.kind === 'expired') {
 		await turn.release()
-		return refused('change_expired')
+		return refusedWith(deps, 'change_expired')
 	}
 
 	if (request.body.trigger === 'regenerate-message') {
@@ -500,7 +529,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 
 	if (!started) {
 		await turn.release()
-		return refused('change_expired')
+		return refusedWith(deps, 'change_expired')
 	}
 
 	const newMessage =
@@ -526,17 +555,23 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 
 		deps.sinks?.turnFinished?.(finished)
 
-		// Awaited: the client refreshes its thread list when the stream closes.
-		await persistThreadMetadata({
-			memory: deps.memory,
-			key: threadKey,
-			title: deriveTitle === false ? null : deriveTitle(turn.messages),
-			...(prepared.threadMetadata && { metadata: prepared.threadMetadata })
-		}).catch((error: unknown) =>
-			logger.error('[better-mastra] the thread metadata was not written', {
-				error
-			})
-		)
+		const title = deriveTitle === false ? null : deriveTitle(turn.messages)
+
+		// Nothing to write means no read either: a thread that has its title
+		// and already holds the turn's values, or a turn that gives neither.
+		if (needsThreadMetadata(turn.thread, title, prepared.threadMetadata)) {
+			// Awaited: the client refreshes its thread list when the stream closes.
+			await persistThreadMetadata({
+				memory: deps.memory,
+				key: threadKey,
+				title,
+				...(prepared.threadMetadata && { metadata: prepared.threadMetadata })
+			}).catch((error: unknown) =>
+				logger.error('[better-mastra] the thread metadata was not written', {
+					error
+				})
+			)
+		}
 
 		if (finished.outcome === 'answered') deps.sinks?.scoreTurn?.(finished)
 	}
@@ -591,11 +626,32 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			}),
 			close,
 			...(epilogue && { epilogue }),
+			...(suggestions?.holdFinish && { holdFinish: true }),
 			...(deps.errorSentence && { errorSentence: deps.errorSentence }),
 			onInternalError: (error) =>
 				logger.error('[better-mastra] the turn stream failed', { error })
 		})
 	}
+}
+
+/**
+ * Whether the turn has a title or a metadata value the thread, as read when
+ * the turn started, does not hold yet. A thread that did not exist then needs
+ * whatever the turn gives.
+ */
+function needsThreadMetadata(
+	thread: StorageThreadType | null,
+	title: string | null,
+	metadata: Readonly<Record<string, unknown>> | undefined
+): boolean {
+	const needsTitle = Boolean(title) && !thread?.title?.trim()
+
+	return (
+		needsTitle ||
+		Object.entries(metadata ?? {}).some(
+			([key, value]) => thread?.metadata?.[key] !== value
+		)
+	)
 }
 
 /**

@@ -10,7 +10,9 @@ import { Agent, type AgentExecutionOptions } from '@mastra/core/agent'
 import type { MastraMemory } from '@mastra/core/memory'
 import type {
 	ErrorProcessorOrWorkflow,
-	InputProcessorOrWorkflow
+	InputProcessorOrWorkflow,
+	OutputProcessorOrWorkflow,
+	ProcessInputStepResult
 } from '@mastra/core/processors'
 import type { LanguageModel } from 'ai'
 import type { z } from 'zod'
@@ -25,7 +27,9 @@ import {
 	type ChatTurnPlan,
 	findTurnPlan,
 	type LanguageModelObject,
-	type ProviderOptions
+	MAX_CACHED_INSTRUCTION_BLOCKS,
+	type ProviderOptions,
+	stableInstructionBlocks
 } from './types.js'
 
 export interface CreateChatAgentOptions {
@@ -40,6 +44,8 @@ export interface CreateChatAgentOptions {
 	readonly stopAfterTools?: readonly string[]
 	/** Extra input processors, after the budget stop and the signals. */
 	readonly processors?: readonly InputProcessorOrWorkflow[]
+	/** Output processors of every turn, after the plan's own. */
+	readonly outputProcessors?: readonly OutputProcessorOrWorkflow[]
 	readonly errorProcessors?: readonly ErrorProcessorOrWorkflow[]
 	/** A whole run; keep it below the server's shutdown drain. Default 80 s. */
 	readonly turnTimeoutMs?: number
@@ -109,6 +115,10 @@ export function createChatAgent(options: CreateChatAgentOptions): Agent {
 			...(findTurnPlan(requestContext)?.inputProcessors ?? []),
 			...staticProcessors
 		],
+		outputProcessors: ({ requestContext }) => [
+			...(findTurnPlan(requestContext)?.outputProcessors ?? []),
+			...(options.outputProcessors ?? [])
+		],
 		errorProcessors: [
 			new RetryBeforeAnswerText(),
 			...(options.errorProcessors ?? [])
@@ -125,7 +135,25 @@ export function asAgentModel(model: LanguageModel): LanguageModelObject {
 	return model
 }
 
-/** The stable instructions carry the cache marker; the per-request part follows without one. */
+/**
+ * A model as a processor's `processInputStep` returns it to replace the
+ * step's model, with the conversation cache markers the chat agent puts on
+ * the plan's own model.
+ */
+export function asStepModel(
+	model: LanguageModel
+): NonNullable<ProcessInputStepResult['model']> {
+	// Mastra runs an AI SDK 7 model here; its step result types `doGenerate`
+	// as returning a stream result, which no such model's does.
+	return withConversationCache(asAgentModel(model)) as unknown as NonNullable<
+		ProcessInputStepResult['model']
+	>
+}
+
+/**
+ * One system message per stable block, the last two with the cache marker (a
+ * string plan is one block, marked); the per-request part follows without one.
+ */
 function instructionsFor(requestContext: object) {
 	const plan = findTurnPlan(requestContext)
 
@@ -133,18 +161,22 @@ function instructionsFor(requestContext: object) {
 		return UNPREPARED_INSTRUCTIONS
 	}
 
-	const stable = {
+	const blocks = stableInstructionBlocks(plan.instructions)
+	const firstMarked = blocks.length - MAX_CACHED_INSTRUCTION_BLOCKS
+	const stable = blocks.map((content, index) => ({
 		role: 'system' as const,
-		content: plan.instructions,
-		providerOptions: CACHE_MARKER
-	}
-
-	return plan.perRequestInstructions
+		content,
+		...(index >= firstMarked && { providerOptions: CACHE_MARKER })
+	}))
+	const messages = plan.perRequestInstructions
 		? [
-				stable,
+				...stable,
 				{ role: 'system' as const, content: plan.perRequestInstructions }
 			]
 		: stable
+
+	// A list whose blocks are all empty leaves the agent without instructions.
+	return messages.length === 1 ? messages[0]! : messages.length ? messages : ''
 }
 
 function modelFor(plan: ChatTurnPlan | undefined): LanguageModelObject {

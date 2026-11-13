@@ -219,6 +219,58 @@ test('cross-replica reconnect mid-stream gets full ordered content once', async 
 	expect(remote.at(-1)?.type).toBe('finish')
 })
 
+test('a replay prefix follows the start for every reconnecting reader, never for the request that started the turn', async () => {
+	const { a, b } = setup()
+	const turn = source()
+	const prefix: UIMessageChunk[] = [
+		{ type: 'tool-input-start', toolCallId: 'call-1', toolName: 'write' },
+		{
+			type: 'tool-approval-request',
+			approvalId: 'r::call-1',
+			toolCallId: 'call-1'
+		}
+	]
+	const response = await a.streams.start({
+		threadKey: 't',
+		...turn,
+		replayPrefix: prefix
+	})
+	// One reader is there before the turn's first chunk, one comes after it, one from another replica
+	const early = await a.streams.reconnect('t')
+	turn.begin()
+	turn.text('Done')
+	await tick()
+	const late = await a.streams.reconnect('t')
+	const remote = await b.streams.reconnect('t')
+	turn.end()
+	const [original, ...replays] = await Promise.all([
+		collect(response),
+		collect(early),
+		collect(late),
+		collect(remote)
+	])
+	const types = (chunks: UIMessageChunk[]) => chunks.map((c) => c.type)
+
+	expect(types(original)).toEqual([
+		'start',
+		'text-start',
+		'text-delta',
+		'text-end',
+		'finish'
+	])
+	for (const replay of replays) {
+		expect(types(replay)).toEqual([
+			'start',
+			'tool-input-start',
+			'tool-approval-request',
+			'text-start',
+			'text-delta',
+			'text-end',
+			'finish'
+		])
+	}
+})
+
 test('reconnect after finish replays within grace, 204 after', async () => {
 	const { a, b } = setup({ graceMs: 60 })
 	const turn = source()

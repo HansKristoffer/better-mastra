@@ -1,4 +1,14 @@
 export {
+	CHANGE_UNREAD_SENTENCE,
+	NO_UNDO,
+	type ToolChange,
+	type ToolChangeCall,
+	tallyUndo,
+	type UndoOutcome,
+	type UndoTally,
+	undoTarget
+} from './changes.js'
+export {
 	buildClientActionTools,
 	type ClientToolDef,
 	clientToolDefSchema
@@ -41,6 +51,7 @@ export {
 	coerceDateStrings,
 	jsonSchemaInput,
 	type ToolInputSchema,
+	type ToolInputSchemaOptions,
 	toolInputSchema,
 	withHiddenInputs
 } from './toolInputSchema.js'

@@ -31,6 +31,7 @@ ESM only, Node 20+ or Bun. Every peer is optional and loaded only by the subpath
 | `better-mastra/dictation` (`/react`, `/vue`, `/server`) | Live speech to text with Soniox | `react` or `vue` for the bindings |
 | `better-mastra/embeddings` | Cached query embeddings and batched document embeddings | `ai` |
 | `better-mastra/usage` | Metered `generateText`/`generateObject`, model budgets, per-user rate limits | `ai`, `@ai-sdk/provider` |
+| `better-mastra/analytics` | A span processor that strips conversation text, a turn's model calls, PostHog LLM analytics | `@mastra/core` types, `zod` |
 | `better-mastra/evals` | Eval cases, checks and an LLM judge, run through your production turn | `@mastra/core`, `ai`, `zod` |
 | `better-mastra/mcp-relay` | Another MCP server's tools offered on your own MCP server, called as the current user | `@modelcontextprotocol/client` (+ `/server` for `withRelayedTools`) |
 
@@ -83,7 +84,33 @@ app.route('/', createChatRoute({
 }))
 ```
 
-`chatTurnBodySchema` (also in the browser-safe `better-mastra/protocol`) parses the body the chat session sends; `chatTurnBodySchema.extend({ pageContext })` adds your own fields.
+`chatTurnBodySchema` (also in the browser-safe `better-mastra/protocol`) parses the body the chat session sends. It is a plain zod object, so zod's own `omit` and `extend` make it yours, and `parseChatTurnBody(schema, json)` parses with it and then checks every message part with the AI SDK:
+
+```ts
+const bodySchema = chatTurnBodySchema
+	.omit({ threadId: true }) // the server derives the thread
+	.extend({
+		messages: chatTurnBodySchema.shape.messages.min(1).max(50),
+		resume: chatResumeSchema.extend({ data: myResumeData }).optional(),
+		locale: z.enum(['da', 'en'])
+	})
+
+parseBody: (json) => parseChatTurnBody(bodySchema, json) // undefined answers 400
+```
+
+`defineChatErrors` gives an app its own refusal codes beside the built-in ones:
+
+```ts
+export const chatErrors = defineChatErrors({
+	codes: { workspace_forbidden: 403, chat_model_forbidden: 403 },
+	rename: { forbidden: 'workspace_forbidden', not_found: 'workspace_forbidden' }
+})
+
+chatErrors.codes // every code a client can get, typed: the built-in ones kept, then your own
+chatErrors.refusal('chat_model_forbidden') // for gate and admit
+chatErrors.bodySchema // the { error } body, for the client
+runChatTurn(request, { refusals: chatErrors.refusals /* … */ }) // also on createChatRoute
+```
 
 `runChatTurn` takes the rest as optional ports: `gate` (access and consent), `lock` (one turn per thread), `admit` (usage limits), `sinks` (tool, usage and finished-turn events), `replySuggestions`, `deriveTitle`. Every refusal reaches the client as a fixed error code, never a raw error, and every failure is logged with the stage it happened in. A user message over `maxMessageLength` (32,000 characters) is refused as `message_too_long` (413), so the client can say why.
 
@@ -139,10 +166,41 @@ Also here: `withPromptCache` / `promptCacheMiddleware` for provider prompt cachi
 - **`defineRequestContext(schema)`**: typed request context values; `defineRequestContextHolder` for values that must never be serialized into a snapshot or span.
 - **`createThreadHandlers`**: list, read and delete the caller's threads, and rate answers. `ownsThread({ memory, threadId, resourceId })` is the check `createChatRoute` needs with `resumable`.
 - **`sweepOldThreads`** and **`sweepAbandonedRuns`**: nothing runs them for you. Without a scheduled job of yours, old threads (with the customer text they quote) and suspended approvals stay in the `mastra` schema for good.
-- **`createReplySuggestionsAgent`**: short replies offered after an answer.
+- **`createReplySuggestionsAgent`**: short replies offered after an answer. They stream after the answer's `finish`, so the answer never waits for them: the chat session ends its turn when the answer is complete and takes the replies as they arrive. `replySuggestions: { holdFinish: true }` keeps the `finish` until they are in, for a client that stops reading there.
 - **`defineModelArms`**: model experiments by thread: a thread keeps its arm for life.
 
 The plan splits instructions three ways so the provider's cache keeps hitting: `instructions` (stable, cached), `perRequestInstructions` (per thread), and `signal` (per request, sent after the user's message and never stored).
+
+`instructions` is a string, or a list of stable blocks that each become a system message ending in a cache breakpoint. Put what every user shares first and what one workspace shares after it, and the first block and the tools are read from the provider's cache across users:
+
+```ts
+plan: {
+	instructions: [rulesAndCatalogue, workspaceFacts], // shared by everyone, then per workspace
+	perRequestInstructions: threadFacts, // no marker
+	signal: `Now on ${page}.`
+}
+```
+
+Anthropic takes four breakpoints per request and the conversation uses two, so at most two blocks are marked: of more, only the last two are, and the earlier ones still sit in the cached prefix. Join blocks yourself to choose where the two breakpoints go.
+
+The plan also takes `outputProcessors`, for what code can fix in the answer without a rule in the prompt. A `processOutputStream` that rewrites a `text-delta` changes the text the client streams, a reconnect replays, the thread stores and `sinks.turnFinished` reports alike:
+
+```ts
+plan: {
+	// …
+	outputProcessors: [{
+		id: 'plain-dashes',
+		processOutputStream: async ({ part }) =>
+			part.type === 'text-delta'
+				? { ...part, payload: { ...part.payload, text: part.payload.text.replace(/[–—]/g, '-') } }
+				: part
+	}]
+}
+```
+
+It sees one delta at a time, so a rewrite of something longer than a character (an id to strip) must keep the unfinished end of a delta back in `state` until the next one arrives.
+
+`prepare` gets the stored `thread` the turn already read for its ownership check, so it need not read it again. After the answer the turn reads the thread once more only when it has a title or a `threadMetadata` value the thread does not hold yet. `asStepModel(model)` types a model for a processor that swaps the step's model (`processInputStep` returning `{ model }`).
 
 ## Tools (`better-mastra/tools`)
 
@@ -166,7 +224,38 @@ const { tools: toolset, toolTiers } = toToolSet(tools) // for the turn plan
 
 `better-mastra-tool-manifest src/tools.ts src/generated/tool-manifest.ts` writes the client's manifest from the same definitions; `--name` names the export, `--type Manifest:./types` annotates it with your type, and `--check` (for CI) fails when the file is out of date. On the client, `createToolRefresh(toolManifest, { tasks: refetchTasks })` is an `onToolResult` that refetches what each tool `invalidates`, typed so a namespace without a refetch fails the typecheck.
 
+`toolInputSchema(zodSchema)` describes a zod input for the model: dates as ISO strings, and without the regular expression zod writes for every string format (190 characters for a UUID, 330 for a datetime, on every request). A standard format loses its `pattern` and its `format`, except a date or time format, which is how the model knows what to write; a pattern you wrote with `.regex()` stays. The server validates with the zod schema either way. `{ stringChecks: 'full' }` sends zod's JSON Schema as it is.
+
 A tool without `execute` is a client tool. `meta` keeps your server's own data on a definition (a gate, a permission) without it reaching the manifest. `deferredTool` and `deferredToolSearch` keep a large tool catalog out of the prompt without breaking Anthropic's prompt cache; `markDryRun` turns every write into a marker for evals. `jsonSchemaInput(schema)` takes a JSON Schema, such as an MCP tool's, as a tool input.
+
+A write tool can carry its `change`: the confirm card's fields (they reach the manifest), a `guard` whose sentence the model reads when the change must not run, the read before the write, and the result with its undo record, which is what the tool returns. Once the write has happened, a failure reaches the model as "could not be read back", never as "nothing changed":
+
+```ts
+defineTool({
+	tool: { id: 'budget_set', description, inputSchema, execute: ({ budgetId, amount }) => budgets.set(budgetId, amount) },
+	tier: 'approval',
+	change: {
+		confirmFields: [{ path: 'amount', format: { kind: 'amount' } }],
+		guard: async ({ input }) => ((await budgets.isClosed(input.budgetId)) ? 'That month is closed.' : undefined),
+		readBefore: ({ input }) => budgets.get(input.budgetId),
+		toResult: ({ input, before }) => ({
+			budgetId: input.budgetId,
+			undo: { kind: 'budgetAmount', budgetId: input.budgetId, previous: before.amount, next: input.amount }
+		})
+	}
+})
+```
+
+Undo then writes the previous value back only while the target still holds the value the change wrote, so a later edit by the user is never overwritten. `undoTarget` is that rule for one target and `tallyUndo` counts the outcomes:
+
+```ts
+const outcome = await undoTarget({
+	read: async () => (await budgets.get(record.budgetId))?.amount,
+	previous: record.previous,
+	next: record.next,
+	write: (amount) => budgets.set(record.budgetId, amount)
+}) // 'undone' | 'alreadyUndone' | 'changedSince' | 'failed'
+```
 
 Whatever `execute` throws is what the model, the stored thread and the client read. With `maskErrors: true` (or `{ sentence, onError }`), only a `ToolRefusal`'s message and an abort get through; any other error goes to `onError` and the model reads one fixed sentence:
 
@@ -238,7 +327,7 @@ await storage.init() // once, in the process that migrates
 await shutdown({ mastra, memory, storage })
 ```
 
-`pgStorage` keeps Mastra in its own schema (`mastra`, plus `mastra_observability`), turns keep-alive on and logs a severed idle connection instead of crashing. `createMemory` keeps message history in thread scope; pass `observer` to turn on observational memory. `checkHealth({ checks })` pings stores and checks provider keys without spending tokens.
+`pgStorage` keeps Mastra in its own schema (`mastra`, plus `mastra_observability`), turns keep-alive on and logs a severed idle connection instead of crashing. `storage.postgres` is the same store typed as `@mastra/pg`'s `PostgresStoreVNext` (`PostgresStore` with `observabilitySchema: false`), for code that names that type. `createMemory` keeps message history in thread scope; pass `observer` to turn on observational memory. `observationMessageTokens` (15,000) is when observations replace raw messages, and `reflectionObservationTokens` (Mastra's 40,000) is when the Reflector condenses the observations: lower it to keep a long-running thread's prompt small. `checkHealth({ checks })` pings stores and checks provider keys without spending tokens.
 
 `pgStorage` and `libsqlStorage` from the package root are the same presets loaded on call (they return promises); they stay for compatibility.
 
@@ -286,6 +375,8 @@ if (!resumed) return new Response(null, { status: 204 })
 await resumable.stop(threadId)
 ```
 
+A turn that goes on with an earlier answer (an approved change, a resumed run, a client action's result) streams only what it adds, so its replay alone could open on the result of a tool call it never started. Pass `replayPrefix: replayPrefixOf(body.messages)` to `start()` and a reconnecting reader gets the earlier answer after the turn's `start`, which makes the replay the whole answer; the chat route does this for you.
+
 A new `start()` on a thread whose turn still runs aborts that turn, on this replica or another. A stopped turn gets `stopTimeoutMs` (5 s) to end its stream; after that it ends with an `abort` chunk, so a tool that ignores its abort signal cannot keep the turn open.
 
 The adapters need Redis 6.2 or newer (`SET … GET`). Use `ioRedis(client)` for ioredis. Both adapters open extra connections with `duplicate()`: one subscriber per replica, and one per cross-replica reader (for `XREAD BLOCK`). When the command client cannot duplicate itself (one wrapped to time its commands out), pass the connections separately: `bunRedis(commands, { connect: () => newSubscriberConnection() })`. Sticky sessions keep reconnects on the owner, where they cost nothing.
@@ -326,6 +417,8 @@ Failure behaviour: a buffer over `maxBufferBytes` (2 MB) keeps streaming but new
 
 ## Usage and limits (`better-mastra/usage`)
 
+`readUsageBreakdown({ mastra, groupBy, from, to })` gives tokens and recorded cost per user, thread or agent from Mastra's metrics, with `cacheReadTokens` and `cacheWriteTokens` beside the input total.
+
 `withUsage({ llms, sink, onSinkError })` returns `generateText`, `generateObject` and `meterStream` that report every run's tokens and cost to your sink; `meterStream` also takes a finished run's values, such as the turn's `usage`. A sink that throws loses its row: log it with `onSinkError`. `createModelBudget` caps concurrent background model calls per provider and backs off on 429s.
 
 `admitUserRequest` charges one request against every window of a user's operation at once, or refuses it with the seconds until the fullest window has room. The keys hold an HMAC of the user id, never the id itself. Pass any Redis client's `EVAL`:
@@ -356,6 +449,35 @@ admit: async (scope) =>
 		onUnavailable: (error) => logger.warn('usage limit unavailable', { error })
 	})
 ```
+
+## Analytics (`better-mastra/analytics`)
+
+For traces and LLM analytics that hold no conversation text.
+
+`new StripContentProcessor()` is a Mastra span processor that removes the input, the output, the request context, and the attributes that carry instructions, prompts and tool schemas, and keeps ids, timings, usage and cost. Put it in `spanOutputProcessors` of every environment but development.
+
+`readModelCalls(steps, modelId)` reads the model calls of a turn from what `sinks.usage` hands over (model, tokens, cache tokens, cost, stop reason), `readTurnTraceId(steps)` the trace Mastra gave the turn, and `totalModelCalls(calls)` adds them up. `posthogGenerations` is a ready `sinks.usage` that sends one `$ai_generation` per model call:
+
+```ts
+import { createPostHogCapture, POSTHOG_EU_HOST, posthogGenerations } from 'better-mastra/analytics'
+
+const capture = createPostHogCapture({
+	apiKey: process.env.POSTHOG_PROJECT_API_KEY, // nothing is sent without one
+	host: POSTHOG_EU_HOST,
+	onError: (error, event) => logger.warn('PostHog send failed', { ...event, error })
+})
+
+sinks: {
+	usage: posthogGenerations({
+		capture, // or (event) => posthog.capture(event) with posthog-node
+		provider: 'openrouter',
+		// undefined for a user who must not be tracked
+		identify: (scope, labels) => (scope.analyticsConsent ? { distinctId: scope.userId, sessionId: String(labels.sessionId) } : undefined)
+	})
+}
+```
+
+The sender posts to PostHog's capture API with `fetch` and never throws, so no PostHog SDK is installed. The events carry no input and no output.
 
 ## Dictation (`better-mastra/dictation`)
 
@@ -394,6 +516,25 @@ bunx --bun better-mastra-evals --suite smoke --model google/gemini-3.5-flash --m
 ```
 
 Several `--model` flags print a model comparison; `--compare` diffs against a saved report.
+
+For Mastra's own `runEvals` and dataset experiments:
+
+- `createNoToolErrorsScorer()` scores 1 when no tool call failed. A call that waits for the user's approval is the answer's proposal, not a failure, which `checks.noToolErrors()` from `@mastra/evals` counts it as. `readRunOutput(output)` gives `failedCalls` and `waitingCalls` too.
+- `createCalledToolScorer('budget_update')` has the tool's name in its id, so several of them score one run; `checks.calledTool()` scorers share one id and overwrite each other. `createChecksScorer` scores a whole case as one 1 or 0.
+- `createExperimentTask({ agent, prepare })` is an experiment `task` that runs each item with a request context you prepared, as your production turn does. An experiment's agent target builds the context from plain values, so a turn plan or a caller kept beside it is missing.
+
+```ts
+await dataset.startExperiment({
+	task: createExperimentTask({
+		agent,
+		prepare: async ({ groundTruth, metadata }) => {
+			const { requestContext, memory } = await prepareTurnFor(metadata)
+			return { requestContext, memory, toolMocks: mocksOf(groundTruth) }
+		}
+	}),
+	scorers: [createNoToolErrorsScorer(), createCalledToolScorer('budget_update')]
+})
+```
 
 ## MCP relay (`better-mastra/mcp-relay`)
 

@@ -5,7 +5,9 @@
  * so the turn's closing work (the thread lock's release) runs when the run has
  * really ended, Stop and a gone client included, and before the client sees
  * the stream close. After the closing work an epilogue may add parts of its
- * own, such as the replies offered after the answer, before the answer's finish.
+ * own, such as the replies offered after the answer. They follow the answer's
+ * `finish`, so the answer is never held for them; `holdFinish` keeps the
+ * earlier order, where the finish waits for the epilogue.
  */
 
 import type { UIMessage, UIMessageChunk } from 'ai'
@@ -22,8 +24,17 @@ export interface UserFacingStreamHandlers {
 	close?(ending: TurnStreamEnding): Promise<void>
 	/** Sent right after the answer's `start`, such as the user's message for a client that reattaches. */
 	afterStart?: UIMessageChunk
-	/** Runs after `close` while the client still reads, before the answer's finish; it must not throw. */
+	/**
+	 * Runs after `close` while the client still reads, and after the answer's
+	 * `finish` was sent: its parts are transient extras, and the stream closes
+	 * when it ends. It must not throw.
+	 */
 	epilogue?(send: (chunk: UIMessageChunk) => void): Promise<void>
+	/**
+	 * Holds the answer's `finish` until the epilogue has run, for a client
+	 * that stops reading at `finish`. Default false.
+	 */
+	holdFinish?: boolean
 	/** The only error text the client receives. */
 	errorSentence?: string
 	onInternalError?(error: unknown): void
@@ -93,7 +104,8 @@ async function pump(
 	errorChunk: UIMessageChunk,
 	report: (error: unknown) => void
 ): Promise<void> {
-	// The answer's finish waits for the epilogue, so its parts belong to the answer.
+	// With `holdFinish`, the answer's finish waits for the epilogue.
+	const holdsFinish = handlers.holdFinish === true && !!handlers.epilogue
 	let finish: UIMessageChunk | undefined
 	let { afterStart } = handlers
 	const reader = source.getReader()
@@ -102,7 +114,7 @@ async function pump(
 	while (next.kind === 'chunk') {
 		handlers.observe?.(next.chunk)
 
-		if (next.chunk.type === 'finish' && handlers.epilogue) {
+		if (next.chunk.type === 'finish' && holdsFinish) {
 			finish = next.chunk
 		} else if (isUserFacingPart(next.chunk)) {
 			send(next.chunk.type === 'error' ? errorChunk : next.chunk)

@@ -70,6 +70,27 @@ function stream(chunks: readonly UIMessageChunk[]): Reply {
 		})
 }
 
+/** A stream that sends its chunks and stays open: `send` adds more, `end` closes it. */
+function heldStream(chunks: readonly UIMessageChunk[]) {
+	let controller!: ReadableStreamDefaultController<UIMessageChunk>
+	const send = (more: readonly UIMessageChunk[]) => {
+		for (const chunk of more) {
+			controller.enqueue(chunk)
+		}
+	}
+	const reply: Reply = () =>
+		createUIMessageStreamResponse({
+			stream: new ReadableStream({
+				start(streamController) {
+					controller = streamController
+					send(chunks)
+				}
+			})
+		})
+
+	return { reply, send, end: () => controller.close() }
+}
+
 /** A stream that sends its chunks, then drops the connection. */
 function droppedStream(chunks: readonly UIMessageChunk[]): Reply {
 	return () => {
@@ -140,6 +161,18 @@ async function settled(
 	}
 
 	throw new Error(`Turn did not settle: ${chat.getSnapshot().turn.kind}`)
+}
+
+async function waitFor(condition: () => boolean) {
+	for (let tick = 0; tick < 200; tick += 1) {
+		if (condition()) {
+			return
+		}
+
+		await new Promise((resolve) => setTimeout(resolve, 1))
+	}
+
+	throw new Error('The condition never held.')
 }
 
 function texts(messages: readonly UIMessage[]) {
@@ -764,6 +797,123 @@ describe('createChatSession', () => {
 
 		expect(chat.getSnapshot().answerComplete).toBe(false)
 		await settled(chat)
+	})
+
+	test('ends the turn at the answer and still takes the replies that follow its finish', async () => {
+		const first = heldStream([
+			...answer('Svar'),
+			{ type: 'data-answer-complete', data: {}, transient: true }
+		])
+		const server = fakeServer([first.reply])
+		const saved: (string | undefined)[] = []
+		const chat = session(server, {
+			onSaved: ({ message }) => saved.push(message?.id)
+		})
+
+		chat.send('Hej')
+		await waitFor(() => chat.getSnapshot().turn.kind === 'idle')
+
+		// The stream is still open, yet the turn is over and the answer saved
+		expect(chat.chat.status).toBe('streaming')
+		expect(chat.getSnapshot().answerComplete).toBe(true)
+		expect(saved).toEqual(['answer-1'])
+
+		first.send([
+			{
+				type: 'data-reply-suggestions',
+				data: { suggestions: ['Ja', 'Nej'] },
+				transient: true
+			}
+		])
+		first.end()
+		await settled(chat)
+
+		expect(chat.getSnapshot().replySuggestions).toEqual(['Ja', 'Nej'])
+		expect(chat.getSnapshot().turn).toEqual({ kind: 'idle' })
+		expect(saved).toEqual(['answer-1'])
+		expect(texts(chat.chat.messages)).toEqual(['Hej', 'Svar'])
+	})
+
+	test('takes the replies a real turn streams after its finish', async () => {
+		// Given the real turn with a suggestions agent, which finishes the
+		// answer before it writes the replies
+		const harness = createHarness({
+			replies: [textReply('Du brugte 4.200 kr.')],
+			suggestions: [textReply('{"suggestions":["Og i september?"]}')],
+			overrides: { replySuggestions: { agentId: 'chat-suggestions' } }
+		})
+		const chat = session({
+			requests: [],
+			fetch: async (_input, init) => {
+				const result = await harness.run(JSON.parse(String(init?.body)))
+
+				if (result.kind !== 'stream') throw new Error('The turn was refused.')
+
+				return createUIMessageStreamResponse({ stream: result.stream })
+			}
+		})
+
+		chat.send('Mad?')
+		await settled(chat)
+
+		expect(texts(chat.chat.messages)).toEqual(['Mad?', 'Du brugte 4.200 kr.'])
+		expect(chat.getSnapshot().replySuggestions).toEqual(['Og i september?'])
+		expect(chat.getSnapshot().answerComplete).toBe(true)
+		expect(chat.getSnapshot().turn).toEqual({ kind: 'idle' })
+	})
+
+	test('sends a new message while the replies still stream, and drops those replies', async () => {
+		const first = heldStream([
+			...answer('Første'),
+			{ type: 'data-answer-complete', data: {}, transient: true }
+		])
+		const server = fakeServer([
+			first.reply,
+			stream(answer('Anden', 'answer-2'))
+		])
+		const chat = session(server)
+
+		chat.send('Et')
+		await waitFor(() => chat.getSnapshot().turn.kind === 'idle')
+
+		chat.send('To')
+		await settled(chat)
+
+		expect(server.requests).toHaveLength(2)
+		expect(server.requests[1]?.body).toMatchObject({
+			messages: [{ role: 'user', parts: [{ type: 'text', text: 'To' }] }]
+		})
+		expect(texts(chat.chat.messages)).toEqual(['Et', 'Første', 'To', 'Anden'])
+		expect(chat.getSnapshot().replySuggestions).toEqual([])
+		expect(chat.getSnapshot().turn).toEqual({ kind: 'idle' })
+	})
+
+	test('sends a message queued mid-answer as soon as the answer is complete', async () => {
+		const first = heldStream([
+			{ type: 'start', messageId: 'answer-1' },
+			{ type: 'text-start', id: 't1' },
+			{ type: 'text-delta', id: 't1', delta: 'Første' }
+		])
+		const server = fakeServer([
+			first.reply,
+			stream(answer('Anden', 'answer-2'))
+		])
+		const chat = session(server)
+
+		chat.send('Et')
+		await waitFor(() => chat.getSnapshot().turn.kind === 'streaming')
+		chat.send('To')
+
+		// The answer ends, and its stream stays open for the replies
+		first.send([
+			{ type: 'text-end', id: 't1' },
+			{ type: 'finish' },
+			{ type: 'data-answer-complete', data: {}, transient: true }
+		])
+		await settled(chat)
+
+		expect(server.requests).toHaveLength(2)
+		expect(texts(chat.chat.messages)).toEqual(['Et', 'Første', 'To', 'Anden'])
 	})
 
 	test('stops and restores the message of a session that is not on screen', () => {
