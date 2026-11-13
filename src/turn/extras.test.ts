@@ -185,3 +185,54 @@ describe('the turn metadata and scoring', () => {
 		expect(await countReadsAfterFinish({}, 2)).toBe(0)
 	})
 })
+
+describe('createReplySuggestionsAgent', () => {
+	test("should send the agent's provider options with the replies' model call", async () => {
+		// Given a replies agent told to run at a low reasoning effort
+		const { Mastra } = await import('@mastra/core/mastra')
+		const { MockLanguageModelV4 } = await import('ai/test')
+		const { simulateReadableStream } = await import('ai')
+		const { createReplySuggestionsAgent, sendReplySuggestions } =
+			await import('./replySuggestions.js')
+		const calls: unknown[] = []
+		const model = new MockLanguageModelV4({
+			doStream: async (options) => {
+				calls.push(options.providerOptions)
+
+				return {
+					stream: simulateReadableStream({
+						chunks: textReply('{"suggestions":["Ja tak"]}')
+					})
+				}
+			}
+		})
+		const mastra = new Mastra({
+			logger: false,
+			agents: {
+				replies: createReplySuggestionsAgent({
+					id: 'replies',
+					instructions: 'Write replies.',
+					model: () => model,
+					providerOptions: { openrouter: { reasoning: { effort: 'low' } } }
+				})
+			}
+		})
+		const sent: unknown[] = []
+
+		// When the replies are written
+		await sendReplySuggestions({
+			mastra,
+			agentId: 'replies',
+			question: 'Skal jeg?',
+			answer: 'Det kan du.',
+			signal: new AbortController().signal,
+			send: (chunk) => sent.push(chunk)
+		})
+
+		// Then the model call carried them, and the replies still arrived
+		expect(calls[0]).toMatchObject({
+			openrouter: { reasoning: { effort: 'low' } }
+		})
+		expect(sent.length).toBeGreaterThan(0)
+	})
+})

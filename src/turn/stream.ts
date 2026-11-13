@@ -10,17 +10,21 @@
  * earlier order, where the finish waits for the epilogue.
  */
 
-import type { UIMessage, UIMessageChunk } from 'ai'
+import type { UIMessageChunk } from 'ai'
 
-import { USER_MESSAGE_PART } from '../protocol/index.js'
+import {
+	isUserFacingPart,
+	toUserFacingMessage,
+	USER_MESSAGE_PART
+} from '../protocol/index.js'
 
 /** How the stream ended for the client: read to the end, or the client went away first. */
 export type TurnStreamEnding = 'finished' | 'cancelled'
 
 export interface UserFacingStreamHandlers {
-	/** Sees every chunk Mastra sends, including those the client never gets. */
+	/** Sees every chunk Mastra sends, including those the client never gets. One that throws is reported and the stream goes on. */
 	observe?(chunk: UIMessageChunk): void
-	/** Runs once, when Mastra's stream has ended and before the client sees it close. */
+	/** Runs once, when Mastra's stream has ended and before the client sees it close. One that fails is reported; the epilogue and the close still follow. */
 	close?(ending: TurnStreamEnding): Promise<void>
 	/** Sent right after the answer's `start`, such as the user's message for a client that reattaches. */
 	afterStart?: UIMessageChunk
@@ -45,24 +49,11 @@ type SourceRead =
 	| { readonly kind: 'done' }
 	| { readonly kind: 'failed'; readonly error: unknown }
 
-/** The default only error text a client receives; the real error stays in the server log. */
-export { USER_MESSAGE_PART }
+export { isUserFacingPart, toUserFacingMessage, USER_MESSAGE_PART }
 
+/** The default only error text a client receives; the real error stays in the server log. */
 export const TURN_ERROR_SENTENCE =
 	'The assistant could not answer right now. Please try again.'
-
-/** Observational memory stores its own bookkeeping as `data-om-*` parts. */
-const OBSERVATIONAL_MEMORY_PART_PREFIX = 'data-om-'
-
-/** Whether a message part or chunk may reach the client: observational memory's may not. */
-export function isUserFacingPart(part: { readonly type: string }): boolean {
-	return !part.type.startsWith(OBSERVATIONAL_MEMORY_PART_PREFIX)
-}
-
-/** The message with only its user-facing parts. */
-export function toUserFacingMessage<T extends UIMessage>(message: T): T {
-	return { ...message, parts: message.parts.filter(isUserFacingPart) }
-}
 
 /** The stream the client receives for one turn. */
 export function toUserFacingStream(
@@ -108,11 +99,20 @@ async function pump(
 	const holdsFinish = handlers.holdFinish === true && !!handlers.epilogue
 	let finish: UIMessageChunk | undefined
 	let { afterStart } = handlers
+	// An observer that throws must not stop the read: the run would never be
+	// read to its end, and the turn's closing work would never run.
+	const observe = (chunk: UIMessageChunk) => {
+		try {
+			handlers.observe?.(chunk)
+		} catch (error) {
+			report(error)
+		}
+	}
 	const reader = source.getReader()
 	let next = await readNext(reader)
 
 	while (next.kind === 'chunk') {
-		handlers.observe?.(next.chunk)
+		observe(next.chunk)
 
 		if (next.chunk.type === 'finish' && holdsFinish) {
 			finish = next.chunk
@@ -130,11 +130,11 @@ async function pump(
 
 	if (next.kind === 'failed') {
 		report(next.error)
-		handlers.observe?.(errorChunk)
+		observe(errorChunk)
 		send(errorChunk)
 	}
 
-	await handlers.close?.(ending())
+	await handlers.close?.(ending()).catch(report)
 
 	if (handlers.epilogue && ending() === 'finished') {
 		await handlers.epilogue(send)
