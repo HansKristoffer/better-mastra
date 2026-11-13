@@ -146,6 +146,27 @@ describe('running an eval case', () => {
 		expect(trace.turns[0]?.heldForApproval).toEqual(['deal_markWon'])
 	})
 
+	test('records a turn whose stream reports an error part as failed, with what it wrote', async () => {
+		// Given a turn that dies after its first sentence, as the chat turn reports a provider failure
+		const trace = await runEvalCase({
+			case: testCase,
+			modelId: 'test/model',
+			runTurn: () =>
+				stream([
+					{ type: 'start', messageId: 'a1' },
+					{ type: 'start-step' },
+					{ type: 'text-start', id: 't' },
+					{ type: 'text-delta', id: 't', delta: 'You have' },
+					{ type: 'error', errorText: 'The assistant could not answer.' }
+				])
+		})
+
+		// Then the turn is a failure, not a short clean answer, and the case stops
+		expect(trace.turns).toHaveLength(1)
+		expect(trace.turns[0]?.error).toBe('The assistant could not answer.')
+		expect(trace.turns[0]?.replyText).toBe('You have')
+	})
+
 	test('records a failing turn and stops the case', async () => {
 		const trace = await runEvalCase({
 			case: testCase,

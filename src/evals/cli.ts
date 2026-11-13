@@ -8,7 +8,7 @@
 // TypeScript config loads.
 
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { defineCli, defineCommand } from 'hanzio/cli'
 import { z } from 'zod'
@@ -67,6 +67,8 @@ function outputFile(output: string, modelId: string, models: number) {
 
 async function save(config: EvalConfig, report: EvalReport, output?: string) {
 	if (output) {
+		// Made before the write: a missing directory would lose the report of a run already paid for.
+		await mkdir(dirname(output), { recursive: true })
 		await writeFile(output, `${JSON.stringify(report, null, '\t')}\n`)
 		return output
 	}
