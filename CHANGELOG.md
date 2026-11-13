@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.8.0](https://github.com/HansKristoffer/better-mastra/compare/v0.7.0...v0.8.0) (2026-11-13)
+
+
+### Features
+
+* **analytics:** a span processor that strips content, a turn's model calls and PostHog LLM analytics ([9d39015](https://github.com/HansKristoffer/better-mastra/commit/9d39015c1a8a4828cb34ffc0993f11b68189fc1f))
+* cached instruction blocks, replies after the finish, compact tool schemas and eval fixes ([a3a020e](https://github.com/HansKristoffer/better-mastra/commit/a3a020e0619dd152093536182bb12393df54defb))
+* **client:** a turn ends at its answer while the replies still arrive ([f1680cc](https://github.com/HansKristoffer/better-mastra/commit/f1680ccf69226d836da5d08e843e199c0f5b42cb))
+* **evals:** approvals are not tool errors, a scorer id per tool, and an experiment task with a prepared context ([a000cf5](https://github.com/HansKristoffer/better-mastra/commit/a000cf52f2185842c4f4d3d5889346bc10f2778f))
+* **memory:** a reflection threshold on createMemory ([9054bd0](https://github.com/HansKristoffer/better-mastra/commit/9054bd0a8baa981fed6f7ae44817f48ba4d5cce0))
+* **pg:** pgStorage gives its store typed as @mastra/pg's class ([6a46d43](https://github.com/HansKristoffer/better-mastra/commit/6a46d4367092a4e8fcd7eb81efa9113929a958b6))
+* **protocol:** an app's own refusal codes, and a body parse that checks every message part ([2c97115](https://github.com/HansKristoffer/better-mastra/commit/2c97115c96313313bd751273a036089a2f40a683))
+* replay after an approval, change capture, an app's refusal codes and analytics ([9b41600](https://github.com/HansKristoffer/better-mastra/commit/9b41600147814d9be0399f7b7ea97645cf83cc39))
+* **resumable:** a reconnect replays the whole answer of a turn that goes on after an approval ([b766a30](https://github.com/HansKristoffer/better-mastra/commit/b766a30409db8556f1aad01a4866fa8e033bf826))
+* **tools:** change capture in defineTool, and the rule Undo writes back by ([ad64e83](https://github.com/HansKristoffer/better-mastra/commit/ad64e832114b205ca4659fb651a0ba522e0fd6a7))
+* **tools:** tool input schemas without zod's format regexes ([a18b180](https://github.com/HansKristoffer/better-mastra/commit/a18b1800ad9eb682dea4a90abf0245f575ed4fb8))
+* **turn:** output processors on the turn plan ([967d4d2](https://github.com/HansKristoffer/better-mastra/commit/967d4d28e8206b4bede3313824bf37548cef02ac))
+* **turn:** several stable instruction blocks, each a cache breakpoint ([82735a0](https://github.com/HansKristoffer/better-mastra/commit/82735a0436bc785fee6bb8d17a02e3aa4d8ffe5d))
+* **turn:** the answer finishes before its reply suggestions ([d7ac724](https://github.com/HansKristoffer/better-mastra/commit/d7ac7246a4d394458e4b52dd45bf843912665bb5))
+* **usage:** cache read and write tokens in the usage breakdown ([23b95c1](https://github.com/HansKristoffer/better-mastra/commit/23b95c11d671a7af7ab34c97146d03a487b88134))
+
 ## [0.7.0](https://github.com/HansKristoffer/better-mastra/compare/v0.6.0...v0.7.0) (2026-11-12)
 
 
