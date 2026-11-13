@@ -23,7 +23,7 @@ ESM only, Node 20+ or Bun. Every peer is optional and loaded only by the subpath
 | `better-mastra/turn` | `runChatTurn`, the chat agent, request context, reply suggestions, thread handlers | `@mastra/core`, `@mastra/memory`, `@mastra/ai-sdk`, `ai`, `zod` |
 | `better-mastra/protocol` | The wire contract: part names, refusal codes, outcomes, `chatTurnBodySchema` | `zod` (`ai` types only); safe in a browser |
 | `better-mastra/hono` | The chat route (`POST`, stream, stop) and a local Mastra Studio mount | `hono` (Studio: `@mastra/hono`) |
-| `better-mastra/resumable` | Turns that keep running past a disconnect, reconnectable across replicas | a Redis client, or none |
+| `better-mastra/resumable` | Turns that keep running past a disconnect, reconnectable across replicas; a thread lock | a Redis client, or none |
 | `better-mastra/tools` | `defineTool`: a tool plus its tier, card and hidden inputs; deferred tools; dry runs | `@mastra/core`, `zod` |
 | `better-mastra/client` | Framework-free chat session: turns, approvals, client actions, resume, tool cards | `ai`, `zod` |
 | `better-mastra/react`, `better-mastra/vue` | Hooks/composables and `ToolParts` over a chat session | `ai`, `zod`, `react` or `vue` |
@@ -112,9 +112,9 @@ chatErrors.bodySchema // the { error } body, for the client
 runChatTurn(request, { refusals: chatErrors.refusals /* … */ }) // also on createChatRoute
 ```
 
-`runChatTurn` takes the rest as optional ports: `gate` (access and consent), `lock` (one turn per thread), `admit` (usage limits), `sinks` (tool, usage and finished-turn events), `replySuggestions`, `deriveTitle`. Every refusal reaches the client as a fixed error code, never a raw error, and every failure is logged with the stage it happened in. A user message over `maxMessageLength` (32,000 characters) is refused as `message_too_long` (413), so the client can say why.
+`runChatTurn` takes the rest as optional ports: `gate` (access and consent), `lock` (one turn per thread; `createThreadLock` in `better-mastra/resumable` is one), `admit` (usage limits), `sinks` (tool, usage and finished-turn events), `replySuggestions`, `deriveTitle`. Every refusal reaches the client as a fixed error code, never a raw error, and every failure is logged with the stage it happened in. A user message over `maxMessageLength` (32,000 characters) is refused as `message_too_long` (413), so the client can say why.
 
-`sinks.turnFinished` gets the outcome (`turnOutcomes`: `answered`, `stopped`, `interrupted` when a newer turn or a shutdown ended it, `budget_stop`, `timeout`, `error`) and the run's `usage`, typed for `readStreamTextUsage`, `llms.cost` and `withUsage().meterStream(event.usage, …)`.
+`sinks.turnFinished` gets the outcome (`turnOutcomes`: `answered`, `stopped`, `interrupted` when a newer turn or a shutdown ended it, `budget_stop`, `timeout`, `error`) and the run's `usage`, typed for `readStreamTextUsage`, `llms.cost` and `withUsage().meterStream(event.usage, …)`. It also carries `stageMs` (how long `scope`, `gate`, `thread`, `thread_lock`, `usage_limit`, `preparation` and `model` each took before the stream started) and `streamStartedMs`, so the wait before the first token can be split into your ports, Mastra's start and the model: `timeToFirstTextMs - streamStartedMs` is the model's share. A sink or callback that throws, or returns a promise that rejects, is logged as `a turn port failed` and the turn goes on: reporting never cuts an answer or keeps the thread lock.
 
 ### Client
 
@@ -157,7 +157,7 @@ A route without a key is not loaded, nor is its SDK, so missing optional peers n
 
 A model missing from the pricing table costs `null` on a route that does not report its own spend (Vertex, Inception, the direct APIs); pass `pricing` for the models you use.
 
-Also here: `withPromptCache` / `promptCacheMiddleware` for provider prompt caching, `withLlmMode('batch')` to send background work through OpenRouter's Batch API, `anthropicSafeZodSchema`, `estimateModelCostUsd`, and `AiBillingError` for 402s.
+Also here: `withLlmMode('batch')` to send background work through OpenRouter's Batch API, `anthropicSafeZodSchema`, `estimateModelCostUsd`, and `AiBillingError` for 402s.
 
 ## Chat turn (`better-mastra/turn`)
 
@@ -166,7 +166,7 @@ Also here: `withPromptCache` / `promptCacheMiddleware` for provider prompt cachi
 - **`defineRequestContext(schema)`**: typed request context values; `defineRequestContextHolder` for values that must never be serialized into a snapshot or span.
 - **`createThreadHandlers`**: list, read and delete the caller's threads, and rate answers. `ownsThread({ memory, threadId, resourceId })` is the check `createChatRoute` needs with `resumable`.
 - **`sweepOldThreads`** and **`sweepAbandonedRuns`**: nothing runs them for you. Without a scheduled job of yours, old threads (with the customer text they quote) and suspended approvals stay in the `mastra` schema for good.
-- **`createReplySuggestionsAgent`**: short replies offered after an answer. They stream after the answer's `finish`, so the answer never waits for them: the chat session ends its turn when the answer is complete and takes the replies as they arrive. `replySuggestions: { holdFinish: true }` keeps the `finish` until they are in, for a client that stops reading there.
+- **`createReplySuggestionsAgent`**: short replies offered after an answer. They stream after the answer's `finish`, so the answer never waits for them: the chat session ends its turn when the answer is complete and takes the replies as they arrive. `replySuggestions: { holdFinish: true }` keeps the `finish` until they are in, for a client that stops reading there. Pass `providerOptions` (as `resolveLlm()` returns them) to set the reasoning effort: a model left at its provider's default can think for longer than the replies are worth.
 - **`defineModelArms`**: model experiments by thread: a thread keeps its arm for life.
 
 The plan splits instructions three ways so the provider's cache keeps hitting: `instructions` (stable, cached), `perRequestInstructions` (per thread), and `signal` (per request, sent after the user's message and never stored).
@@ -181,7 +181,7 @@ plan: {
 }
 ```
 
-Anthropic takes four breakpoints per request and the conversation uses two, so at most two blocks are marked: of more, only the last two are, and the earlier ones still sit in the cached prefix. Join blocks yourself to choose where the two breakpoints go.
+Anthropic takes four breakpoints per request and the conversation uses two, so at most two blocks are marked: of more, only the last two are, and the earlier ones still sit in the cached prefix. Join blocks yourself to choose where the two breakpoints go. On `anthropic-direct` the route's automatic breakpoint would be a fifth, so the route leaves it out for a prompt that arrives with markers of its own, as every chat turn does.
 
 The plan also takes `outputProcessors`, for what code can fix in the answer without a rule in the prompt. A `processOutputStream` that rewrites a `text-delta` changes the text the client streams, a reconnect replays, the thread stores and `sinks.turnFinished` reports alike:
 
@@ -278,7 +278,7 @@ defineTool({
 - **Client actions**: `defineClientAction({ name, description, inputSchema, handler })` gives the model a tool that runs on the device (navigate, open a sheet). Pass them as `clientActions`, read per request, so the screen on top decides.
 - **Screen context**: `createScreenContextStack` plus `useScreenContext(stack, { read, actions })` tells the chat what the user is looking at.
 - **Tool cards**: `createCardRegistry({ schemas, toolCard })` resolves tool parts to typed cards; `<ToolParts parts registry cards Steps />` draws them, folding runs of steps into an activity list.
-- **Streaming text**: `useWordReveal(text, streaming)` reveals whole words every 40 ms. In React Native, `<StreamingMarkdown text streaming />` from `better-mastra/react/markdown` renders it, re-parsing only the last paragraph.
+- **Streaming text**: `useWordReveal(text, streaming)` reveals whole words every 40 ms. In React Native, `<StreamingMarkdown text streaming />` from `better-mastra/react/markdown` renders it, re-parsing only the last paragraph. It takes your own `rules` (a code block, a table) and `markdownit` parser, so one component draws the streaming and the finished answer; keep both objects' identity stable.
 - **Resume**: with `resume: true` and `resumeOn: [resumeOnVisible, resumeOnOnline]` (or `resumeOnAppActive(AppState)` and `resumeOnNetworkRegain(NetInfo)` in React Native) the session reattaches to a running answer.
 
 - **Events**: `onToolResult` per tool result, `onSaved` when a request ended with its answer stored (never for a stop, a failure or a reattach that found nothing), `onFailure` for analytics. `pendingApproval(turn)` is the approval a waiting turn waits for. `prepareBody(request, body)` gets the default body to add your fields to. A refusal carries `retryAfterSeconds` when the server sent one.
@@ -382,6 +382,22 @@ A new `start()` on a thread whose turn still runs aborts that turn, on this repl
 The adapters need Redis 6.2 or newer (`SET … GET`). Use `ioRedis(client)` for ioredis. Both adapters open extra connections with `duplicate()`: one subscriber per replica, and one per cross-replica reader (for `XREAD BLOCK`). When the command client cannot duplicate itself (one wrapped to time its commands out), pass the connections separately: `bunRedis(commands, { connect: () => newSubscriberConnection() })`. Sticky sessions keep reconnects on the owner, where they cost nothing.
 
 Use `upstashRedis(client)` for `@upstash/redis`. Upstash has no blocking `XREAD`, so a cross-replica reader polls every `pollMs` (200 ms); pass `() => Redis.fromEnv()` to create the client on first use.
+
+### Thread lock
+
+`createThreadLock` is the `lock` port of `runChatTurn` and `createThreadHandlers`: one turn per thread across replicas, on the same Redis adapter. A second request on the thread is refused with `turn_in_progress`, and a thread is never deleted under a running turn.
+
+```ts
+import { createThreadLock } from 'better-mastra/resumable'
+
+const lock = createThreadLock({ redis: bunRedis(redis) }) // or ioRedis, upstashRedis
+
+runChatTurn(request, { lock /* … */ })
+createThreadHandlers({ lock /* … */ })
+```
+
+A claim is a key only its holder can release (`SET NX PX`, then an owner-checked script), renewed every third of `ttlMs` (30 s) while the turn runs, so a process that dies holds its thread for at most `ttlMs`. Without `redis` it locks within the one process. When Redis does not answer, the turn runs under the process's own lock and the outage is logged: a lock never takes the chat down.
+
 
 An app that already holds a per-thread lock can keep the locator in the lock's value with `locator: { read, write, expire }`. The locator then lives exactly as long as the lock. `expire` renews it while the turn runs and shortens it to `graceMs` after; leave it out when the lock renews itself. `write` may resolve with the locator it replaced, so a turn still running on another replica is aborted:
 
