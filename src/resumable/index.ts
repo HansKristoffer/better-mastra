@@ -8,6 +8,7 @@ import {
 } from './redis.js'
 
 export { bunRedis, ioRedis, upstashRedis } from './redis.js'
+export { replayPrefixOf } from './replay.js'
 export type {
 	BlockingReader,
 	ResumableRedis,
@@ -30,6 +31,14 @@ export interface ResumableStreams {
 		threadKey: string
 		stream: ReadableStream<UIMessageChunk>
 		abort: AbortController
+		/**
+		 * For a turn that goes on with an earlier answer: the chunks that rebuild
+		 * that answer (`replayPrefixOf(body.messages)`). A reconnecting reader
+		 * gets them right after the turn's `start`, so the replay is the whole
+		 * answer; the request that started the turn already shows it and gets
+		 * the turn's own chunks only.
+		 */
+		replayPrefix?: readonly UIMessageChunk[]
 	}): Promise<ReadableStream<UIMessageChunk>>
 	/** Full replay of the current assistant message plus the live tail; `null` means answer 204. */
 	reconnect(
@@ -127,6 +136,10 @@ interface LiveRun {
 	threadKey: string
 	streamId: string
 	abort: AbortController
+	/** What a replay holds after its `start` and the request that started the turn never gets. */
+	prefix: readonly UIMessageChunk[]
+	/** The reader of the request that started the turn. */
+	starter?: Listener
 	chunks: UIMessageChunk[]
 	bytes: number
 	overflow: boolean
@@ -322,8 +335,18 @@ export function createResumableStreams(
 		})
 	}
 
+	/** The turn's own chunk, and after its first `start` the replay prefix, which the starter never gets. */
 	function push(run: LiveRun, chunk: UIMessageChunk) {
-		for (const listener of run.listeners) listener(chunk)
+		record(run, chunk)
+		if (chunk.type !== 'start' || !run.prefix.length) return
+		const { prefix, starter } = run
+		run.prefix = []
+		for (const replayed of prefix) record(run, replayed, starter)
+	}
+
+	function record(run: LiveRun, chunk: UIMessageChunk, except?: Listener) {
+		for (const listener of run.listeners)
+			if (listener !== except) listener(chunk)
 		if (!run.overflow) {
 			run.bytes += append(run.chunks, chunk)
 			if (run.bytes > maxBufferBytes) {
@@ -390,7 +413,8 @@ export function createResumableStreams(
 
 	function local(
 		run: LiveRun,
-		signal?: AbortSignal
+		signal?: AbortSignal,
+		starter = false
 	): ReadableStream<UIMessageChunk> | null {
 		if (run.overflow || signal?.aborted) return null
 		let listener: Listener | undefined
@@ -402,6 +426,7 @@ export function createResumableStreams(
 				listener = (chunk) =>
 					chunk ? controller.enqueue(chunk) : controller.close()
 				run.listeners.add(listener)
+				if (starter) run.starter = listener
 				signal?.addEventListener(
 					'abort',
 					() => detach() && closeQuietly(controller)
@@ -491,7 +516,7 @@ export function createResumableStreams(
 			return closed
 		},
 
-		async start({ threadKey, stream, abort }) {
+		async start({ threadKey, stream, abort, replayPrefix = [] }) {
 			if (closed) throw new Error('resumable: start() called after close()')
 			let resolveFinished = () => {}
 			const finished = new Promise<void>((resolve) => {
@@ -505,6 +530,7 @@ export function createResumableStreams(
 				threadKey,
 				streamId: crypto.randomUUID(),
 				abort,
+				prefix: replayPrefix,
 				chunks: [],
 				bytes: 0,
 				overflow: false,
@@ -555,7 +581,7 @@ export function createResumableStreams(
 				)
 				run.renewTimer.unref?.()
 			}
-			const response = local(run)!
+			const response = local(run, undefined, true)!
 			void pump(run, stream)
 			return response
 		},

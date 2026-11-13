@@ -1,18 +1,5 @@
-import type { ChatErrorCode, ChatRefusal } from './types.js'
-
-const STATUS: Readonly<Record<ChatErrorCode, number>> = {
-	invalid_request: 400,
-	message_too_long: 413,
-	unauthenticated: 401,
-	forbidden: 403,
-	unavailable: 403,
-	consent_required: 403,
-	not_found: 404,
-	turn_in_progress: 409,
-	change_expired: 409,
-	usage_limited: 429,
-	temporarily_unavailable: 503
-}
+import { chatErrorStatuses } from '../protocol/index.js'
+import type { ChatRefusal } from './types.js'
 
 /** The refusal's code and HTTP status, and when to try again if it says. */
 export function chatRefusal(refusal: ChatRefusal): {
@@ -21,7 +8,7 @@ export function chatRefusal(refusal: ChatRefusal): {
 	readonly retryAfterSeconds?: number
 } {
 	return typeof refusal === 'string'
-		? { code: refusal, status: STATUS[refusal] }
+		? { code: refusal, status: chatErrorStatuses[refusal] }
 		: refusal
 }
 

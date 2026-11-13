@@ -110,6 +110,40 @@ describe('createChatRoute', () => {
 		expect(seen).toHaveLength(0)
 	})
 
+	test('should hand a resumable turn the answer its request continues, as the replay prefix', async () => {
+		const prefixes: (readonly UIMessageChunk[] | undefined)[] = []
+		const resumable: ResumableStreams = {
+			draining: false,
+			start: async ({ stream, replayPrefix }) => {
+				prefixes.push(replayPrefix)
+				return stream
+			},
+			reconnect: async () => null,
+			stop: async () => false,
+			close: async () => {}
+		}
+		const app = appWith({ resumable })
+		const continued = {
+			id: 'a',
+			role: 'assistant',
+			parts: [
+				{ type: 'text', text: 'Jeg kigger.' },
+				// Observational memory's bookkeeping never reaches a client
+				{ type: 'data-om-observation', data: {} }
+			]
+		}
+
+		await app.request(post({ messages: [MESSAGE] }))
+		await app.request(post({ messages: [MESSAGE, continued] }))
+
+		expect(prefixes[0]).toEqual([])
+		expect(prefixes[1]?.map((chunk) => chunk.type)).toEqual([
+			'text-start',
+			'text-delta',
+			'text-end'
+		])
+	})
+
 	test('should abort the run when the registry closes while the turn starts', async () => {
 		const seen: ChatTurnRequest<string, ChatTurnBody>[] = []
 		let draining = false

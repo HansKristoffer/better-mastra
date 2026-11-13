@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { UIMessage } from 'ai'
 
+import { defineChatErrors } from '../protocol/index.js'
 import { createResumableStreams } from '../resumable/index.js'
 import { asStepModel } from './agent.js'
 import {
@@ -403,6 +404,34 @@ describe('runChatTurn', () => {
 			types.indexOf(REPLY_SUGGESTIONS_PART)
 		)
 		expect(chunks.at(-1)?.type).toBe('finish')
+	})
+
+	test("should answer its own refusals under the app's codes", async () => {
+		// Given an app that calls a thread of someone else `workspace_forbidden`
+		const errors = defineChatErrors({
+			codes: { workspace_forbidden: 403 },
+			rename: { forbidden: 'workspace_forbidden' }
+		})
+		const harness = createHarness({ overrides: { refusals: errors.refusals } })
+		await harness.memory.createThread({
+			threadId: harness.threadKey.threadId,
+			resourceId: 'someone-else'
+		})
+
+		// When the turn finds the thread is not the caller's
+		const result = await harness.run({ messages: [userMessage('Hej')] })
+
+		// Then the client reads the app's code, and a code that was not renamed stays
+		expect(result).toMatchObject({
+			kind: 'refused',
+			code: 'workspace_forbidden',
+			status: 403
+		})
+		expect(
+			await harness.run({
+				messages: [{ id: 's', role: 'system', parts: [] }]
+			})
+		).toMatchObject({ kind: 'refused', code: 'invalid_request' })
 	})
 
 	describe('refusals', () => {

@@ -11,6 +11,11 @@ import type { RequestContext } from '@mastra/core/request-context'
 import { createTool, type Tool } from '@mastra/core/tools'
 import { keyBy, mapValues, omit } from 'hanzio'
 
+import {
+	CHANGE_UNREAD_SENTENCE,
+	type ToolChange,
+	type ToolChangeCall
+} from './changes.js'
 import { dryRunResult, isDryRun, isDryRunResult } from './dryRun.js'
 import { withHiddenInputs } from './toolInputSchema.js'
 
@@ -78,6 +83,13 @@ export interface ToolDefinition<
 	readonly toModelOutput?: (output: never) => unknown
 	/** JSON-only extras for the client manifest, such as how a confirm card shows the input. */
 	readonly manifest?: Readonly<Record<string, unknown>>
+	/**
+	 * A write's change: its confirm fields, the guard and the read before the
+	 * write, and the result with its undo record, which replaces what
+	 * `execute` returns. A refusal of the guard reaches the model as it is.
+	 */
+	// biome-ignore lint/suspicious/noExplicitAny: each tool types its own change; the definition only runs it.
+	readonly change?: ToolChange<any, any, any, any>
 	/** The server's own data about the tool (a gate, a permission); never reaches the manifest. */
 	readonly meta?: TMeta
 	/**
@@ -134,13 +146,25 @@ export function defineTool<
 	const honoursDryRun = definition.tier !== 'read'
 	const masking =
 		definition.maskErrors === true ? {} : definition.maskErrors || undefined
-	const run = (input: unknown, context: { requestContext?: RequestContext }) =>
-		honoursDryRun && isDryRun(context?.requestContext)
-			? dryRunResult(base.id)
-			: baseExecute!(
-					fillHiddenInputs(input, hidden, context?.requestContext),
-					context as never
-				)
+	const { change } = definition
+	const run = (
+		input: unknown,
+		context: { requestContext?: RequestContext }
+	) => {
+		if (honoursDryRun && isDryRun(context?.requestContext)) {
+			return dryRunResult(base.id)
+		}
+
+		const filled = fillHiddenInputs(input, hidden, context?.requestContext)
+		const execute = () => baseExecute!(filled, context as never)
+
+		return change
+			? makeChange(change, base.id, execute, {
+					input: filled,
+					requestContext: context?.requestContext
+				})
+			: execute()
+	}
 
 	const tool = createTool({
 		...(base as CreateToolOptions),
@@ -191,8 +215,40 @@ export function defineTool<
 		tier: definition.tier,
 		card: definition.card ?? 'generic',
 		invalidates: definition.invalidates ?? [],
-		manifest: definition.manifest ?? {},
+		manifest: {
+			...(change?.confirmFields && { confirmFields: change.confirmFields }),
+			...definition.manifest
+		},
 		meta: definition.meta as TMeta
+	}
+}
+
+/**
+ * One write: the guard, the read before, the write, then the result with its
+ * undo record. Once the write has happened, a failure must not tell the
+ * model that nothing changed.
+ */
+async function makeChange(
+	change: ToolChange,
+	tool: string,
+	execute: () => unknown,
+	call: ToolChangeCall
+): Promise<unknown> {
+	const refusal = await change.guard?.(call)
+
+	if (refusal !== undefined) throw new ToolRefusal(refusal)
+
+	const before = await change.readBefore(call)
+	const output = await execute()
+
+	try {
+		return await change.toResult({ ...call, before, output })
+	} catch (error) {
+		change.onUnread?.(error, { tool })
+
+		throw new ToolRefusal(change.unreadSentence ?? CHANGE_UNREAD_SENTENCE, {
+			cause: error
+		})
 	}
 }
 
