@@ -31,16 +31,6 @@ export {
 	thoughtSignatureRecovery
 } from './openrouter-compat.js'
 export {
-	type CacheProvider,
-	cacheMarker,
-	markConversationForCache,
-	movePerTurnContext,
-	PER_TURN_SYSTEM_MESSAGE_OPTIONS,
-	perTurnSystemMessage,
-	promptCacheMiddleware,
-	withPromptCache
-} from './prompt-cache.js'
-export {
 	ESTIMATED_MODEL_PRICING,
 	estimateModelCostUsd,
 	type LlmUsageTotals,

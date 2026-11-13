@@ -153,3 +153,52 @@ describe('thoughtSignatureRecovery', () => {
 		await expect(promise).rejects.toThrow('rate limited')
 	})
 })
+
+describe('anthropicRoute', () => {
+	const answer = () =>
+		Response.json({
+			id: 'msg_1',
+			type: 'message',
+			role: 'assistant',
+			model: 'claude-haiku-5-5',
+			content: [{ type: 'text', text: 'Hej' }],
+			stop_reason: 'end_turn',
+			usage: { input_tokens: 10, output_tokens: 1 }
+		})
+
+	it('should ask for automatic caching on a prompt without cache markers, and leave a marked one to its markers', async () => {
+		// Given Claude on Anthropic's own API, with its requests captured
+		const { generateText } = await import('ai')
+		const { anthropicRoute } = await import('./providers/anthropic')
+		const { stubFetch } = await import('./stub-fetch.test')
+		const fetch = stubFetch(answer)
+		const model = anthropicRoute('test-key').model('claude-haiku-5-5')
+
+		try {
+			// When one call has a plain prompt and the next marks its system message
+			await generateText({ model, prompt: 'Hej' })
+			await generateText({
+				model,
+				messages: [
+					{
+						role: 'system',
+						content: 'Stable.',
+						providerOptions: {
+							anthropic: { cacheControl: { type: 'ephemeral' } }
+						}
+					},
+					{ role: 'user', content: 'Hej' }
+				],
+				allowSystemInMessages: true
+			})
+
+			// Then only the plain one takes the automatic breakpoint
+			const [plain, marked] = fetch.bodies()
+			expect(plain?.cache_control).toEqual({ type: 'ephemeral' })
+			expect(marked?.cache_control).toBeUndefined()
+			expect(JSON.stringify(marked?.system)).toContain('cache_control')
+		} finally {
+			fetch.restore()
+		}
+	})
+})
