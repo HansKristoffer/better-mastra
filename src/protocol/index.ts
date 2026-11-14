@@ -195,12 +195,16 @@ export function defineChatErrors<
 // OUTCOMES
 
 /**
- * How a turn ended, as `sinks.turnFinished` reports it. `stopped` is the
- * user's Stop or a dropped connection; `interrupted` is the server ending it,
- * a newer turn on the thread or a shutdown (`TurnAbortReason`).
+ * How a turn ended, as `sinks.turnFinished` reports it. `truncated` is the
+ * model reaching its output-token limit (the stream's `finish` says
+ * `finishReason: 'length'`): the answer is cut off, and a tool call it was
+ * still writing never ran. `stopped` is the user's Stop or a dropped
+ * connection; `interrupted` is the server ending it, a newer turn on the
+ * thread or a shutdown (`TurnAbortReason`).
  */
 export const turnOutcomes = [
 	'answered',
+	'truncated',
 	'stopped',
 	'interrupted',
 	'budget_stop',

@@ -69,6 +69,7 @@ export function createTurnObserver(
 	let sawError = false
 	let waitsForApproval = false
 	let lastErrorWasTimeout = false
+	let wasCutOff = false
 
 	const settle = (toolCallId: string, outcome: ToolSettledEvent['outcome']) => {
 		waiting.delete(toolCallId)
@@ -126,6 +127,10 @@ export function createTurnObserver(
 					},
 					error: () => {
 						sawError = true
+					},
+					// Mastra's finish reason of the run's last model call.
+					finish: (finish) => {
+						wasCutOff = finish.finishReason === 'length'
 					}
 				},
 				() => {}
@@ -141,7 +146,8 @@ export function createTurnObserver(
 					wasStopped: userStopped || ending === 'cancelled',
 					sawTripwire,
 					sawError,
-					lastErrorWasTimeout
+					lastErrorWasTimeout,
+					wasCutOff
 				}),
 				steps,
 				toolCalls,
@@ -164,10 +170,12 @@ function outcomeOf(seen: {
 	readonly sawTripwire: boolean
 	readonly sawError: boolean
 	readonly lastErrorWasTimeout: boolean
+	readonly wasCutOff: boolean
 }): TurnOutcome {
 	if (seen.interrupted) return 'interrupted'
 	if (seen.wasStopped) return 'stopped'
 	if (seen.sawTripwire) return 'budget_stop'
 	if (seen.sawError) return seen.lastErrorWasTimeout ? 'timeout' : 'error'
+	if (seen.wasCutOff) return 'truncated'
 	return 'answered'
 }

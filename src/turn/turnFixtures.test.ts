@@ -97,6 +97,25 @@ export function toolCallReply(
 	]
 }
 
+/** A model call the output-token limit ended in the middle of a tool call's input. */
+export function cutOffToolCallReply(
+	toolName: string,
+	inputSoFar: string,
+	toolCallId = 'call-1'
+): ModelStreamPart[] {
+	return [
+		{ type: 'stream-start', warnings: [] },
+		{ type: 'tool-input-start', id: toolCallId, toolName },
+		{ type: 'tool-input-delta', id: toolCallId, delta: inputSoFar },
+		finishPart('length')
+	]
+}
+
+/** A model call the output-token limit ended in the middle of its text. */
+export function cutOffTextReply(text: string): ModelStreamPart[] {
+	return [...textReply(text).slice(0, -1), finishPart('length')]
+}
+
 /** A stream that sends the parts and then fails with the error. */
 export function failingReply(error: unknown): () => Promise<ModelStreamResult> {
 	return async () => ({
@@ -109,7 +128,7 @@ export function failingReply(error: unknown): () => Promise<ModelStreamResult> {
 	})
 }
 
-function finishPart(reason: 'stop' | 'tool-calls'): ModelStreamPart {
+function finishPart(reason: 'stop' | 'tool-calls' | 'length'): ModelStreamPart {
 	return {
 		type: 'finish',
 		finishReason: { unified: reason, raw: reason },

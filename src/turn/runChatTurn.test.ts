@@ -18,6 +18,8 @@ import {
 	ASK_TOOL,
 	createHarness,
 	createScriptedModel,
+	cutOffTextReply,
+	cutOffToolCallReply,
 	DELETE_TOOL,
 	failingReply,
 	LOOKUP_TOOL,
@@ -120,6 +122,70 @@ describe('runChatTurn', () => {
 		expect(new Set(errorTexts)).toEqual(new Set([TURN_ERROR_SENTENCE]))
 		expect(harness.finished[0]?.outcome).toBe('error')
 		expect(harness.releases).toHaveLength(1)
+	})
+
+	test('should report a turn the output-token limit cut off inside a tool call as truncated', async () => {
+		// Given a model whose output limit ends the call inside the tool's input
+		const harness = createHarness({
+			replies: [cutOffToolCallReply(LOOKUP_TOOL, '{"category":"fo')]
+		})
+
+		// When the user asks
+		const { chunks, message } = await readTurn(
+			await harness.run({ messages: [userMessage('Mad?')] })
+		)
+
+		// Then the turn is not answered: the tool never ran, and the client
+		// reads why from Mastra's own finish reason
+		expect(harness.finished[0]).toMatchObject({
+			outcome: 'truncated',
+			toolCalls: 0
+		})
+		expect(harness.settled).toEqual([])
+		expect(chunks.at(-1)).toEqual({ type: 'finish', finishReason: 'length' })
+		expect(message?.parts).toContainEqual(
+			expect.objectContaining({
+				type: `tool-${LOOKUP_TOOL}`,
+				state: 'input-streaming'
+			})
+		)
+		expect(harness.releases).toHaveLength(1)
+	})
+
+	test('should neither score nor offer replies after an answer the output-token limit cut off', async () => {
+		// Given an answer cut off in its text, an app that scores answered
+		// turns and offers replies
+		const finished: { outcome: string; answerText: string }[] = []
+		const scored: unknown[] = []
+		const harness = createHarness({
+			replies: [cutOffTextReply('Du har brugt 1.250 kr. på')],
+			suggestions: [textReply('{"suggestions":["Og i september?"]}')],
+			overrides: {
+				replySuggestions: { agentId: 'chat-suggestions' },
+				sinks: {
+					turnFinished: (event) => finished.push(event),
+					scoreTurn: (event) => scored.push(event)
+				}
+			}
+		})
+
+		// When the user asks
+		const { chunks } = await readTurn(
+			await harness.run({ messages: [userMessage('Mad?')] })
+		)
+
+		// Then the cut-off text is reported as such, and nothing follows it
+		expect(finished[0]).toMatchObject({
+			outcome: 'truncated',
+			answerText: 'Du har brugt 1.250 kr. på'
+		})
+		expect(scored).toEqual([])
+		expect(chunks.map((chunk) => chunk.type)).not.toContain(
+			ANSWER_COMPLETE_PART
+		)
+		expect(chunks.map((chunk) => chunk.type)).not.toContain(
+			REPLY_SUGGESTIONS_PART
+		)
 	})
 
 	test("should hand a tool's error to the model and report it as the tool's, not as a turn failure", async () => {
