@@ -2,6 +2,24 @@
 
 A release with a breaking or wiring change has upgrade notes in [UPGRADING.md](./UPGRADING.md), which ships beside this file: the removed exports with their replacements, the wiring as code, and a check for duplicate peers.
 
+## [0.10.0](https://github.com/HansKristoffer/better-mastra/compare/v0.9.0...v0.10.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* **client:** `ChatTurnFailure` has a new kind, `truncated`. An exhaustive switch over `failure.kind` needs the case; see UPGRADING.md.
+* **turn:** `TurnOutcome` and `turnOutcomes` have a new value, `truncated`. An exhaustive switch or record over the outcomes needs the case; see UPGRADING.md.
+
+### Features
+
+* **client:** the chat session fails a cut-off answer as truncated ([e6ee73f](https://github.com/HansKristoffer/better-mastra/commit/e6ee73f22a7e3dad0ad459a8b9d8802bf081b95d))
+* **turn:** a turn the output-token limit cut off is reported as truncated ([d6bd506](https://github.com/HansKristoffer/better-mastra/commit/d6bd5069c49f4317133082e4add8bb0dc184feb7))
+
+
+### Bug Fixes
+
+* CHANGELOG.md and UPGRADING.md ship in the package ([d472dde](https://github.com/HansKristoffer/better-mastra/commit/d472ddeae7d0de45209f3759d427ec3697987787))
+
 ## [0.9.0](https://github.com/HansKristoffer/better-mastra/compare/v0.8.0...v0.9.0) (2026-11-13)
 
 
