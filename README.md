@@ -37,6 +37,8 @@ ESM only, Node 20+ or Bun. Every peer is optional and loaded only by the subpath
 
 Two CLIs ship with it: `better-mastra-evals` and `better-mastra-tool-manifest`.
 
+Upgrading: [UPGRADING.md](./UPGRADING.md) lists, per release, the removed exports with their replacements, the wiring as code and a check for duplicate peers. It ships in the package beside `CHANGELOG.md`.
+
 ## Quick start
 
 ### Server
@@ -114,7 +116,9 @@ runChatTurn(request, { refusals: chatErrors.refusals /* … */ }) // also on cre
 
 `runChatTurn` takes the rest as optional ports: `gate` (access and consent), `lock` (one turn per thread; `createThreadLock` in `better-mastra/resumable` is one), `admit` (usage limits), `sinks` (tool, usage and finished-turn events), `replySuggestions`, `deriveTitle`. Every refusal reaches the client as a fixed error code, never a raw error, and every failure is logged with the stage it happened in. A user message over `maxMessageLength` (32,000 characters) is refused as `message_too_long` (413), so the client can say why.
 
-`sinks.turnFinished` gets the outcome (`turnOutcomes`: `answered`, `stopped`, `interrupted` when a newer turn or a shutdown ended it, `budget_stop`, `timeout`, `error`) and the run's `usage`, typed for `readStreamTextUsage`, `llms.cost` and `withUsage().meterStream(event.usage, …)`. It also carries `stageMs` (how long `scope`, `gate`, `thread`, `thread_lock`, `usage_limit`, `preparation` and `model` each took before the stream started) and `streamStartedMs`, so the wait before the first token can be split into your ports, Mastra's start and the model: `timeToFirstTextMs - streamStartedMs` is the model's share. A sink or callback that throws, or returns a promise that rejects, is logged as `a turn port failed` and the turn goes on: reporting never cuts an answer or keeps the thread lock.
+A model call that ends on its output-token limit (`plan.maxOutputTokens`, or the model's own) is not an answer: the text stops mid-sentence, and a tool call the model was still writing never runs. Mastra's `finish` chunk says so (`finishReason: 'length'`), and the turn reads it from there: the outcome is `truncated`, no replies follow, `sinks.scoreTurn` is not called, and the chat session ends the user turn as failed with `{ kind: 'truncated' }`. Reasoning tokens count toward the limit, so size it for the longest tool input plus the reasoning before it.
+
+`sinks.turnFinished` gets the outcome (`turnOutcomes`: `answered`, `truncated` when the model reached its output-token limit, `stopped`, `interrupted` when a newer turn or a shutdown ended it, `budget_stop`, `timeout`, `error`) and the run's `usage`, typed for `readStreamTextUsage`, `llms.cost` and `withUsage().meterStream(event.usage, …)`. It also carries `stageMs` (how long `scope`, `gate`, `thread`, `thread_lock`, `usage_limit`, `preparation` and `model` each took before the stream started) and `streamStartedMs`, so the wait before the first token can be split into your ports, Mastra's start and the model: `timeToFirstTextMs - streamStartedMs` is the model's share. A sink or callback that throws, or returns a promise that rejects, is logged as `a turn port failed` and the turn goes on: reporting never cuts an answer or keeps the thread lock.
 
 ### Client
 
@@ -281,7 +285,7 @@ defineTool({
 - **Streaming text**: `useWordReveal(text, streaming)` reveals whole words every 40 ms. In React Native, `<StreamingMarkdown text streaming />` from `better-mastra/react/markdown` renders it, re-parsing only the last paragraph. It takes your own `rules` (a code block, a table) and `markdownit` parser, so one component draws the streaming and the finished answer; keep both objects' identity stable.
 - **Resume**: with `resume: true` and `resumeOn: [resumeOnVisible, resumeOnOnline]` (or `resumeOnAppActive(AppState)` and `resumeOnNetworkRegain(NetInfo)` in React Native) the session reattaches to a running answer.
 
-- **Events**: `onToolResult` per tool result, `onSaved` when a request ended with its answer stored (never for a stop, a failure or a reattach that found nothing), `onFailure` for analytics. `pendingApproval(turn)` is the approval a waiting turn waits for. `prepareBody(request, body)` gets the default body to add your fields to. A refusal carries `retryAfterSeconds` when the server sent one.
+- **Events**: `onToolResult` per tool result, `onSaved` when a request ended with its answer stored (never for a stop, a failure or a reattach that found nothing), `onFailure` for analytics. A turn that ends `failed` says why in `failure.kind`: `refused`, `server-error`, `connection-lost`, `follow-up-budget-exhausted`, or `truncated` when the model reached its output-token limit, where Try again writes the answer again. `pendingApproval(turn)` is the approval a waiting turn waits for. `prepareBody(request, body)` gets the default body to add your fields to. A refusal carries `retryAfterSeconds` when the server sent one.
 
 Nothing in `/client` or `/react` touches the DOM, so both run in React Native.
 

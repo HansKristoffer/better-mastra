@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -20,6 +20,10 @@ try {
 	const files = new Set(packed.files.map(({ path }) => path))
 	assert.ok([...files].some((file) => /^readme\.md$/i.test(file)), 'Package needs a README')
 	assert.ok(files.has('LICENSE'), 'Package needs its declared license')
+	// An agent upgrading the package reads these from node_modules.
+	for (const notes of ['CHANGELOG.md', 'UPGRADING.md']) {
+		if (existsSync(notes)) assert.ok(files.has(notes), `Package needs ${notes}: add it to "files"`)
+	}
 	for (const file of files) {
 		assert.ok(!/\.(test|testing)\.[cm]?[jt]s$|\.tsbuildinfo$|\.tgz$/.test(file), `Unwanted package file: ${file}`)
 		assert.ok(!file.startsWith('docs/') && !file.startsWith('.github/'), `Unwanted package file: ${file}`)

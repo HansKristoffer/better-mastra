@@ -115,6 +115,8 @@
 		"dist",
 		"LICENSE",
 		"README.md",
+		"CHANGELOG.md",
+		"UPGRADING.md",
 		"src/**/*.ts",
 		"!src/**/*.test.ts"
 	],

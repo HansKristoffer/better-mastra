@@ -79,6 +79,11 @@ export type ChatTurnFailure =
 	| { readonly kind: 'server-error'; readonly status: number }
 	| { readonly kind: 'connection-lost' }
 	| { readonly kind: 'follow-up-budget-exhausted' }
+	/**
+	 * The model reached its output-token limit: the answer on screen is cut
+	 * off, and a tool call it was still writing never ran and never will.
+	 */
+	| { readonly kind: 'truncated' }
 
 export type ChatTurnState =
 	| { readonly kind: 'idle' }
@@ -107,6 +112,8 @@ export type ChatTurnEvent =
 	  }
 	| { readonly kind: 'content-shown' }
 	| { readonly kind: 'request-finished'; readonly continues: boolean }
+	/** The request's stream finished with `finishReason: 'length'`. */
+	| { readonly kind: 'answer-truncated' }
 	| {
 			readonly kind: 'error-response'
 			readonly status: number
@@ -196,7 +203,8 @@ export function canTryAgain(failure: ChatTurnFailure): boolean {
 		refused: (refused) => refused.refusal.canTryAgain,
 		'server-error': () => true,
 		'connection-lost': () => true,
-		'follow-up-budget-exhausted': () => false
+		'follow-up-budget-exhausted': () => false,
+		truncated: () => true
 	})
 }
 
@@ -233,6 +241,7 @@ function reduceIdle(
 			[
 				'content-shown',
 				'request-finished',
+				'answer-truncated',
 				'error-response',
 				'connection-lost',
 				'follow-up-ready',
@@ -277,6 +286,11 @@ function reduceRequesting(
 			userTurn.watching === false
 				? failUserTurn(userTurn, failureOf(response))
 				: stopWatching(userTurn),
+		// Cut off before anything was shown, as inside hidden reasoning.
+		'answer-truncated': () =>
+			userTurn.watching === false
+				? failUserTurn(userTurn, { kind: 'truncated' })
+				: stopWatching(userTurn),
 		'nothing-to-resume': () =>
 			userTurn.watching === false
 				? failUserTurn(userTurn, { kind: 'connection-lost' })
@@ -320,6 +334,7 @@ function reduceStreaming(
 		'nothing-to-resume': () =>
 			failUserTurn(userTurn, { kind: 'connection-lost' }),
 		'error-response': (response) => failUserTurn(userTurn, failureOf(response)),
+		'answer-truncated': () => failUserTurn(userTurn, { kind: 'truncated' }),
 		'stop-pressed': () => abortRequest(userTurn),
 		...typedSwitchGroup(
 			event,
@@ -358,6 +373,7 @@ function reduceContinuing(
 			[
 				'content-shown',
 				'request-finished',
+				'answer-truncated',
 				'error-response',
 				'connection-lost',
 				'try-again-pressed',
@@ -385,6 +401,7 @@ function reduceStopping(
 			'kind',
 			[
 				'request-finished',
+				'answer-truncated',
 				'connection-lost',
 				'error-response',
 				'changes-waiting',
@@ -430,6 +447,7 @@ function reduceWaiting(
 			[
 				'content-shown',
 				'request-finished',
+				'answer-truncated',
 				'error-response',
 				'connection-lost',
 				'follow-up-ready',
@@ -467,6 +485,7 @@ function reduceFailed(
 			[
 				'content-shown',
 				'request-finished',
+				'answer-truncated',
 				'error-response',
 				'connection-lost',
 				'follow-up-ready',

@@ -1,5 +1,7 @@
 # Changelog
 
+A release with a breaking or wiring change has upgrade notes in [UPGRADING.md](./UPGRADING.md), which ships beside this file: the removed exports with their replacements, the wiring as code, and a check for duplicate peers.
+
 ## [0.9.0](https://github.com/HansKristoffer/better-mastra/compare/v0.8.0...v0.9.0) (2026-11-13)
 
 

@@ -50,6 +50,7 @@ const ALL_EVENTS: readonly ChatTurnEvent[] = [
 	{ kind: 'content-shown' },
 	{ kind: 'request-finished', continues: false },
 	{ kind: 'request-finished', continues: true },
+	{ kind: 'answer-truncated' },
 	{ kind: 'error-response', status: 409, refusal: REFUSED_IN_PROGRESS },
 	{ kind: 'connection-lost', resumable: false },
 	{ kind: 'connection-lost', resumable: true },
@@ -220,6 +221,44 @@ describe('reduceChatTurn', () => {
 			},
 			effects: [{ kind: 'restore-draft', text: 'Og i maj?' }]
 		})
+	})
+
+	test('fails the user turn as truncated when the answer was cut off, and offers Try again', () => {
+		const streaming: ChatTurnState = {
+			kind: 'streaming',
+			userTurn: { ...NEW_USER_TURN, queued: 'Og i maj?' }
+		}
+		const truncated: ChatTurnState = {
+			kind: 'failed',
+			failure: { kind: 'truncated' }
+		}
+
+		// Cut off after part of the answer was shown, or before any of it
+		expect(reduceChatTurn(streaming, { kind: 'answer-truncated' })).toEqual({
+			state: truncated,
+			effects: [{ kind: 'restore-draft', text: 'Og i maj?' }]
+		})
+		expect(
+			reduceChatTurn(
+				{ kind: 'requesting', userTurn: NEW_USER_TURN },
+				{ kind: 'answer-truncated' }
+			).state
+		).toEqual(truncated)
+
+		// Try again writes the answer again
+		expect(canTryAgain({ kind: 'truncated' })).toBe(true)
+		expect(reduceChatTurn(truncated, { kind: 'try-again-pressed' })).toEqual({
+			state: { kind: 'requesting', userTurn: NEW_USER_TURN },
+			effects: [{ kind: 'request' }]
+		})
+
+		// Stop was pressed first: the user turn just ends
+		expect(
+			reduceChatTurn(
+				{ kind: 'stopping', userTurn: NEW_USER_TURN },
+				{ kind: 'answer-truncated' }
+			).state
+		).toEqual({ kind: 'idle' })
 	})
 
 	test('retries a connection lost before anything was shown once, and fails on the second loss', () => {
