@@ -409,6 +409,53 @@ describe('createChatSession', () => {
 		expect(texts(chat.chat.messages)).toEqual(['Hej', 'Nu'])
 	})
 
+	test('fails the turn as truncated when the model was cut off inside a tool call, and Try again asks for the answer again', async () => {
+		const reports: unknown[] = []
+		const saved: unknown[] = []
+		const server = fakeServer([
+			// What a turn streams when the output-token limit ends the model call
+			// inside a tool's input: the call never becomes available.
+			stream([
+				{ type: 'start', messageId: 'answer-1' },
+				{ type: 'start-step' },
+				{ type: 'tool-input-start', toolCallId: 'call-1', toolName: 'file' },
+				{
+					type: 'tool-input-delta',
+					toolCallId: 'call-1',
+					inputTextDelta: '{"title":"Mod'
+				},
+				{ type: 'finish-step' },
+				{ type: 'finish', finishReason: 'length' }
+			]),
+			stream(answer('Sendt som #31', 'answer-2'))
+		])
+		const chat = session(server, {
+			onFailure: (report) => reports.push(report),
+			onSaved: ({ message }) => saved.push(message?.id)
+		})
+
+		chat.send('En lang rapport')
+		await settled(chat)
+
+		expect(chat.getSnapshot().turn).toEqual({
+			kind: 'failed',
+			failure: { kind: 'truncated' }
+		})
+		expect(reports).toEqual([{ code: 'truncated', retrying: false }])
+		expect(saved).toEqual([])
+
+		chat.tryAgain()
+		await settled(chat)
+
+		expect(server.requests[1]?.body?.trigger).toBe('regenerate-message')
+		expect(saved).toEqual(['answer-2'])
+		expect(chat.getSnapshot().turn).toEqual({ kind: 'idle' })
+		expect(texts(chat.chat.messages)).toEqual([
+			'En lang rapport',
+			'Sendt som #31'
+		])
+	})
+
 	test('retries once when the network drops before any response, then fails as connection lost', async () => {
 		const unreachable: Reply = () => {
 			throw new TypeError('Network request failed')

@@ -24,6 +24,7 @@ import {
 	type ChatInit,
 	DefaultChatTransport,
 	type FileUIPart,
+	type FinishReason,
 	getToolName,
 	isToolUIPart,
 	type UIMessage
@@ -118,7 +119,7 @@ export interface ChatRequest<TResumeData = unknown> {
 
 /** How a failed request is reported for analytics: counts and enums only. */
 export interface ChatFailureReport {
-	/** A refusal code, `network`, `server_error` for any other failed response, `stream_error` when the stream carried the failure. */
+	/** A refusal code, `network`, `server_error` for any other failed response, `stream_error` when the stream carried the failure, `truncated` when the model reached its output-token limit. */
 	readonly code: string
 	/** Whether the session tries again on its own. */
 	readonly retrying: boolean
@@ -234,6 +235,8 @@ interface RequestEnd {
 	readonly isDisconnect: boolean
 	readonly isError: boolean
 	readonly error: Error | undefined
+	/** The stream's own finish reason; `length` is the model reaching its output-token limit. */
+	readonly finishReason: FinishReason | undefined
 }
 
 type RequestKind = 'send' | 'resume'
@@ -257,7 +260,8 @@ const ANSWERED: RequestEnd = {
 	isAbort: false,
 	isDisconnect: false,
 	isError: false,
-	error: undefined
+	error: undefined,
+	finishReason: undefined
 }
 
 // FUNCTIONS
@@ -395,13 +399,19 @@ export function createChatSession<TResumeData = unknown>(
 				})
 			}
 		},
-		onFinish: ({ isAbort, isDisconnect, isError }) => {
+		onFinish: ({ isAbort, isDisconnect, isError, finishReason }) => {
 			if (repliesStreaming) {
 				repliesStreaming = false
 				return
 			}
 
-			requestEnd = { isAbort, isDisconnect, isError, error: requestError }
+			requestEnd = {
+				isAbort,
+				isDisconnect,
+				isError,
+				error: requestError,
+				finishReason
+			}
 
 			if (sendsApprovalAnswers) {
 				sendsApprovalAnswers = false
@@ -686,7 +696,8 @@ export function createChatSession<TResumeData = unknown>(
 		const isAnswered = !end.isAbort && !end.isError
 		const calls = isAnswered ? actionCalls : []
 
-		if (isAnswered) {
+		// A cut-off answer is a failure, or goes on in a follow-up that reports.
+		if (isAnswered && end.finishReason !== 'length') {
 			options.onSaved?.({ threadId, message: chat.lastMessage })
 		}
 		const waiting =
@@ -748,7 +759,8 @@ export function createChatSession<TResumeData = unknown>(
 				isAbort: false,
 				isDisconnect: false,
 				isError: true,
-				error: rejection
+				error: rejection,
+				finishReason: undefined
 			}
 		}
 
@@ -761,18 +773,25 @@ export function createChatSession<TResumeData = unknown>(
 				isAbort: false,
 				isDisconnect: false,
 				isError: true,
-				error: requestError
+				error: requestError,
+				finishReason: undefined
 			}
 		}
 
 		return kind === 'resume'
 			? 'nothing-to-resume'
-			: { isAbort: true, isDisconnect: false, isError: false, error: undefined }
+			: { ...ANSWERED, isAbort: true }
 	}
 
 	function toTurnEvent(end: RequestEnd): ChatTurnEvent {
-		if (end.isAbort || !end.isError) {
+		if (end.isAbort) {
 			return { kind: 'request-finished', continues: false }
+		}
+
+		if (!end.isError) {
+			return end.finishReason === 'length'
+				? { kind: 'answer-truncated' }
+				: { kind: 'request-finished', continues: false }
 		}
 
 		const response = readErrorResponse(end.error)
@@ -1082,6 +1101,7 @@ function failureCodeOf(
 		'kind',
 		{
 			'connection-lost': () => 'network',
+			'answer-truncated': () => 'truncated',
 			'error-response': (response) => {
 				if (response.refusal !== undefined) {
 					return response.refusal.code
