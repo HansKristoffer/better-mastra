@@ -8,6 +8,7 @@
  */
 
 import type { StandardSchemaWithJSON } from '@mastra/core/schema'
+import type { Tool } from '@mastra/core/tools'
 import {
 	isRecord,
 	mapValues,
@@ -16,6 +17,21 @@ import {
 	typedSwitchGroup
 } from 'hanzio'
 import { z } from 'zod'
+import {
+	compactJsonSchema,
+	DATE_FORMATS,
+	NAMED_FORMATS
+} from '../protocol/jsonSchema.js'
+
+export { compactJsonSchema }
+
+// biome-ignore lint/suspicious/noExplicitAny: any Mastra tool, whatever its schemas.
+type AnyTool = Tool<any, any, any, any, any, any, any>
+
+/** Schemas whose caller explicitly asked for `{ stringChecks: 'full' }` are left untouched by automatic compaction. */
+const FULL_STRING_CHECKS = new WeakSet<object>()
+const COMPACTED_TOOLS = new WeakMap<AnyTool, AnyTool>()
+const COMPACTED_SCHEMAS = new WeakMap<object, ToolInputSchema>()
 
 type JsonSchema = Record<string, unknown>
 
@@ -46,29 +62,6 @@ export interface ToolInputSchemaOptions {
 	readonly stringChecks?: 'compact' | 'full' | undefined
 }
 
-/** The formats that tell the model what string to write. */
-const DATE_FORMATS: readonly string[] = [
-	'date-time',
-	'date',
-	'time',
-	'duration'
-]
-
-/**
- * The standard formats whose `pattern` only repeats the format's name as a
- * regular expression. A pattern a schema's author wrote (`.regex()`,
- * `.startsWith()`) and the ones for ids without a standard format (`cuid`,
- * `ulid`) stay: they are short, and nothing else says what the string holds.
- */
-const NAMED_FORMATS: readonly string[] = [
-	...DATE_FORMATS,
-	'uuid',
-	'email',
-	'uri',
-	'ipv4',
-	'ipv6'
-]
-
 /** An ISO datetime that ends in an offset such as `+02:00`, or in no zone at all, not `Z`. */
 const NON_UTC_DATETIME = /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:[+-]\d{2}:?\d{2})?$/
 
@@ -88,7 +81,7 @@ export function toolInputSchema(
 		throw new Error('A tool must take an object input.')
 	}
 
-	return standardSchema(jsonSchema, (value) => {
+	const built = standardSchema(jsonSchema, (value) => {
 		const input = coerceDateStrings(schema, value)
 		const result = schema['~standard'].validate(input) as
 			ValidationResult | Promise<ValidationResult>
@@ -104,6 +97,9 @@ export function toolInputSchema(
 
 		return issues.length > 0 ? { issues } : { value: input }
 	})
+
+	if (options.stringChecks === 'full') FULL_STRING_CHECKS.add(built)
+	return built
 }
 
 /**
@@ -116,18 +112,38 @@ export function withHiddenInputs(
 	hiddenInputs: readonly string[],
 	options: { readonly maxArrayItems?: number | undefined } = {}
 ): ToolInputSchema {
-	const visible = (jsonSchema: JsonSchema) =>
-		withoutHiddenProperties(jsonSchema, hiddenInputs)
-
+	const inputCache = new Map<string, JsonSchema>()
+	const outputCache = new Map<string, JsonSchema>()
 	const own = schema['~standard']
+	const cached = (
+		cache: Map<string, JsonSchema>,
+		produce: (
+			jsonOptions: Parameters<typeof own.jsonSchema.input>[0]
+		) => JsonSchema,
+		jsonOptions: Parameters<typeof own.jsonSchema.input>[0]
+	) => {
+		const key = `${jsonOptions.target}\0${jsonOptions.libraryOptions ? JSON.stringify(jsonOptions.libraryOptions) : ''}`
+		let entry = cache.get(key)
+		if (!entry) {
+			entry = withoutHiddenProperties(produce(jsonOptions), hiddenInputs)
+			cache.set(key, entry)
+		}
+		return entry
+	}
 
-	return {
+	const wrapped: ToolInputSchema = {
 		'~standard': {
 			version: 1,
 			vendor: own.vendor,
 			jsonSchema: {
-				input: (jsonOptions) => visible(own.jsonSchema.input(jsonOptions)),
-				output: (jsonOptions) => visible(own.jsonSchema.output(jsonOptions))
+				input: (jsonOptions) =>
+					cached(inputCache, (opts) => own.jsonSchema.input(opts), jsonOptions),
+				output: (jsonOptions) =>
+					cached(
+						outputCache,
+						(opts) => own.jsonSchema.output(opts),
+						jsonOptions
+					)
 			},
 			validate: (value) => {
 				const input = withoutKeys(value, hiddenInputs)
@@ -156,6 +172,9 @@ export function withHiddenInputs(
 			}
 		}
 	}
+
+	if (FULL_STRING_CHECKS.has(schema)) FULL_STRING_CHECKS.add(wrapped)
+	return wrapped
 }
 
 /**
@@ -207,13 +226,108 @@ export function coerceDateStrings(
 }
 
 /**
- * A JSON Schema as a tool input, such as an MCP tool's `inputSchema`. It does
- * not validate: the service behind the tool checks its own input.
+ * Wraps any Standard Schema with JSON Schema (Zod, oRPC `createMastraTool`,
+ * `toolInputSchema`, `jsonSchemaInput`) so its emitted JSON Schema is compacted
+ * and memoized while keeping its original validator untouched. Respects an
+ * explicit `{ stringChecks: 'full' }` opt-out.
+ */
+export function compactToolInputSchema(
+	schema: ToolInputSchema,
+	options: { readonly stringChecks?: 'compact' | 'full' | undefined } = {}
+): ToolInputSchema {
+	if (options.stringChecks === 'full' || FULL_STRING_CHECKS.has(schema)) {
+		return schema
+	}
+	const cached = COMPACTED_SCHEMAS.get(schema)
+	if (cached) return cached
+
+	const own = schema['~standard']
+	if (!own?.jsonSchema) return schema
+
+	const inputCache = new Map<string, JsonSchema>()
+	const outputCache = new Map<string, JsonSchema>()
+	const read = (
+		cache: Map<string, JsonSchema>,
+		fn: (jsonOptions: Parameters<typeof own.jsonSchema.input>[0]) => JsonSchema,
+		jsonOptions: Parameters<typeof own.jsonSchema.input>[0]
+	) => {
+		const key = `${jsonOptions.target}\0${jsonOptions.libraryOptions ? JSON.stringify(jsonOptions.libraryOptions) : ''}`
+		let entry = cache.get(key)
+		if (!entry) {
+			entry = compactJsonSchema(fn(jsonOptions))
+			cache.set(key, entry)
+		}
+		return entry
+	}
+
+	const wrapped: ToolInputSchema = {
+		'~standard': {
+			version: 1,
+			vendor: own.vendor,
+			validate: (value) => own.validate(value),
+			jsonSchema: {
+				input: (jsonOptions) =>
+					read(inputCache, (opts) => own.jsonSchema.input(opts), jsonOptions),
+				output: (jsonOptions) =>
+					read(outputCache, (opts) => own.jsonSchema.output(opts), jsonOptions)
+			}
+		}
+	}
+	COMPACTED_SCHEMAS.set(schema, wrapped)
+	return wrapped
+}
+
+/**
+ * Returns a memoized copy of any Mastra tool with a compacted JSON input schema
+ * (works on `orpc-fn` `createMastraTool`, Zod schemas, and raw JSON schemas)
+ * while leaving execution and runtime validation untouched.
+ */
+export function compactTool<T extends AnyTool>(tool: T): T {
+	if (!tool.inputSchema) return tool
+	if (FULL_STRING_CHECKS.has(tool.inputSchema as object)) return tool
+
+	let copy = COMPACTED_TOOLS.get(tool)
+	if (copy) return copy as T
+
+	const inputSchema = tool.inputSchema as unknown
+	let compacted: unknown
+	if (
+		isRecord(inputSchema) &&
+		isRecord(inputSchema['~standard']) &&
+		isRecord(inputSchema['~standard'].jsonSchema)
+	) {
+		compacted = compactToolInputSchema(
+			inputSchema as unknown as ToolInputSchema
+		)
+	} else if (isRecord(inputSchema) && typeof inputSchema.type === 'string') {
+		compacted = compactJsonSchema(inputSchema)
+	} else {
+		return tool
+	}
+
+	if (compacted === tool.inputSchema) return tool
+	copy = Object.assign(Object.create(Object.getPrototypeOf(tool)), tool, {
+		inputSchema: compacted
+	}) as AnyTool
+	COMPACTED_TOOLS.set(tool, copy)
+	return copy as T
+}
+
+/**
+ * A JSON Schema as a tool input, such as an MCP tool's `inputSchema`. Compacted
+ * by default (`stringChecks: 'compact'`); pass `{ stringChecks: 'full' }` to
+ * keep every format and pattern as given. It does not validate: the service
+ * behind the tool checks its own input.
  */
 export function jsonSchemaInput(
-	schema: Readonly<Record<string, unknown>>
+	schema: Readonly<Record<string, unknown>>,
+	options: { readonly stringChecks?: 'compact' | 'full' | undefined } = {}
 ): ToolInputSchema {
-	return standardSchema({ ...schema }, (value) => ({ value }))
+	const built = standardSchema(compactJsonSchema(schema, options), (value) => ({
+		value
+	}))
+	if (options.stringChecks === 'full') FULL_STRING_CHECKS.add(built)
+	return built
 }
 
 function standardSchema(

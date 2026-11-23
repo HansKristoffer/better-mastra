@@ -6,7 +6,9 @@
  */
 
 import {
+	type FileUIPart,
 	getToolName,
+	isFileUIPart,
 	isReasoningUIPart,
 	isTextUIPart,
 	isToolUIPart,
@@ -61,6 +63,30 @@ export type MessageBlock =
 			readonly parts: readonly ToolPart[]
 	  }
 
+/** Extended block union when `includeReasoning` or `includeFiles` is enabled on `toMessageBlocks`. */
+export type RichMessageBlock =
+	| MessageBlock
+	| {
+			readonly kind: 'reasoning'
+			readonly key: string
+			readonly text: string
+			readonly streaming: boolean
+	  }
+	| {
+			readonly kind: 'file'
+			readonly key: string
+			readonly part: FileUIPart
+	  }
+
+export interface ToMessageBlocksOptions {
+	/** Include reasoning blocks (`kind: 'reasoning'`). Default `false`. */
+	readonly includeReasoning?: boolean
+	/** Include file attachment blocks (`kind: 'file'`). Default `false`. */
+	readonly includeFiles?: boolean
+	/** Merge adjacent text parts into a single text block. Default `false`. */
+	readonly mergeText?: boolean
+}
+
 export interface RequestMessageOptions {
 	/** Whether a tool part holds a result the client produced: a client action's result, or an error it posted. */
 	readonly isClientResult?: (part: ToolPart) => boolean
@@ -79,36 +105,76 @@ export const STRANDED_TOOL_ERROR =
 
 /**
  * The blocks one message draws: its non-blank texts and its runs of tool
- * parts. Every other part, and every part observational memory adds, draws
- * nothing here; a client draws the data parts it knows itself.
+ * parts (plus optional `reasoning` and `file` blocks when requested). Every
+ * observational memory part draws nothing here.
  */
-export function toMessageBlocks(message: UIMessage): MessageBlock[] {
-	const blocks: MessageBlock[] = []
+export function toMessageBlocks(message: UIMessage): MessageBlock[]
+export function toMessageBlocks(
+	message: UIMessage,
+	options: ToMessageBlocksOptions & {
+		readonly includeReasoning?: false
+		readonly includeFiles?: false
+	}
+): MessageBlock[]
+export function toMessageBlocks(
+	message: UIMessage,
+	options: ToMessageBlocksOptions
+): RichMessageBlock[]
+export function toMessageBlocks(
+	message: UIMessage,
+	options: ToMessageBlocksOptions = {}
+): RichMessageBlock[] {
+	const blocks: (
+		| { kind: 'text'; key: string; text: string; streaming: boolean }
+		| { kind: 'tools'; key: string; parts: ToolPart[] }
+		| { kind: 'reasoning'; key: string; text: string; streaming: boolean }
+		| { kind: 'file'; key: string; part: FileUIPart }
+	)[] = []
 
 	for (const [index, part] of message.parts.entries()) {
-		const key = `${message.id}:${index}`
-		const previous = blocks.at(-1)
-
 		if (!isUserFacingPart(part)) {
 			continue
 		}
 
-		if (isTextUIPart(part) && part.text.trim() !== '') {
-			blocks.push({
-				kind: 'text',
-				key,
-				text: part.text,
-				streaming: part.state === 'streaming'
-			})
+		const key = `${message.id}:${index}`
+		const previous = blocks.at(-1)
+
+		if (isTextUIPart(part) && /\S/.test(part.text)) {
+			if (options.mergeText && previous?.kind === 'text') {
+				previous.text += part.text
+				previous.streaming = previous.streaming || part.state === 'streaming'
+			} else {
+				blocks.push({
+					kind: 'text',
+					key,
+					text: part.text,
+					streaming: part.state === 'streaming'
+				})
+			}
 		} else if (isToolUIPart(part)) {
 			if (previous?.kind === 'tools') {
-				blocks[blocks.length - 1] = {
-					...previous,
-					parts: [...previous.parts, part]
-				}
+				previous.parts.push(part)
 			} else {
 				blocks.push({ kind: 'tools', key, parts: [part] })
 			}
+		} else if (
+			options.includeReasoning &&
+			isReasoningUIPart(part) &&
+			/\S/.test(part.text)
+		) {
+			if (previous?.kind === 'reasoning') {
+				previous.text += part.text
+				previous.streaming = previous.streaming || part.state === 'streaming'
+			} else {
+				blocks.push({
+					kind: 'reasoning',
+					key,
+					text: part.text,
+					streaming: part.state === 'streaming'
+				})
+			}
+		} else if (options.includeFiles && isFileUIPart(part)) {
+			blocks.push({ kind: 'file', key, part })
 		}
 	}
 
@@ -325,11 +391,16 @@ export function countShownParts(
 		return 0
 	}
 
-	return message.parts.filter(
-		(part) =>
+	let count = 0
+	for (const part of message.parts) {
+		if (
 			isUserFacing(part) &&
-			((isTextUIPart(part) && part.text.trim() !== '') || isToolUIPart(part))
-	).length
+			((isTextUIPart(part) && /\S/.test(part.text)) || isToolUIPart(part))
+		) {
+			count += 1
+		}
+	}
+	return count
 }
 
 /** The user message a `data-user-message` part carries, or undefined for any other data. */

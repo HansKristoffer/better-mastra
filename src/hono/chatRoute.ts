@@ -101,6 +101,7 @@ export function createChatRoute<
 			try {
 				stream = await resumable.start({
 					threadKey: result.threadKey.threadId,
+					resourceId: result.threadKey.resourceId,
 					stream: result.stream,
 					abort: abort!,
 					// A turn that goes on with an earlier answer streams only what it adds.

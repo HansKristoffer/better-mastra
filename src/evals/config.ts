@@ -56,9 +56,14 @@ export async function runEvalSuite<C extends EvalCase<unknown>>(
 	const repeats = options.repeats ?? 3
 	const modelId = options.modelId ?? config.defaultModel
 	const judge = options.judge === false ? undefined : config.judge
-	const sequential = options.cases.some((testCase) =>
-		testCase.suites.some((suite) => config.sequentialSuites?.includes(suite))
-	)
+	const sequentialSuites = config.sequentialSuites
+	const sequential =
+		Boolean(sequentialSuites?.includes(options.suite)) ||
+		(Boolean(sequentialSuites?.length) &&
+			options.cases.length > 0 &&
+			options.cases.every((testCase) =>
+				testCase.suites.some((suite) => sequentialSuites?.includes(suite))
+			))
 	const jobs = options.cases.flatMap((testCase) =>
 		Array.from({ length: repeats }, () => testCase)
 	)

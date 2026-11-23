@@ -26,6 +26,8 @@ export type PendingChange =
 			readonly toolName: string
 			/** The id the client answers with `addToolApprovalResponse`. */
 			readonly approvalId: string
+			/** Arguments the model supplied for the tool call, when stored in the suspended run. */
+			readonly input?: unknown
 	  }
 	| {
 			/** A tool that suspended its run, with what it suspended with. */
@@ -181,7 +183,8 @@ function toPendingChange(
 					runId: run.runId,
 					toolCallId,
 					toolName,
-					approvalId: `${run.runId}${APPROVAL_ID_SEPARATOR}${toolCallId}`
+					approvalId: `${run.runId}${APPROVAL_ID_SEPARATOR}${toolCallId}`,
+					...(call.args !== undefined && { input: call.args })
 				}
 			]
 		: [

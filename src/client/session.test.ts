@@ -19,7 +19,8 @@ import { STRANDED_TOOL_ERROR } from './messages'
 import {
 	type ChatSession,
 	type ChatSessionOptions,
-	createChatSession
+	createChatSession,
+	createChatSessions
 } from './session'
 
 // HELPERS
@@ -976,5 +977,138 @@ describe('createChatSession', () => {
 			sequence: 1
 		})
 		expect(chat.getSnapshot().turn).toEqual({ kind: 'idle' })
+	})
+
+	test('treats finishReason length as truncated even when a tool call was cut off mid-flight', async () => {
+		const failures: string[] = []
+		const server = fakeServer([
+			stream([
+				{ type: 'start', messageId: 'a-cut' },
+				{
+					type: 'tool-input-available',
+					toolCallId: 'call-1',
+					toolName: 'search',
+					input: { q: 'hi' }
+				},
+				{ type: 'finish', finishReason: 'length' }
+			])
+		])
+		const chat = session(server, {
+			onFailure: ({ code }) => failures.push(code)
+		})
+
+		chat.send('Hej')
+		await settled(chat)
+
+		expect(chat.getSnapshot().turn).toMatchObject({
+			kind: 'failed',
+			failure: { kind: 'truncated' }
+		})
+		expect(failures).toEqual(['truncated'])
+		expect(server.requests).toHaveLength(1)
+	})
+
+	test('unwraps static run_page_action dispatcher calls and guards against repeats', async () => {
+		const ran: unknown[] = []
+		const server = fakeServer([
+			stream([
+				{ type: 'start', messageId: 'a1' },
+				{
+					type: 'tool-input-available',
+					toolCallId: 'c1',
+					toolName: 'run_page_action',
+					input: { action: 'filter', input: { status: 'open' } }
+				},
+				{ type: 'finish' }
+			]),
+			stream([
+				{
+					type: 'tool-input-available',
+					toolCallId: 'c2',
+					toolName: 'run_page_action',
+					input: { action: 'filter', input: { status: 'open' } }
+				},
+				{ type: 'finish' }
+			]),
+			stream([
+				{ type: 'text-start', id: 't-final' },
+				{ type: 'text-delta', id: 't-final', delta: 'Filtreret.' },
+				{ type: 'text-end', id: 't-final' },
+				{ type: 'finish' }
+			])
+		])
+		const chat = session(server, {
+			clientActions: [
+				defineClientAction({
+					name: 'filter',
+					description: 'Filter list',
+					inputSchema: z.object({ status: z.string() }),
+					handler: async (input) => {
+						ran.push(input)
+						return { ok: true }
+					}
+				})
+			]
+		})
+
+		chat.send('Vis åbne')
+		await settled(chat)
+
+		expect(ran).toEqual([{ status: 'open' }])
+		expect(texts(chat.chat.messages)).toEqual(['Vis åbne', 'Filtreret.'])
+	})
+
+	test('detaches locally without posting /stop when setFocused(false) runs on a resumable session', async () => {
+		const live = heldStream([
+			{ type: 'start', messageId: 'a1' },
+			{ type: 'text-start', id: 't1' },
+			{ type: 'text-delta', id: 't1', delta: 'Delvis' }
+		])
+		const urls: string[] = []
+		const chat = createChatSession({
+			threadId: 'resumable-thread',
+			resume: true,
+			transport: {
+				api: 'https://api.test/chat',
+				fetch: async (input) => {
+					const url = String(input)
+					urls.push(url)
+					if (url.endsWith('/stream')) {
+						return new Response(null, { status: 204 })
+					}
+					return live.reply({ method: 'POST', url, body: undefined })
+				}
+			}
+		})
+
+		chat.send('Hej')
+		await waitFor(() => chat.getSnapshot().turn.kind === 'streaming')
+
+		chat.setFocused(false)
+		await waitFor(() => chat.getSnapshot().turn.kind === 'idle')
+
+		expect(urls.some((url) => url.endsWith('/stop'))).toBe(false)
+		chat.dispose()
+	})
+
+	test('evicts least-recently-used idle sessions past maxSessions', () => {
+		const sessions = createChatSessions(
+			(id) =>
+				createChatSession({
+					threadId: id,
+					transport: { api: 'https://api.test/chat' }
+				}),
+			{ maxSessions: 2 }
+		)
+
+		const first = sessions.get('t1')
+		const second = sessions.get('t2')
+		sessions.focus('t2')
+		// Touching t3 evicts t1 (idle & unfocused), keeping focused t2 and new t3
+		sessions.get('t3')
+
+		expect(sessions.get('t2')).toBe(second)
+		expect(sessions.get('t1')).not.toBe(first)
+		sessions.clear()
 	})
 })

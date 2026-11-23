@@ -34,20 +34,31 @@ export function withRelayedTools<Caller>(
 ): ToolsServer {
 	let hostList: Handler<'tools/list'> | undefined
 	let hostCall: Handler<'tools/call'> | undefined
+	let cachedHostNames: Set<string> | undefined
 
 	const hostTools = async (
 		request: RequestTypeMap['tools/list'],
 		ctx: ServerContext
 	) => (hostList ? await hostList(request, ctx) : { tools: [] })
 
+	const getHostToolNames = async (ctx: ServerContext): Promise<Set<string>> => {
+		if (cachedHostNames) return cachedHostNames
+		const host = await hostTools({ method: 'tools/list', params: {} }, ctx)
+		cachedHostNames = new Set(host.tools.map((tool) => tool.name))
+		return cachedHostNames
+	}
+
 	/** The relays' tools by name, each with the relay that owns it. */
-	const relayedTools = async (taken: Iterable<string>) => {
+	const relayedTools = async (
+		taken: Iterable<string>,
+		subset: readonly McpRelay<Caller>[] = relays
+	) => {
 		const names = new Set(taken)
 		const owners = new Map<string, { tool: Tool; relay: McpRelay<Caller> }>()
-		const listed = await Promise.all(relays.map((relay) => relay.tools()))
+		const listed = await Promise.all(subset.map((relay) => relay.tools()))
 
 		listed.forEach((tools, index) => {
-			const relay = relays[index]!
+			const relay = subset[index]!
 			for (const tool of tools) {
 				if (names.has(tool.name)) {
 					throw new Error(
@@ -66,19 +77,30 @@ export function withRelayedTools<Caller>(
 		// Relayed tools come with the first page; a later one is the host's.
 		if (request.params?.cursor) return host
 
-		const relayed = await relayedTools(host.tools.map((tool) => tool.name))
+		cachedHostNames = new Set(host.tools.map((tool) => tool.name))
+		const relayed = await relayedTools(cachedHostNames)
 		const tools = [...relayed.values()].map(({ tool }) => tool)
 		return { ...host, tools: [...host.tools, ...tools] }
 	})
 
 	server.setRequestHandler('tools/call', async (request, ctx) => {
 		const { name } = request.params
-		const host = await hostTools({ method: 'tools/list', params: {} }, ctx)
-		const isHostTool = host.tools.some((tool) => tool.name === name)
+		const candidates: McpRelay<Caller>[] = []
+		let knownOwner: McpRelay<Caller> | undefined
 
-		const relayed = isHostTool ? undefined : (await relayedTools([])).get(name)
-		if (relayed) {
-			return relayed.relay.callTool(
+		for (const relay of relays) {
+			const owns = relay.ownsTool?.(name)
+			if (owns === true) {
+				knownOwner = relay
+				break
+			}
+			if (owns === undefined) {
+				candidates.push(relay)
+			}
+		}
+
+		if (knownOwner && !cachedHostNames?.has(name)) {
+			return knownOwner.callTool(
 				name,
 				request.params.arguments,
 				options.caller,
@@ -87,6 +109,24 @@ export function withRelayedTools<Caller>(
 				}
 			)
 		}
+
+		if (candidates.length > 0) {
+			const hostNames = await getHostToolNames(ctx)
+			if (!hostNames.has(name)) {
+				const relayed = (await relayedTools([], candidates)).get(name)
+				if (relayed) {
+					return relayed.relay.callTool(
+						name,
+						request.params.arguments,
+						options.caller,
+						{
+							signal: ctx.mcpReq.signal
+						}
+					)
+				}
+			}
+		}
+
 		if (hostCall) return hostCall(request, ctx)
 		return {
 			content: [{ type: 'text', text: `Unknown tool: ${name}` }],

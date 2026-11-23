@@ -31,6 +31,7 @@ const NO_EFFECTS: readonly ChatTurnEffect[] = []
 /** What Apply on a suspended run sends: the run and the data it resumes with. */
 export interface RunResume<TData = unknown> {
 	readonly runId: string
+	readonly toolCallId?: string
 	readonly data: TData
 }
 

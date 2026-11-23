@@ -2,7 +2,12 @@ import { createScorer } from '@mastra/core/evals'
 import { generateText, type LanguageModel, Output } from 'ai'
 import { z } from 'zod'
 import { isDefined } from 'hanzio'
-import { type EvalScorer, readRunOutput, type ScorerRun } from './mastra.js'
+import {
+	type EvalScorer,
+	readRunOutput,
+	readRunToolCalls,
+	type ScorerRun
+} from './mastra.js'
 
 /**
  * The default verdict for one conversation: did the user get what they came
@@ -269,7 +274,7 @@ function requireModel(model: LanguageModel | undefined, version: string) {
 	return model
 }
 
-/** A scorer run as one judged turn: the last user message, the answers and the tool calls. */
+/** A scorer run as one judged turn: the last user message, the answers and all tool calls (including failures and proposals waiting for approval). */
 export function judgeTurnOfRun(run: ScorerRun): JudgeTurn {
 	const output = readRunOutput(run.output)
 	const inputMessages = run.input?.inputMessages ?? []
@@ -281,11 +286,13 @@ export function judgeTurnOfRun(run: ScorerRun): JudgeTurn {
 					.join('\n')
 			: '',
 		replyText: output.answers.join('\n'),
-		toolCalls: output.toolResults.map((result) => ({
+		toolCalls: readRunToolCalls(run.output).map((result) => ({
 			name: result.toolName,
 			input: result.input,
-			output: result.displayText,
-			errorText: null
+			output: result.isWaiting ? { waitingForUser: true } : result.displayText,
+			errorText: result.isError
+				? result.displayText || 'Tool call failed'
+				: null
 		}))
 	}
 }

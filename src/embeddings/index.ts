@@ -3,6 +3,7 @@ export {
 	createEmbedder,
 	type Embedder,
 	type EmbeddingCache,
+	type EmbeddingProviderOptions,
 	type EmbeddingUsage,
 	queryEmbeddingCacheKey
 } from './embedder.js'

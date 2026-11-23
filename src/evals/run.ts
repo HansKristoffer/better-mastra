@@ -8,7 +8,8 @@ import {
 	type UIMessage,
 	type UIMessageChunk
 } from 'ai'
-import { getErrorMessage, pMap, timeoutSignal } from 'hanzio'
+import { getErrorMessage, pMap } from 'hanzio'
+import { currentUserTurn } from '../client/messages.js'
 import {
 	caseTurn,
 	type EvalCase,
@@ -196,7 +197,9 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 
 			for (let round = 0; round <= maxResubmits; round += 1) {
 				const usage: EvalUsage[] = []
-				const abortSignal = timeoutSignal(timeoutMs)
+				const controller = new AbortController()
+				const timer = setTimeout(() => controller.abort(), timeoutMs)
+				const abortSignal = controller.signal
 				const resuming = round > 0
 				const startedAt = performance.now()
 				let firstTextAt: number | null = null
@@ -204,7 +207,9 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 					const stream = await options.runTurn({
 						testCase,
 						threadId,
-						messages: resuming ? [...transcript] : transcript.slice(-1),
+						messages: resuming
+							? currentUserTurn(transcript)
+							: transcript.slice(-1),
 						resuming,
 						page: page as EvalTurnInput<C>['page'],
 						requestContext,
@@ -235,6 +240,8 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 					turn.error = abortSignal.aborted
 						? `timed out after ${timeoutMs / 1000}s`
 						: getErrorMessage(error)
+				} finally {
+					clearTimeout(timer)
 				}
 
 				// A turn that opens with a client action shows its first words in a
@@ -275,6 +282,10 @@ export async function runEvalCase<C extends EvalCase<unknown>>(
 					Object.assign(part, { state: 'output-available', output })
 				}
 				keepLatest(transcript, assistant)
+
+				if (round === maxResubmits) {
+					turn.error = `exceeded ${maxResubmits} client-action round trips`
+				}
 			}
 
 			if (assistant) keepLatest(transcript, assistant)

@@ -370,4 +370,112 @@ describe('mcp-relay', () => {
 
 		expect([...new Set(external)]).toEqual(['@modelcontextprotocol/client'])
 	})
+
+	test('tools/call skips host tools/list and ignores unrelated hanging relays when prefixes distinguish ownership', async () => {
+		const hanging = Bun.serve({
+			port: 0,
+			fetch: () => new Promise<Response>(() => {})
+		})
+		servers.push(hanging)
+		const slowRelay = createMcpRelay<{ userId: string }>({
+			url: new URL('/mcp', hanging.url),
+			prefix: 'slow_',
+			headers: () => ({}),
+			discovery: { timeoutMs: 2_000 }
+		})
+		const remote = startRemote()
+		servers.push(remote.http)
+		const fastRelay = createMcpRelay<{ userId: string }>({
+			url: remote.url,
+			prefix: 'feedloop_',
+			headers: async ({ userId }) => ({
+				Authorization: `Bearer ${TOKENS[userId] ?? 'rpt_unknown'}`
+			}),
+			hiddenInputs: { app: async ({ userId }) => `async-${userId}` }
+		})
+		// Warm only the fast relay so its tools are known
+		await fastRelay.tools()
+
+		let hostListCalls = 0
+		const handler = createMcpHandler(() => {
+			const server = new Server(
+				{ name: 'host', version: '1.0.0' },
+				{ capabilities: { tools: {} } }
+			)
+			const wrapped = withRelayedTools(server, [slowRelay, fastRelay], {
+				caller: { userId: 'ada' }
+			})
+			wrapped.setRequestHandler('tools/list', () => {
+				hostListCalls += 1
+				return {
+					tools: [{ name: 'list_sprays', inputSchema: { type: 'object' } }]
+				}
+			})
+			wrapped.setRequestHandler('tools/call', (request) => ({
+				content: [{ type: 'text', text: `host ran ${request.params.name}` }]
+			}))
+			return server
+		})
+		const host = Bun.serve({ port: 0, fetch: (req) => handler.fetch(req) })
+		servers.push(host)
+
+		const consumer = await consumerOf(host, 'ada')
+		const started = Date.now()
+		const hostRes = await consumer.callTool({
+			name: 'list_sprays',
+			arguments: {}
+		})
+		const relayRes = await consumer.callTool({
+			name: 'feedloop_file_feedback',
+			arguments: { title: 'Fast path' }
+		})
+
+		expect(Date.now() - started).toBeLessThan(1_000)
+		expect(hostListCalls).toBe(0)
+		expect(textOf(hostRes)).toBe('host ran list_sprays')
+		expect(textOf(relayRes)).toBe('Filed #12: Fast path in async-ada')
+	})
+
+	test('aborts a hung tool call at callTimeoutMs and rejects duplicate `as` renames', async () => {
+		const hanging = Bun.serve({
+			port: 0,
+			fetch: () => new Promise<Response>(() => {})
+		})
+		servers.push(hanging)
+		const relay = createMcpRelay({
+			url: new URL('/mcp', hanging.url),
+			headers: () => ({}),
+			callTimeoutMs: 50,
+			known: {
+				tools: [
+					{
+						name: 'slow_op',
+						inputSchema: { type: 'object', properties: {} }
+					}
+				]
+			}
+		})
+
+		const started = Date.now()
+		const result = await relay.callTool('slow_op', {}, undefined)
+		expect(result.isError).toBe(true)
+		expect(Date.now() - started).toBeLessThan(1_000)
+
+		expect(() =>
+			createMcpRelay({
+				url: new URL('/mcp', hanging.url),
+				headers: () => ({}),
+				tools: {
+					a: { as: 'dup' },
+					b: { as: 'dup' }
+				},
+				known: {
+					tools: [
+						{ name: 'a', inputSchema: { type: 'object' } },
+						{ name: 'b', inputSchema: { type: 'object' } }
+					]
+				}
+			})
+		).toThrow('two relayed tools map to the same name dup')
+	})
 })

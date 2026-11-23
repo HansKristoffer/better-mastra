@@ -32,15 +32,16 @@ import type {
 	ToolPart
 } from '../client/index.js'
 import {
+	DEFAULT_CHAT_THROTTLE_MS,
 	nextRevealLength,
 	REVEAL_STEP_MS,
-	throttleSubscribe
+	throttleChatSubscribe
 } from '../client/index.js'
 
 // TYPES
 
 export interface UseChatSessionOptions {
-	/** How often a streaming answer re-renders at most; every change when left out. */
+	/** How often a streaming answer re-renders at most (default 40 ms); pass `0` for every change. Status and message-count changes always flush immediately. */
 	readonly throttleMs?: number
 }
 
@@ -99,13 +100,21 @@ export function useChatSession(
 	session: ChatSession,
 	options: UseChatSessionOptions = {}
 ): ChatSessionState {
-	const { throttleMs } = options
+	const throttleMs = options.throttleMs ?? DEFAULT_CHAT_THROTTLE_MS
 	const subscribeChat = useMemo(
-		() => throttleSubscribe(session.chat.subscribe, throttleMs),
+		() => throttleChatSubscribe(session.chat, throttleMs),
 		[session, throttleMs]
 	)
-	const chat = useSyncExternalStore(subscribeChat, session.chat.getSnapshot)
-	const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot)
+	const chat = useSyncExternalStore(
+		subscribeChat,
+		session.chat.getSnapshot,
+		session.chat.getSnapshot
+	)
+	const snapshot = useSyncExternalStore(
+		session.subscribe,
+		session.getSnapshot,
+		session.getSnapshot
+	)
 
 	useEffect(() => {
 		session.resumeStream()
@@ -171,23 +180,39 @@ export function useScreenContext<T>(
  * catching up when the stream runs ahead; all of it once streaming ends.
  */
 export function useWordReveal(text: string, streaming: boolean): string {
-	const [shownLength, setShownLength] = useState(() =>
-		streaming ? 0 : text.length
-	)
+	const [state, setState] = useState(() => ({
+		shownLength: streaming ? 0 : text.length,
+		prevStreaming: streaming
+	}))
+	let shownLength = state.shownLength
+
+	if (streaming !== state.prevStreaming) {
+		shownLength = streaming ? 0 : text.length
+		setState({ shownLength, prevStreaming: streaming })
+	} else if (streaming && text.length < shownLength) {
+		shownLength = 0
+		setState({ shownLength: 0, prevStreaming: streaming })
+	}
+
 	const textRef = useRef(text)
 	textRef.current = text
+	const needsTick =
+		streaming && nextRevealLength(text, shownLength) > shownLength
 
 	useEffect(() => {
-		if (!streaming) {
+		if (!needsTick) {
 			return
 		}
 
 		const timer = setInterval(() => {
-			setShownLength((length) => nextRevealLength(textRef.current, length))
+			setState((prev) => {
+				const next = nextRevealLength(textRef.current, prev.shownLength)
+				return next === prev.shownLength ? prev : { ...prev, shownLength: next }
+			})
 		}, REVEAL_STEP_MS)
 
 		return () => clearInterval(timer)
-	}, [streaming])
+	}, [needsTick])
 
 	return streaming ? text.slice(0, shownLength) : text
 }

@@ -42,7 +42,10 @@ export {
 } from './processors.js'
 export {
 	CACHE_MARKER,
+	CACHE_MARKER_1H,
+	cacheMarkerFor,
 	markConversationForCache,
+	type PromptCacheTtl,
 	withCacheControl,
 	withConversationCache
 } from './promptCache.js'
@@ -69,6 +72,7 @@ export {
 	type ChatTurnResult,
 	type ChatTurnSinks,
 	type ChatTurnStage,
+	chatTurnStages,
 	type PreparedChatTurn,
 	refused,
 	runChatTurn,
@@ -101,9 +105,11 @@ export {
 } from './threads.js'
 export { defineModelArms, type ModelArms, threadBucket } from './modelArms.js'
 export {
+	diffPromptPrefixes,
 	measurePromptBudget,
 	measureToolSchemas,
-	type PromptBudget
+	type PromptBudget,
+	type PromptPrefixDiff
 } from './promptBudget.js'
 export { type PromptVersionTool, promptVersion } from './promptVersion.js'
 export { deriveThreadTitle, persistThreadMetadata } from './title.js'

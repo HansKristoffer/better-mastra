@@ -4,6 +4,7 @@
  * the streaming word reveal, and the tool cards of a message.
  */
 
+import type { UIMessage } from 'ai'
 import {
 	type Component,
 	type ComputedRef,
@@ -15,6 +16,7 @@ import {
 	h,
 	type MaybeRefOrGetter,
 	onActivated,
+	onDeactivated,
 	onMounted,
 	onScopeDispose,
 	type PropType,
@@ -30,21 +32,25 @@ import type {
 	CardSchemas,
 	ChatSession,
 	ChatSessionSnapshot,
+	ChatSessions,
 	ChatSnapshot,
+	PendingChange,
 	ScreenContextStack,
 	ScreenEntry,
 	ToolPart
 } from '../client/index.js'
 import {
+	DEFAULT_CHAT_THROTTLE_MS,
 	nextRevealLength,
+	pendingApproval,
 	REVEAL_STEP_MS,
-	throttleSubscribe
+	throttleChatSubscribe
 } from '../client/index.js'
 
 // TYPES
 
 export interface UseChatSessionOptions {
-	/** How often a streaming answer updates the refs at most; every change when left out. */
+	/** How often a streaming answer updates the refs at most (default 40 ms); pass `0` for every change. Status and message-count changes always flush immediately. */
 	readonly throttleMs?: number
 }
 
@@ -72,42 +78,105 @@ export interface ChatSessionRefs extends Pick<
 	readonly answerComplete: ComputedRef<ChatSessionSnapshot['answerComplete']>
 }
 
+export interface LoadedChatThread {
+	readonly messages: readonly UIMessage[]
+	readonly pendingChanges?: readonly PendingChange[]
+}
+
+export interface UseChatThreadOptions extends UseChatSessionOptions {
+	readonly sessions: ChatSessions
+	readonly threadId: MaybeRefOrGetter<string>
+	/** Loads the thread's stored messages and pending changes whenever `threadId` changes or `reload()` runs. */
+	readonly load?: (
+		threadId: string,
+		options: { readonly signal: AbortSignal }
+	) => Promise<LoadedChatThread | undefined>
+}
+
+export interface ChatThreadRefs extends ChatSessionRefs {
+	readonly threadId: ComputedRef<string>
+	readonly session: ComputedRef<ChatSession>
+	/** The first waiting approval of the active thread's turn, or `null` when none waits. */
+	readonly pendingApproval: ComputedRef<Extract<
+		PendingChange,
+		{ kind: 'approval' }
+	> | null>
+	readonly loading: ComputedRef<boolean>
+	readonly loadError: ComputedRef<unknown>
+	readonly reload: () => Promise<void>
+}
+
 /** The component for each card kind, which gets the card as its `card` prop; `silent` draws nothing and needs none. */
 export type CardComponents<S extends CardSchemas> = {
 	readonly [K in Exclude<Card<S>['kind'], 'silent'>]: Component
+}
+
+export interface ToolPartsProps<S extends CardSchemas> {
+	readonly parts: readonly ToolPart[]
+	readonly registry: Pick<CardRegistry<S>, 'fold'>
+	readonly cards: CardComponents<S>
+	/** Wraps each run of steps, such as an activity list; it gets the run as its `cards` prop. */
+	readonly steps?: Component
 }
 
 // COMPOSABLES
 
 /**
  * The chat's messages, status and error, and the session's turn, as
- * computed refs. A session with `resume`
- * reattaches to a running answer when this runs.
+ * computed refs. Accepts either a single `ChatSession` or a reactive getter/ref
+ * to switch sessions cleanly. A session with `resume` reattaches to a running
+ * answer once mounted (SSR-safe).
  */
 export function useChatSession(
-	session: ChatSession,
+	session: MaybeRefOrGetter<ChatSession>,
 	options: UseChatSessionOptions = {}
 ): ChatSessionRefs {
-	const chat = shallowRef(session.chat.getSnapshot())
-	const snapshot = shallowRef(session.getSnapshot())
-	const unsubscribeChat = throttleSubscribe(
-		session.chat.subscribe,
-		options.throttleMs
-	)(() => {
-		chat.value = session.chat.getSnapshot()
-	})
-	const unsubscribeSession = session.subscribe(() => {
-		snapshot.value = session.getSnapshot()
-	})
+	const throttleMs = options.throttleMs ?? DEFAULT_CHAT_THROTTLE_MS
+	const current = () => toValue(session)
+	const chat = shallowRef(current().chat.getSnapshot())
+	const snapshot = shallowRef(current().getSnapshot())
+	const inComponent = getCurrentInstance() !== null
+	let mounted = !inComponent
+	let unsubscribeChat: (() => void) | undefined
+	let unsubscribeSession: (() => void) | undefined
 
-	if (getCurrentScope() !== undefined) {
-		onScopeDispose(() => {
-			unsubscribeChat()
-			unsubscribeSession()
+	const detach = () => {
+		unsubscribeChat?.()
+		unsubscribeSession?.()
+		unsubscribeChat = undefined
+		unsubscribeSession = undefined
+	}
+
+	const attach = (target: ChatSession) => {
+		detach()
+		chat.value = target.chat.getSnapshot()
+		snapshot.value = target.getSnapshot()
+		unsubscribeChat = throttleChatSubscribe(
+			target.chat,
+			throttleMs
+		)(() => {
+			chat.value = target.chat.getSnapshot()
+		})
+		unsubscribeSession = target.subscribe(() => {
+			snapshot.value = target.getSnapshot()
+		})
+		if (mounted) {
+			target.resumeStream()
+		}
+	}
+
+	watch(current, attach, { immediate: true })
+
+	if (inComponent) {
+		onMounted(() => {
+			mounted = true
+			current().resumeStream()
 		})
 	}
 
-	session.resumeStream()
+	if (getCurrentScope() !== undefined) {
+		onScopeDispose(detach)
+	}
 
 	return {
 		messages: computed(() => chat.value.messages),
@@ -118,22 +187,120 @@ export function useChatSession(
 		changeMarks: computed(() => snapshot.value.changeMarks),
 		replySuggestions: computed(() => snapshot.value.replySuggestions),
 		answerComplete: computed(() => snapshot.value.answerComplete),
-		send: session.send,
-		stop: session.stop,
-		tryAgain: session.tryAgain,
-		regenerate: session.regenerate,
-		answerApproval: session.answerApproval,
-		resumeRun: session.resumeRun,
-		clearRestoredDraft: session.clearRestoredDraft,
-		showStored: session.showStored,
-		resumeStream: session.resumeStream
+		send: (...args) => current().send(...args),
+		stop: () => current().stop(),
+		tryAgain: () => current().tryAgain(),
+		regenerate: (...args) => current().regenerate(...args),
+		answerApproval: (...args) => current().answerApproval(...args),
+		resumeRun: (...args) => current().resumeRun(...args),
+		clearRestoredDraft: (...args) => current().clearRestoredDraft(...args),
+		showStored: (...args) => current().showStored(...args),
+		resumeStream: () => current().resumeStream()
+	}
+}
+
+/**
+ * Binds a reactive `threadId` to a `ChatSessions` registry: switches focus,
+ * subscribes to the active session's refs, and loads stored history with a
+ * race-safe stale-load guard.
+ */
+export function useChatThread(options: UseChatThreadOptions): ChatThreadRefs {
+	const threadId = computed(() => toValue(options.threadId))
+	const session = computed(() => options.sessions.get(threadId.value))
+	const refs = useChatSession(session, options)
+	const loading = shallowRef(false)
+	const loadError = shallowRef<unknown>(undefined)
+	const inComponent = getCurrentInstance() !== null
+	let mounted = !inComponent
+	let loadToken = 0
+	let loadController: AbortController | undefined
+
+	const abortLoad = () => {
+		loadController?.abort()
+		loadController = undefined
+	}
+
+	const reload = async (): Promise<void> => {
+		abortLoad()
+		loadToken += 1
+		const token = loadToken
+		const id = threadId.value
+		const target = session.value
+
+		if (!options.load) {
+			loading.value = false
+			loadError.value = undefined
+			return
+		}
+
+		const controller = new AbortController()
+		loadController = controller
+		loading.value = true
+		loadError.value = undefined
+
+		try {
+			const loaded = await options.load(id, { signal: controller.signal })
+			if (token !== loadToken || controller.signal.aborted) {
+				return
+			}
+
+			if (loaded !== undefined) {
+				target.showStored({
+					messages: [...loaded.messages],
+					pendingChanges: loaded.pendingChanges ?? []
+				})
+			}
+		} catch (error) {
+			if (token === loadToken && !controller.signal.aborted) {
+				loadError.value = error
+			}
+		} finally {
+			if (token === loadToken) {
+				loading.value = false
+				if (loadController === controller) {
+					loadController = undefined
+				}
+			}
+		}
+	}
+
+	const activate = (id: string) => {
+		if (!mounted) return
+		options.sessions.focus(id)
+		void reload()
+	}
+
+	watch(threadId, activate, { immediate: true })
+
+	if (inComponent) {
+		onMounted(() => {
+			mounted = true
+			activate(threadId.value)
+		})
+	}
+
+	if (getCurrentScope() !== undefined) {
+		onScopeDispose(() => {
+			loadToken += 1
+			abortLoad()
+		})
+	}
+
+	return {
+		...refs,
+		threadId,
+		session,
+		pendingApproval: computed(() => pendingApproval(refs.turn.value)),
+		loading: computed(() => loading.value),
+		loadError: computed(() => loadError.value),
+		reload
 	}
 }
 
 /**
  * Tells the chat what this page shows: on top when it mounts, again when a
- * kept-alive page is shown again, off the stack when it unmounts or
- * `enabled` turns false (a drawer that closed).
+ * kept-alive page is shown again, off the stack when it unmounts, deactivates,
+ * or `enabled` turns false (a drawer that closed).
  */
 export function useScreenContext<T>(
 	stack: ScreenContextStack<T>,
@@ -155,6 +322,7 @@ export function useScreenContext<T>(
 	} else {
 		onMounted(sync)
 		onActivated(sync)
+		onDeactivated(() => stack.leave(instanceId))
 	}
 
 	watch(() => toValue(options.enabled ?? true), sync)
@@ -167,12 +335,14 @@ export function useScreenContext<T>(
 /**
  * The part of a streaming text to show: a step of whole words every 40 ms,
  * catching up when the stream runs ahead; all of it once streaming ends.
+ * Stops its timer whenever caught up so idle/paused streams burn no CPU.
  */
 export function useWordReveal(
 	text: MaybeRefOrGetter<string>,
 	streaming: MaybeRefOrGetter<boolean>
 ): Readonly<ShallowRef<string>> {
-	let shownLength = toValue(streaming) ? 0 : toValue(text).length
+	let prevStreaming = toValue(streaming)
+	let shownLength = prevStreaming ? 0 : toValue(text).length
 	const shown = shallowRef(toValue(text).slice(0, shownLength))
 	let timer: ReturnType<typeof setInterval> | undefined
 
@@ -185,6 +355,7 @@ export function useWordReveal(
 		[() => toValue(text), () => toValue(streaming)],
 		([current, isStreaming]) => {
 			if (!isStreaming) {
+				prevStreaming = false
 				stopTimer()
 				shownLength = current.length
 				shown.value = current
@@ -192,9 +363,29 @@ export function useWordReveal(
 				return
 			}
 
+			if (!prevStreaming || current.length < shownLength) {
+				shownLength = 0
+				shown.value = ''
+			}
+			prevStreaming = true
+
+			if (nextRevealLength(current, shownLength) <= shownLength) {
+				stopTimer()
+				return
+			}
+
 			timer ??= setInterval(() => {
-				shownLength = nextRevealLength(toValue(text), shownLength)
-				shown.value = toValue(text).slice(0, shownLength)
+				const latest = toValue(text)
+				const next = nextRevealLength(latest, shownLength)
+				if (next <= shownLength) {
+					stopTimer()
+					return
+				}
+				shownLength = next
+				shown.value = latest.slice(0, shownLength)
+				if (nextRevealLength(latest, shownLength) <= shownLength) {
+					stopTimer()
+				}
 			}, REVEAL_STEP_MS)
 		},
 		{ immediate: true }
@@ -209,8 +400,7 @@ export function useWordReveal(
 
 // COMPONENTS
 
-/** Draws the cards of neighbouring tool parts, with each run of steps folded into `steps` when given. */
-export const ToolParts = defineComponent({
+const ToolPartsImpl = defineComponent({
 	name: 'ToolParts',
 	props: {
 		parts: { type: Array as PropType<readonly ToolPart[]>, required: true },
@@ -255,6 +445,15 @@ export const ToolParts = defineComponent({
 			)
 	}
 })
+
+/** Draws the cards of neighbouring tool parts, with each run of steps folded into `steps` when given. */
+export const ToolParts = ToolPartsImpl as unknown as new <
+	S extends CardSchemas = CardSchemas
+>(
+	props: ToolPartsProps<S>
+) => {
+	$props: ToolPartsProps<S>
+}
 
 // FUNCTIONS
 

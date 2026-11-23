@@ -8,6 +8,7 @@ import { MockLanguageModelV4 } from 'ai/test'
 import {
 	defaultJudgeSystem,
 	defineJudge,
+	judgeTurnOfRun,
 	type JudgeVerdict,
 	renderTranscript
 } from './judge.js'
@@ -168,4 +169,75 @@ test('a transcript clips long tool payloads and shows errors', () => {
 	expect(transcript).toContain(`${'x'.repeat(1500)}…`)
 	expect(transcript).toContain('Tool bad({}) -> ERROR boom')
 	expect(transcript).toContain('Assistant: (no text)')
+})
+
+test('judgeTurnOfRun includes failed and waiting tool calls alongside successful ones', () => {
+	const run = createAgentTestRun({
+		inputMessages: [
+			createTestMessage({ role: 'user', content: 'Update deal' })
+		],
+		output: [
+			{
+				id: 'a1',
+				role: 'assistant',
+				createdAt: new Date(),
+				content: {
+					format: 2,
+					metadata: {
+						pendingToolApprovals: { c3: { toolCallId: 'c3' } }
+					},
+					parts: [
+						{
+							type: 'tool-invocation',
+							toolInvocation: {
+								state: 'result',
+								toolCallId: 'c1',
+								toolName: 'deal_get',
+								args: { id: 'd1' },
+								result: { ok: true }
+							}
+						},
+						{
+							type: 'tool-invocation',
+							toolInvocation: {
+								state: 'result',
+								toolCallId: 'c2',
+								toolName: 'deal_check',
+								args: {},
+								result: 'boom',
+								isError: true
+							}
+						},
+						{
+							type: 'tool-invocation',
+							toolInvocation: {
+								state: 'call',
+								toolCallId: 'c3',
+								toolName: 'deal_update',
+								args: { stage: 'won' }
+							}
+						},
+						{ type: 'text', text: 'Ready to update.' }
+					]
+				}
+			} as never
+		]
+	})
+
+	const turn = judgeTurnOfRun(run)
+	expect(turn.toolCalls).toEqual([
+		{
+			name: 'deal_get',
+			input: { id: 'd1' },
+			output: '{"ok":true}',
+			errorText: null
+		},
+		{ name: 'deal_check', input: {}, output: '"boom"', errorText: '"boom"' },
+		{
+			name: 'deal_update',
+			input: { stage: 'won' },
+			output: { waitingForUser: true },
+			errorText: null
+		}
+	])
 })

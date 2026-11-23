@@ -120,6 +120,9 @@ export const DICTATION_FINISH_TIMEOUT_MS = 4_000
 /** The empty text frame that tells Soniox the audio is complete. */
 const END_OF_AUDIO = ''
 
+/** Clock-skew margin when checking whether a pre-fetched temporary key is still valid. */
+const KEY_EXPIRY_BUFFER_MS = 5_000
+
 /** Starts one dictation: permission and key at once, then socket and microphone. */
 export async function startDictation(
 	options: DictationOptions
@@ -129,7 +132,10 @@ export async function startDictation(
 	if (signal?.aborted) return { kind: 'cancelled' }
 
 	// Asked for while the permission prompt is open, so a start waits for one round trip, not two.
-	const firstKey = options.requestKey().catch(() => undefined)
+	const firstKey = options.requestKey().then(
+		(key) => ({ ok: true as const, key }),
+		() => ({ ok: false as const })
+	)
 	// A refusal is false; a throw is no microphone (`NotFoundError`) or a broken one.
 	const granted = await microphone
 		.requestPermission()
@@ -158,12 +164,7 @@ export async function startDictation(
 	const session = new Session(key, options)
 
 	if (!(await session.start())) {
-		return { kind: 'unavailable' }
-	}
-
-	if (signal?.aborted) {
-		session.cancel()
-		return { kind: 'cancelled' }
+		return signal?.aborted ? { kind: 'cancelled' } : { kind: 'unavailable' }
 	}
 
 	return { kind: 'started', session }
@@ -171,15 +172,20 @@ export async function startDictation(
 
 /** The key asked for beside the permission prompt, or a new one when the prompt outlasted it. */
 async function freshKey(
-	key: DictationKey | undefined,
+	first:
+		{ readonly ok: true; readonly key: DictationKey } | { readonly ok: false },
 	options: Pick<DictationOptions, 'requestKey'>
 ): Promise<DictationKey | undefined> {
-	const expired =
-		key?.expiresAt !== undefined && Date.parse(key.expiresAt) <= Date.now()
+	// Do not double-call `requestKey` when the initial request already failed.
+	if (!first.ok) {
+		return undefined
+	}
 
-	return key && !expired
-		? key
-		: await options.requestKey().catch(() => undefined)
+	const expired =
+		first.key.expiresAt !== undefined &&
+		Date.parse(first.key.expiresAt) <= Date.now() + KEY_EXPIRY_BUFFER_MS
+
+	return expired ? await options.requestKey().catch(() => undefined) : first.key
 }
 
 /** `getUserMedia` rejects this way when the device has no microphone, or none that fits. */
@@ -218,8 +224,12 @@ class Session implements DictationSession {
 		this.socketFactory = options.socket ?? webSocketFactory()
 	}
 
-	/** Opens the socket and starts the microphone; false, with everything released, when either fails. */
+	/** Opens the socket and starts the microphone; false, with everything released, when either fails or cancels. */
 	async start(): Promise<boolean> {
+		const { signal } = this.options
+		const onStartAbort = () => this.end('cancelled')
+		signal?.addEventListener('abort', onStartAbort, { once: true })
+
 		try {
 			this.socket = this.socketFactory.open(
 				this.key.websocketUrl,
@@ -236,18 +246,21 @@ class Session implements DictationSession {
 				this.sendAudio(audio)
 			)
 
-			if (recording && this.ended) {
-				// The socket closed while the microphone was starting.
+			const aborted = Boolean(signal?.aborted)
+			if (recording && (this.ended || aborted)) {
+				// The socket closed or the caller cancelled while the microphone was starting.
 				await this.options.microphone.stop().catch(() => {})
 			}
 
-			this.started = recording && !this.ended
+			this.started = recording && !this.ended && !aborted
 		} catch {
 			this.started = false
+		} finally {
+			signal?.removeEventListener('abort', onStartAbort)
 		}
 
 		if (!this.started) {
-			this.end('failed')
+			this.end(signal?.aborted ? 'cancelled' : 'failed')
 			await this.endedText
 			return false
 		}

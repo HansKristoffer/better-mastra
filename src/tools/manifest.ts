@@ -21,6 +21,17 @@ export type ToolManifest<TKind extends string = ToolKind> = Readonly<
 >
 
 /**
+ * Declares a static tool manifest without importing live Mastra/oRPC tool
+ * modules, for apps that want `better-mastra-tool-manifest` to run without
+ * booting secrets or backend routers.
+ */
+export function defineToolManifest<const T extends ToolManifest<string>>(
+	manifest: T
+): T {
+	return manifest
+}
+
+/**
  * The manifest of the definitions, in their order. `kind` names each tool's
  * kind in the app's own words; default `server` or `client`.
  */

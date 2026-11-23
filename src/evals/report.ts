@@ -190,8 +190,14 @@ export function compareReports(baseline: EvalReport, candidate: EvalReport) {
 	const before = summarize(baseline.results)
 	const after = summarize(candidate.results)
 	const baselineById = keyBy(baseline.results, 'caseId')
-	const moved = candidate.results.filter(
-		(result) => passCount(baselineById[result.caseId]) !== passCount(result)
+	const candidateById = keyBy(candidate.results, 'caseId')
+	const allCaseIds = getUniqueValues([
+		...candidate.results.map((result) => result.caseId),
+		...baseline.results.map((result) => result.caseId)
+	])
+	const moved = allCaseIds.filter(
+		(caseId) =>
+			passCount(baselineById[caseId]) !== passCount(candidateById[caseId])
 	)
 	const judgeKeys = getUniqueValues([
 		...Object.keys(before.judge),
@@ -216,8 +222,8 @@ export function compareReports(baseline: EvalReport, candidate: EvalReport) {
 					'| Case | Before | After |',
 					'| --- | --- | --- |',
 					...moved.map(
-						(result) =>
-							`| ${result.caseId} | ${passCount(baselineById[result.caseId])} | ${passCount(result)} |`
+						(caseId) =>
+							`| ${caseId} | ${passCount(baselineById[caseId])} | ${passCount(candidateById[caseId])} |`
 					)
 				].join('\n')
 			: 'No case changed its pass count.'
@@ -265,9 +271,15 @@ export function scoreLabels<L extends string>(
 	labels: readonly L[],
 	runs: readonly { id: string; expected: readonly L[]; kept: readonly L[] }[]
 ) {
-	const agrees = (run: (typeof runs)[number]) =>
-		run.kept.length === run.expected.length &&
-		run.kept.every((label) => run.expected.includes(label))
+	const agrees = (run: (typeof runs)[number]) => {
+		const kept = new Set(run.kept)
+		const expected = new Set(run.expected)
+		if (kept.size !== expected.size) return false
+		for (const label of kept) {
+			if (!expected.has(label)) return false
+		}
+		return true
+	}
 	const shareOr0 = (part: number, whole: number) => share(part, whole) ?? 0
 	return {
 		runs: runs.length,

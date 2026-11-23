@@ -251,4 +251,48 @@ describe('PostHog LLM analytics', () => {
 			}) as unknown as typeof fetch
 		})(event)
 	})
+
+	test('reads AI SDK 7 inputTokenDetails cache counts and batches multi-step generations in one POST', async () => {
+		const requests: { url: string; body: Record<string, unknown> }[] = []
+		const capture = createPostHogCapture({
+			apiKey: 'phc_test',
+			host: POSTHOG_EU_HOST,
+			fetch: (async (url: string, init: RequestInit) => {
+				requests.push({ url, body: JSON.parse(String(init.body)) })
+				return new Response(null, { status: 200 })
+			}) as unknown as typeof fetch
+		})
+		const sink = posthogGenerations<{ userId: string }>({
+			capture,
+			identify: (scope) => ({ distinctId: scope.userId }),
+			provider: 'anthropic',
+			traceId: () => 'fallback-trace'
+		})
+		const v7Step = {
+			usage: {
+				inputTokens: 1_000,
+				outputTokens: 50,
+				inputTokenDetails: { cacheReadTokens: 800, cacheWriteTokens: 100 }
+			},
+			finishReason: 'stop',
+			response: { id: 'gen-v7', modelId: 'claude-sonnet-4-6' }
+		}
+
+		await sink({
+			scope: { userId: 'u1' },
+			labels: {},
+			modelId: 'claude-sonnet-4-6',
+			steps: [v7Step, v7Step]
+		})
+
+		expect(requests).toHaveLength(1)
+		expect(requests[0]?.url).toBe('https://eu.i.posthog.com/batch/')
+		const batch = requests[0]?.body.batch as Record<string, unknown>[]
+		expect(batch).toHaveLength(2)
+		expect(batch[0]?.properties).toMatchObject({
+			$ai_trace_id: 'fallback-trace',
+			$ai_cache_read_input_tokens: 800,
+			$ai_cache_creation_input_tokens: 100
+		})
+	})
 })

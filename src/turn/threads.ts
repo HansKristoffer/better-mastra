@@ -24,12 +24,13 @@ import {
 	type WorkflowsStorage
 } from '@mastra/core/storage'
 import type { UIMessage } from 'ai'
-import { compact, invariant, must, safeJsonParse } from 'hanzio'
+import { compact, invariant, isRecord, must, pMap, safeJsonParse } from 'hanzio'
 
 import {
 	joinResumedAnswers,
 	type ResumePointOptions
 } from '../client/messages.js'
+import type { ThreadLock } from '../resumable/lock.js'
 
 import { listPendingChanges, type PendingChange } from './changes.js'
 import { toUserFacingMessage } from './stream.js'
@@ -90,12 +91,12 @@ export interface ThreadHandlersOptions<TScope> {
 	userId(scope: TScope): string
 	/** Whether a stored thread of the resource is still the caller's (a membership that ended). Default: yes. */
 	belongsTo?(thread: StorageThreadType, scope: TScope): boolean
-	/** The Mastra instance with observability storage, for ratings. */
-	readonly mastra?: Mastra
+	/** The Mastra instance (or lazy getter) with observability storage, for ratings. */
+	readonly mastra?: Mastra | (() => Mastra)
 	/** The rating store when ratings are not observability feedback; `mastra` is then not needed for them. */
 	readonly ratings?: AnswerRatingStore<TScope>
-	/** The chat agent, for the thread's pending changes and their snapshots. */
-	readonly agent?: Agent
+	/** The chat agent (or lazy getter), for the thread's pending changes and their snapshots. */
+	readonly agent?: Agent | (() => Agent)
 	/** Runs a delete under the thread lock; null when a turn holds it. */
 	lock?(key: ThreadKey): Promise<(() => Promise<void>) | null>
 	/**
@@ -111,21 +112,69 @@ const THUMBS = 'thumbs'
 const RATING_VALUES = { up: 1, down: -1 } as const
 /** More thumbs than one user leaves on one answer, even when two ratings race. */
 const THUMBS_PER_READ = 100
+/** Batch size for single-query thread rating lookup before falling back per trace. */
+const BATCH_THUMBS_PER_READ = 500
 /** The workflows an agent run is stored as: its loop and its execution, under one run id. */
 const AGENT_RUN_WORKFLOWS = ['agentic-loop', 'executionWorkflow'] as const
 
 /**
  * Whether a thread belongs to a memory resource, as `createChatRoute`'s
- * `ownsThread` answers: `undefined` when no such thread exists yet.
+ * `ownsThread` answers: `undefined` when no such thread exists yet. When
+ * `resumable` is passed, an in-flight first turn (not yet written to storage)
+ * is checked against the active stream's recorded resource id.
  */
 export async function ownsThread(input: {
 	readonly memory: Pick<MastraMemory, 'getThreadById'>
 	readonly threadId: string
 	readonly resourceId: string
+	readonly resumable?: {
+		readonly resourceOf?: (threadKey: string) => Promise<string | null>
+	}
 }): Promise<boolean | undefined> {
 	const thread = await input.memory.getThreadById({ threadId: input.threadId })
 
-	return thread ? thread.resourceId === input.resourceId : undefined
+	if (thread) return thread.resourceId === input.resourceId
+
+	const activeResource = await input.resumable?.resourceOf?.(input.threadId)
+	return activeResource ? activeResource === input.resourceId : undefined
+}
+
+function resolveLazy<T>(value: T | (() => T) | undefined): T | undefined {
+	return typeof value === 'function' ? (value as () => T)() : value
+}
+
+/** Whether any recalled message may be a Mastra signal or system reminder requiring `hideSignals: true`. */
+function hasPossibleSignal(messages: readonly MastraDBMessage[]): boolean {
+	for (const message of messages) {
+		if ((message.role as string) === 'signal') return true
+		const content = message.content
+		if (!isRecord(content)) continue
+		const metadata = content.metadata
+		if (
+			isRecord(metadata) &&
+			(metadata.signal !== undefined ||
+				metadata.systemReminder !== undefined ||
+				metadata.isSystemReminder !== undefined)
+		) {
+			return true
+		}
+		if (Array.isArray(content.parts)) {
+			for (const part of content.parts) {
+				if (!isRecord(part)) continue
+				if (part.type === 'data-signal' || part.type === 'data-user-message') {
+					return true
+				}
+				if (
+					part.type === 'text' &&
+					typeof part.text === 'string' &&
+					part.text.includes('<system-reminder>')
+				) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 export function createThreadHandlers<TScope>(
@@ -200,25 +249,30 @@ export function createThreadHandlers<TScope>(
 				filter: { dateRange: { ...(end && { end }), endExclusive: true } }
 			})
 			const oldest = stored.messages[0]
-			const visible = oldest
-				? await memory.recall({
-						threadId: key.threadId,
-						resourceId: key.resourceId,
-						perPage: false,
-						hideSignals: true,
-						filter: {
-							dateRange: {
-								start: oldest.createdAt,
-								...(end && { end }),
-								endExclusive: true
+			// When the whole thread fits on one page and holds no signal messages,
+			// the first recall is already exact—skip the redundant second DB query.
+			const visible = !oldest
+				? { messages: [] as MastraDBMessage[] }
+				: !stored.hasMore && !hasPossibleSignal(stored.messages)
+					? { messages: stored.messages }
+					: await memory.recall({
+							threadId: key.threadId,
+							resourceId: key.resourceId,
+							perPage: false,
+							hideSignals: true,
+							filter: {
+								dateRange: {
+									start: oldest.createdAt,
+									...(end && { end }),
+									endExclusive: true
+								}
 							}
-						}
-					})
-				: { messages: [] as MastraDBMessage[] }
+						})
 			const messages = toUiMessages(visible.messages, options)
+			const agent = resolveLazy(options.agent)
 			const [ratings, pendingChanges] = await Promise.all([
 				readRatings(scope, thread, messages, visible.messages),
-				options.agent ? listPendingChanges(options.agent, key) : []
+				agent ? listPendingChanges(agent, key) : []
 			])
 
 			return {
@@ -244,7 +298,7 @@ export function createThreadHandlers<TScope>(
 			if (!release) return 'locked'
 
 			try {
-				await deleteThreadEverywhere(memory, key, options.agent)
+				await deleteThreadEverywhere(memory, key, resolveLazy(options.agent))
 				return 'deleted'
 			} finally {
 				await release().catch(() => {})
@@ -283,7 +337,7 @@ export function createThreadHandlers<TScope>(
 
 			if (!traceId) return false
 
-			const mastra = requireMastra(options.mastra)
+			const mastra = requireMastra(resolveLazy(options.mastra))
 			const userId = options.userId(scope)
 			const earlier = await listThumbs(mastra, traceId, userId)
 			const store = await mastra.getStorage()?.getStore('observability')
@@ -332,30 +386,82 @@ export function createThreadHandlers<TScope>(
 			return options.ratings.read(scope, thread, [...answerIds])
 		}
 
-		if (!options.mastra) return {}
+		const mastra = resolveLazy(options.mastra)
+		if (!mastra) return {}
 
-		const mastra = options.mastra
+		const tracedAnswers = stored.flatMap((message) => {
+			const traceId = readTraceId(message)
+			return answerIds.has(message.id) && traceId
+				? [{ messageId: message.id, traceId, createdAt: message.createdAt }]
+				: []
+		})
+		if (tracedAnswers.length === 0) return {}
+
+		const userId = options.userId(scope)
+		const toRating = (
+			record: { value: number; comment: string | undefined } | undefined
+		): AnswerRating | undefined => {
+			const rating =
+				record?.value === RATING_VALUES.up
+					? 'up'
+					: record?.value === RATING_VALUES.down
+						? 'down'
+						: undefined
+			return rating ? { rating, reason: record?.comment } : undefined
+		}
+
+		// Batch-read all thumbs by this user since the oldest answer on this page
+		// in one query instead of N+1 per-message queries.
+		if (tracedAnswers.length > 1) {
+			const store = await mastra.getStorage()?.getStore('observability')
+			if (store) {
+				let oldestTime = tracedAnswers[0]!.createdAt.getTime()
+				for (const item of tracedAnswers) {
+					const time = item.createdAt.getTime()
+					if (time < oldestTime) oldestTime = time
+				}
+				const batch = await store.listFeedback({
+					filters: {
+						feedbackUserId: userId,
+						feedbackSource: USER_SOURCE,
+						feedbackType: THUMBS,
+						timestamp: { start: new Date(oldestTime) }
+					},
+					pagination: { page: 0, perPage: BATCH_THUMBS_PER_READ },
+					orderBy: { field: 'timestamp', direction: 'DESC' }
+				})
+				const byTrace = new Map<
+					string,
+					{ value: number; comment: string | undefined }
+				>()
+				for (const record of batch.feedback) {
+					if (
+						record.feedbackId &&
+						record.traceId &&
+						!byTrace.has(record.traceId)
+					) {
+						byTrace.set(record.traceId, {
+							value: Number(record.value),
+							comment: record.comment ?? undefined
+						})
+					}
+				}
+				if (!batch.pagination?.hasMore) {
+					const entries = tracedAnswers.flatMap(({ messageId, traceId }) => {
+						const rating = toRating(byTrace.get(traceId))
+						return rating ? ([[messageId, rating]] as const) : []
+					})
+					return Object.fromEntries(entries)
+				}
+			}
+		}
+
 		const ratings = await Promise.all(
-			stored.map(async (message) => {
-				const traceId = readTraceId(message)
+			tracedAnswers.map(async ({ messageId, traceId }) => {
+				const [newest] = await listThumbs(mastra, traceId, userId)
+				const rating = toRating(newest)
 
-				if (!answerIds.has(message.id) || !traceId) return undefined
-
-				const [newest] = await listThumbs(
-					mastra,
-					traceId,
-					options.userId(scope)
-				)
-				const rating =
-					newest?.value === RATING_VALUES.up
-						? 'up'
-						: newest?.value === RATING_VALUES.down
-							? 'down'
-							: undefined
-
-				return (
-					rating && ([message.id, { rating, reason: newest?.comment }] as const)
-				)
+				return rating && ([messageId, rating] as const)
 			})
 		)
 
@@ -411,24 +517,35 @@ export async function sweepOldThreads(input: {
 	const batchSize = input.batchSize ?? 200
 	let deleted = 0
 	let failed = 0
-	// Expired threads that stay (filtered out or failing) sit ahead of the rest.
-	// ponytail: the page grows with them; a cursor if a store keeps many.
+	// Expired threads that stay (filtered out or failing) sit at the front of the
+	// `updatedAt ASC` order; advance `page` past them with a fixed `batchSize`
+	// so scanning never grows O(N^2) in shared databases.
 	let kept = 0
+	const skippedIds = new Set<string>()
 
 	for (;;) {
+		const page = Math.floor(kept / batchSize)
+		const offsetInPage = kept - page * batchSize
 		const { threads } = await input.memory.listThreads({
-			page: 0,
-			perPage: kept + batchSize,
+			page,
+			perPage: batchSize,
 			orderBy: { field: 'updatedAt', direction: 'ASC' }
 		})
 		const expired = threads.filter(
 			(thread) => thread.updatedAt < input.olderThan
 		)
 		let deletedThisRound = 0
+		let skippedThisRound = 0
 
-		for (const thread of expired.slice(kept)) {
+		for (const thread of expired.slice(offsetInPage)) {
+			if (skippedIds.has(thread.id)) {
+				continue
+			}
+
 			if (!(input.filter?.(thread) ?? true)) {
+				skippedIds.add(thread.id)
 				kept += 1
+				skippedThisRound += 1
 				continue
 			}
 
@@ -441,15 +558,23 @@ export async function sweepOldThreads(input: {
 				deletedThisRound += 1
 			} catch (error) {
 				failed += 1
+				skippedIds.add(thread.id)
 				kept += 1
+				skippedThisRound += 1
 				input.onError?.(error, thread.id)
 			}
 		}
 
 		deleted += deletedThisRound
 
-		// Done when the page held a live thread, or the page was all leftovers.
-		if (expired.length < threads.length || expired.length <= kept) break
+		// Done when we hit a live thread, reached the last page, or made no progress.
+		if (
+			expired.length < threads.length ||
+			threads.length < batchSize ||
+			(deletedThisRound === 0 && skippedThisRound === 0)
+		) {
+			break
+		}
 	}
 
 	return { deleted, failed }
@@ -474,8 +599,15 @@ export async function sweepAbandonedRuns(input: {
 	readonly workflows: WorkflowsStorage
 	readonly olderThan: Date
 	readonly pageSize?: number
+	/** Concurrent deletions (default 5). */
+	readonly concurrency?: number
 	/** Which runs to sweep, such as only the threads of one agent. Default every one. */
 	readonly filter?: (run: AbandonedRun) => boolean
+	/**
+	 * Thread lock (`createThreadLock`): acquires the run's thread before
+	 * deleting so an active turn is left alone. Shorthand for `withLock`.
+	 */
+	readonly lock?: ThreadLock
 	/**
 	 * Runs `remove` under the app's lock of the run's thread, so a turn that
 	 * is resuming the run keeps it. Resolves false when the thread is busy,
@@ -512,25 +644,50 @@ export async function sweepAbandonedRuns(input: {
 
 	if (input.dryRun) return abandoned.length
 
+	const withLock =
+		input.withLock ??
+		(input.lock
+			? async (run: AbandonedRun, remove: () => Promise<void>) => {
+					if (!run.threadId) {
+						await remove()
+						return true
+					}
+					const release = await input.lock!({ threadId: run.threadId })
+					if (!release) return false
+					try {
+						await remove()
+					} finally {
+						await release()
+					}
+					return true
+				}
+			: undefined)
+
 	let deleted = 0
 
-	for (const run of abandoned) {
-		const remove = async () => {
-			for (const workflowName of AGENT_RUN_WORKFLOWS) {
-				await input.workflows.deleteWorkflowRunById({
-					runId: run.runId,
-					workflowName
-				})
+	await pMap(
+		abandoned,
+		async (run) => {
+			const remove = async () => {
+				await Promise.all(
+					AGENT_RUN_WORKFLOWS.map((workflowName) =>
+						input.workflows.deleteWorkflowRunById({
+							runId: run.runId,
+							workflowName
+						})
+					)
+				)
 			}
-		}
 
-		if (input.withLock) {
-			if (await input.withLock(run, remove)) deleted += 1
-		} else {
-			await remove()
-			deleted += 1
-		}
-	}
+			if (withLock) {
+				if (await withLock(run, remove)) deleted += 1
+			} else {
+				await remove()
+				deleted += 1
+			}
+		},
+		{ concurrency: input.concurrency ?? 5 }
+	)
 
 	return deleted
 }

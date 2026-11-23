@@ -41,7 +41,13 @@ const stepSchema = z.object({
 			inputTokens: z.number().optional(),
 			outputTokens: z.number().optional(),
 			cachedInputTokens: z.number().optional(),
-			cacheCreationInputTokens: z.number().optional()
+			cacheCreationInputTokens: z.number().optional(),
+			inputTokenDetails: z
+				.object({
+					cacheReadTokens: z.number().optional(),
+					cacheWriteTokens: z.number().optional()
+				})
+				.optional()
 		})
 		.optional(),
 	response: z
@@ -62,7 +68,10 @@ export function readModelCalls(
 	steps: readonly unknown[],
 	modelId: string,
 	options: {
-		readonly costOf?: (step: unknown) => number | undefined
+		readonly costOf?: (
+			step: unknown,
+			call: Omit<ModelCall, 'costUsd'>
+		) => number | undefined
 	} = {}
 ): ModelCall[] {
 	const costOf = options.costOf ?? extractOpenRouterCostUsd
@@ -73,19 +82,20 @@ export function readModelCalls(
 		if (!parsed.success) return []
 
 		const { finishReason, usage, response } = parsed.data
+		const base: Omit<ModelCall, 'costUsd'> = {
+			responseId: response?.id ?? '',
+			modelId: response?.modelId || modelId,
+			inputTokens: usage?.inputTokens ?? 0,
+			outputTokens: usage?.outputTokens ?? 0,
+			cacheReadTokens:
+				usage?.inputTokenDetails?.cacheReadTokens ?? usage?.cachedInputTokens,
+			cacheWriteTokens:
+				usage?.inputTokenDetails?.cacheWriteTokens ??
+				usage?.cacheCreationInputTokens,
+			stopReason: finishReason
+		}
 
-		return [
-			{
-				responseId: response?.id ?? '',
-				modelId: response?.modelId || modelId,
-				inputTokens: usage?.inputTokens ?? 0,
-				outputTokens: usage?.outputTokens ?? 0,
-				cacheReadTokens: usage?.cachedInputTokens,
-				cacheWriteTokens: usage?.cacheCreationInputTokens,
-				costUsd: costOf(step),
-				stopReason: finishReason
-			}
-		]
+		return [{ ...base, costUsd: costOf(step, base) }]
 	})
 }
 

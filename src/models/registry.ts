@@ -158,16 +158,40 @@ export async function createLlmRegistry(options: LlmRegistryOptions) {
 		return { ...parsed, adapter }
 	}
 
+	const modelCache = new Map<string, LanguageModelV4>()
+	const MAX_CACHED_MODELS = 256
+
+	function getCachedModel(key: string, buildModel: () => LanguageModelV4) {
+		const cached = modelCache.get(key)
+		if (cached) {
+			modelCache.delete(key)
+			modelCache.set(key, cached)
+			return cached
+		}
+		const created = buildModel()
+		if (modelCache.size >= MAX_CACHED_MODELS) {
+			const oldest = modelCache.keys().next().value
+			if (oldest !== undefined) modelCache.delete(oldest)
+		}
+		modelCache.set(key, created)
+		return created
+	}
+
 	function build(
-		model: LanguageModelV4,
+		cacheKey: string,
+		buildBase: () => LanguageModelV4,
 		adapter: LlmRoute,
 		parsed: ReturnType<typeof parseModelId>,
 		resolve: ResolveLlmOptions
 	) {
 		const effort = parsed.effort ?? resolve.reasoning
 		const cap = resolve.maxOutputTokens
+		const model = getCachedModel(`${cacheKey}\0${cap ?? ''}`, () => {
+			const base = getCachedModel(cacheKey, buildBase)
+			return cap ? capOutputTokens(base, cap) : base
+		})
 		return {
-			model: cap ? capOutputTokens(model, cap) : model,
+			model,
 			providerOptions: effort
 				? adapter.reasoningOptions(parsed.providerModelId, effort)
 				: undefined
@@ -187,7 +211,13 @@ export async function createLlmRegistry(options: LlmRegistryOptions) {
 		return {
 			modelId,
 			route: parsed.route,
-			...build(adapter.model(parsed.providerModelId), adapter, parsed, resolve)
+			...build(
+				`live\0${parsed.route}\0${parsed.providerModelId}`,
+				() => adapter.model(parsed.providerModelId),
+				adapter,
+				parsed,
+				resolve
+			)
 		}
 	}
 
@@ -197,9 +227,11 @@ export async function createLlmRegistry(options: LlmRegistryOptions) {
 	 */
 	function resolveBatchLlm(modelId: string, resolve: ResolveLlmOptions = {}) {
 		const { adapter, ...parsed } = routeFor(modelId)
-		if (!adapter.batchModel) return null
+		const batchModel = adapter.batchModel
+		if (!batchModel) return null
 		return build(
-			adapter.batchModel(parsed.providerModelId),
+			`batch\0${parsed.route}\0${parsed.providerModelId}`,
+			() => batchModel(parsed.providerModelId),
 			adapter,
 			parsed,
 			resolve

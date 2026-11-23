@@ -848,13 +848,18 @@ describe('runChatTurn', () => {
 		// When the turn answers
 		await readTurn(await harness.run({ messages: [userMessage('Hej')] }))
 
-		// Then the finished event carries the same totals, typed
+		// Then the finished event carries the same totals, typed, plus normalized token counts
 		expect(usage).toHaveLength(1)
 		expect(harness.finished[0]?.usage).toEqual({
 			totalUsage: (usage[0] as { totalUsage: unknown }).totalUsage,
-			steps: (usage[0] as { steps: unknown }).steps
+			steps: (usage[0] as { steps: unknown }).steps,
+			tokens: expect.objectContaining({
+				inputTokens: expect.any(Number),
+				outputTokens: expect.any(Number)
+			})
 		} as never)
 		expect(harness.finished[0]?.usage?.totalUsage?.inputTokens).toBeNumber()
+		expect(harness.finished[0]?.usage?.tokens?.inputTokens).toBeNumber()
 	})
 
 	test('should not read suspended runs for a thread that does not exist yet', async () => {
@@ -1148,5 +1153,150 @@ describe('runChatTurn timings', () => {
 			expect.arrayContaining(['scope', 'thread', 'thread_lock', 'model'])
 		)
 		expect(finished?.streamStartedMs).toBe(47)
+	})
+
+	test('should abort early between pre-TTFT stages without running admit, prepare or model', async () => {
+		const controller = new AbortController()
+		let admitted = 0
+		let prepared = 0
+		const harness = createHarness({
+			replies: [textReply('Never reached')],
+			overrides: {
+				gate: async () => {
+					controller.abort()
+					return undefined
+				},
+				admit: async () => {
+					admitted += 1
+					return undefined
+				}
+			}
+		})
+		const basePrepare = harness.deps.prepare
+		harness.deps.prepare = async (input) => {
+			prepared += 1
+			return basePrepare(input)
+		}
+
+		await expect(
+			harness.run(
+				{ messages: [userMessage('Hej')] },
+				{ signal: controller.signal }
+			)
+		).rejects.toThrow()
+		expect(admitted).toBe(0)
+		expect(prepared).toBe(0)
+		expect(harness.held.size).toBe(0)
+		expect(harness.errors).toEqual([])
+	})
+
+	test('should execute multiple read tools concurrently even when an approval tool is registered', async () => {
+		const { createTool } = await import('@mastra/core/tools')
+		const { z } = await import('zod')
+		let inFlight = 0
+		let peak = 0
+		const slowRead = (id: string) =>
+			createTool({
+				id,
+				description: `Reads ${id}.`,
+				inputSchema: z.object({}),
+				execute: async () => {
+					inFlight += 1
+					peak = Math.max(peak, inFlight)
+					await new Promise((resolve) => setTimeout(resolve, 25))
+					inFlight -= 1
+					return { id }
+				}
+			})
+		const approvalWrite = createTool({
+			id: 'dangerous_write',
+			description: 'Needs approval.',
+			inputSchema: z.object({}),
+			requireApproval: true,
+			execute: async () => ({ done: true })
+		})
+
+		const harness = createHarness({
+			replies: [
+				[
+					{ type: 'stream-start', warnings: [] },
+					{
+						type: 'tool-call',
+						toolCallId: 'c1',
+						toolName: 'read_a',
+						input: '{}'
+					},
+					{
+						type: 'tool-call',
+						toolCallId: 'c2',
+						toolName: 'read_b',
+						input: '{}'
+					},
+					{
+						type: 'finish',
+						finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+						usage: {
+							inputTokens: {
+								total: 10,
+								noCache: 10,
+								cacheRead: 0,
+								cacheWrite: 0
+							},
+							outputTokens: { total: 5, text: 5, reasoning: 0 }
+						}
+					}
+				],
+				textReply('Both read.')
+			]
+		})
+		const basePrepare = harness.deps.prepare
+		harness.deps.prepare = async (input) => {
+			const result = await basePrepare(input)
+			return {
+				...result,
+				plan: {
+					...result.plan,
+					tools: {
+						read_a: slowRead('read_a'),
+						read_b: slowRead('read_b'),
+						dangerous_write: approvalWrite
+					}
+				}
+			}
+		}
+
+		await readTurn(await harness.run({ messages: [userMessage('Read both')] }))
+		expect(peak).toBe(2)
+	})
+
+	test('should apply 1h cacheTtl to instructions while keeping 5m conversation tail when configured', async () => {
+		const harness = createHarness({ replies: [textReply('Hej!')] })
+		const basePrepare = harness.deps.prepare
+		harness.deps.prepare = async (input) => {
+			const result = await basePrepare(input)
+			return {
+				...result,
+				plan: {
+					...result.plan,
+					cacheTtl: { instructions: '1h', conversation: '5m' }
+				}
+			}
+		}
+
+		await readTurn(await harness.run({ messages: [userMessage('Hej')] }))
+
+		const prompt = harness.model.doStreamCalls[0]?.prompt ?? []
+		const system = prompt.find((m) => m.role === 'system')
+		const user = prompt.find((m) => m.role === 'user')
+		expect(system?.providerOptions).toMatchObject({
+			anthropic: { cacheControl: { type: 'ephemeral', ttl: '1h' } }
+		})
+		expect(user?.providerOptions).toMatchObject({
+			anthropic: { cacheControl: { type: 'ephemeral' } }
+		})
+		expect(
+			(user?.providerOptions?.anthropic as { cacheControl?: { ttl?: string } })
+				?.cacheControl?.ttl
+		).toBeUndefined()
 	})
 })

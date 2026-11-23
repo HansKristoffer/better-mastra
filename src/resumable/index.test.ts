@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { Redis } from '@upstash/redis'
 import type { UIMessageChunk } from 'ai'
 import {
+	createChatCoordinator,
 	createResumableStreams,
 	type ResumableRedis,
 	type ResumableStreams,
@@ -797,4 +798,184 @@ test('close() aborts a turn still running after the drain window as a shutdown',
 	expect(streams.draining).toBe(false)
 	await streams.close()
 	expect(turn.abort.signal.reason).toBe('shutdown')
+})
+
+test('multiplexed cross-replica streaming (xread) opens zero per-reconnect reader connections', async () => {
+	const bus = new FakeRedis()
+	let readerOpens = 0
+	const withXread = () => {
+		const c = bus.client()
+		const base = c.redis
+		const redis: ResumableRedis = {
+			...base,
+			xread: async (key, afterId) =>
+				(bus.streams.get(key) ?? []).filter(
+					(entry) => Number(entry.id) > Number(afterId)
+				),
+			reader: async () => {
+				readerOpens += 1
+				return base.reader()
+			}
+		}
+		return redis
+	}
+	const a = createResumableStreams({
+		redis: withXread(),
+		replicaId: 'a',
+		logger: { warn() {} }
+	})
+	const b = createResumableStreams({
+		redis: withXread(),
+		replicaId: 'b',
+		logger: { warn() {} }
+	})
+	open.push(a, b)
+
+	const turn = source()
+	const primary = await a.start({
+		threadKey: 'mux-t',
+		resourceId: 'user-1',
+		...turn
+	})
+	turn.begin()
+	turn.text('Hel')
+	await tick()
+
+	expect(await b.resourceOf?.('mux-t')).toBe('user-1')
+
+	// Three concurrent cross-replica reconnects share the single control Pub/Sub connection
+	const [r1, r2, r3] = await Promise.all([
+		b.reconnect('mux-t'),
+		b.reconnect('mux-t'),
+		b.reconnect('mux-t')
+	])
+	expect(readerOpens).toBe(0)
+
+	const p1 = collect(r1)
+	const p2 = collect(r2)
+	const p3 = collect(r3)
+	turn.text('lo!')
+	turn.end()
+
+	const [c1, c2, c3] = await Promise.all([p1, p2, p3, collect(primary)])
+	expect(textOf(c1)).toBe('Hello!')
+	expect(textOf(c2)).toBe('Hello!')
+	expect(textOf(c3)).toBe('Hello!')
+	expect(readerOpens).toBe(0)
+})
+
+test('createChatCoordinator shares one key for lock + locator and releases lock during grace window', async () => {
+	const bus = new FakeRedis()
+	const base = bus.client().redis
+	// Simulate the 4 unified-key Lua scripts in memory so the single-key path runs end-to-end
+	const evalRedis: ResumableRedis & {
+		setIfAbsent: (key: string, value: string, ttlMs: number) => Promise<boolean>
+		deleteIfEquals: (key: string, value: string) => Promise<void>
+		expireIfEquals: (
+			key: string,
+			value: string,
+			ttlMs: number
+		) => Promise<boolean>
+	} = {
+		...base,
+		setIfAbsent: async () => true,
+		deleteIfEquals: async () => {},
+		expireIfEquals: async () => true,
+		eval: async (script, keys, args) => {
+			const key = keys[0]!
+			const entry = bus.values.get(key)
+			const current =
+				entry && entry.expiresAt > Date.now() ? entry.value : undefined
+			if (script.includes('not v or string.sub')) {
+				// CLAIM_COORDINATED_SCRIPT
+				const [token, ttlMs] = args as [string, number]
+				if (!current || current.startsWith('grace|')) {
+					bus.values.set(key, {
+						value: token,
+						expiresAt: Date.now() + ttlMs
+					})
+					return 1
+				}
+				return 0
+			}
+			if (script.includes('PEXPIRE') && args.length === 2) {
+				// RENEW_COORDINATED_SCRIPT
+				const [token, ttlMs] = args as [string, number]
+				if (current === token || current?.startsWith(`${token}|`)) {
+					bus.values.set(key, { value: current, expiresAt: Date.now() + ttlMs })
+					return 1
+				}
+				return 0
+			}
+			if (script.includes('grace|') && args.length === 2) {
+				// RELEASE_COORDINATED_SCRIPT
+				const [token, graceMs] = args as [string, number]
+				if (!current) return 0
+				if (current === token) {
+					bus.values.delete(key)
+					return 1
+				}
+				if (!current.startsWith(`${token}|`)) return 0
+				const loc = current.slice(token.length + 1)
+				if (loc === '') {
+					bus.values.delete(key)
+				} else {
+					bus.values.set(key, {
+						value: `grace|${loc}`,
+						expiresAt: Date.now() + graceMs
+					})
+				}
+				return 1
+			}
+			// WRITE_LOCATOR_SCRIPT
+			const [token, loc, ttlMs] = args as [string, string, number]
+			if (current === token) {
+				bus.values.set(key, {
+					value: `${token}|${loc}`,
+					expiresAt: Date.now() + ttlMs
+				})
+				return null
+			}
+			if (!current?.startsWith(`${token}|`)) return null
+			const prev = current.slice(token.length + 1)
+			bus.values.set(key, {
+				value: `${token}|${loc}`,
+				expiresAt: Date.now() + ttlMs
+			})
+			return prev
+		}
+	}
+	const coord = createChatCoordinator({
+		redis: evalRedis,
+		replicaId: 'r1',
+		graceMs: 200,
+		logger: { warn() {} }
+	})
+	open.push(coord.resumable)
+
+	const release = await coord.lock({ threadId: 't1' })
+	expect(release).not.toBeNull()
+	// Busy thread is locked
+	expect(await coord.lock({ threadId: 't1' })).toBeNull()
+
+	const turn = source()
+	const stream = await coord.resumable.start({
+		threadKey: 't1',
+		resourceId: 'u1',
+		...turn
+	})
+	turn.begin()
+	turn.text('Done')
+	turn.end()
+	await collect(stream)
+	await release!()
+
+	// Lock is free while the completed answer is still reconnectable during grace
+	const secondLock = await coord.lock({ threadId: 't1' })
+	expect(secondLock).not.toBeNull()
+	await secondLock!()
+
+	const replayed = await coord.resumable.reconnect('t1')
+	expect(replayed).not.toBeNull()
+	expect(textOf(await collect(replayed))).toBe('Done')
 })

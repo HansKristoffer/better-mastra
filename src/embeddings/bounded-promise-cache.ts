@@ -6,7 +6,7 @@ type PromiseCacheEntry<Value> = {
 	refresh: Promise<Value> | null
 }
 
-type BoundedPromiseCacheOptions<Key> = {
+export type BoundedPromiseCacheOptions<Key> = {
 	/** How long a value is served without triggering any reload. */
 	freshMs: number
 	/**

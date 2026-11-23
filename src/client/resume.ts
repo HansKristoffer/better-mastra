@@ -34,9 +34,12 @@ interface BrowserEvents {
 
 const browser = () => globalThis as unknown as BrowserEvents
 
-/** The browser tab came back into view. */
+/** The browser tab came back into view. Safe no-op during SSR. */
 export const resumeOnVisible: ResumeSignal = (resume) => {
 	const { document } = browser()
+	if (typeof document?.addEventListener !== 'function') {
+		return () => {}
+	}
 	const listener = () => {
 		if (document.visibilityState === 'visible') resume()
 	}
@@ -46,9 +49,12 @@ export const resumeOnVisible: ResumeSignal = (resume) => {
 	return () => document.removeEventListener('visibilitychange', listener)
 }
 
-/** The browser is online again. */
+/** The browser is online again. Safe no-op during SSR. */
 export const resumeOnOnline: ResumeSignal = (resume) => {
 	const window = browser()
+	if (typeof window?.addEventListener !== 'function') {
+		return () => {}
+	}
 
 	window.addEventListener('online', resume)
 

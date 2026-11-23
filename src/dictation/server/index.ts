@@ -37,6 +37,8 @@ export interface IssueSonioxTemporaryKeyOptions {
 	readonly fetch?: typeof fetch
 	/** The user is waiting with the microphone button pressed. */
 	readonly timeoutMs?: number
+	/** Cancels the key request if the caller aborts before Soniox answers. */
+	readonly signal?: AbortSignal
 }
 
 /** Soniox answered with something other than an issued key. */
@@ -77,6 +79,10 @@ export async function issueSonioxTemporaryKey(
 	const region = options.region ?? 'us'
 	const model = options.model ?? SONIOX_DEFAULT_MODEL
 	const { temporaryKeyUrl, websocketUrl } = sonioxEndpoints(region)
+	const timeout = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+	const signal = options.signal
+		? AbortSignal.any([options.signal, timeout])
+		: timeout
 	const response = await (options.fetch ?? fetch)(temporaryKeyUrl, {
 		method: 'POST',
 		headers: {
@@ -94,13 +100,15 @@ export async function issueSonioxTemporaryKey(
 				? {}
 				: { client_reference_id: options.clientReferenceId })
 		}),
-		signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+		signal
 	})
 
-	const issued =
-		response.status === ISSUED_STATUS
-			? parseIssuedKey(await response.json().catch(() => undefined))
-			: undefined
+	let issued: { apiKey: string; expiresAt: string } | undefined
+	if (response.status === ISSUED_STATUS) {
+		issued = parseIssuedKey(await response.json().catch(() => undefined))
+	} else {
+		await response.body?.cancel().catch(() => {})
+	}
 
 	if (!issued) {
 		throw new SonioxKeyError(response.status)

@@ -28,6 +28,8 @@ export type PgStorage<
 
 /** Probes an idle connection after this long, so a quiet socket is not severed on the way. */
 const KEEP_ALIVE_INITIAL_DELAY_MS = 10_000
+/** Fails fast instead of queueing forever when the pool is saturated or Postgres is unreachable. */
+const DEFAULT_CONNECTION_TIMEOUT_MS = 10_000
 
 function positiveInteger(name: string, value: number) {
 	if (!Number.isInteger(value) || value < 1) {
@@ -71,10 +73,12 @@ export function pgStorage(
 			max,
 			keepAlive: true,
 			keepAliveInitialDelayMillis: KEEP_ALIVE_INITIAL_DELAY_MS,
-			...(options.ssl !== undefined ? { ssl: options.ssl } : {}),
-			...(options.connectionTimeoutMillis !== undefined
-				? { connectionTimeoutMillis: options.connectionTimeoutMillis }
-				: {})
+			connectionTimeoutMillis:
+				options.connectionTimeoutMillis ?? DEFAULT_CONNECTION_TIMEOUT_MS,
+			...(options.statementTimeoutMs !== undefined
+				? { statement_timeout: options.statementTimeoutMs }
+				: {}),
+			...(options.ssl !== undefined ? { ssl: options.ssl } : {})
 		})
 		pool.on('error', (error) => {
 			logger.warn('Idle database connection dropped', {

@@ -72,6 +72,49 @@ describe('embedQuery', () => {
 		expect(second.cached).toBe(true)
 		expect(doEmbed).toHaveBeenCalledTimes(1)
 	})
+
+	test('encodes shared-cache vectors as compact f32 base64 and round-trips them cleanly', async () => {
+		const store = new Map<string, string>()
+		const sharedCache = {
+			get: async (key: string) => store.get(key) ?? null,
+			set: async (key: string, value: string) => {
+				store.set(key, value)
+			}
+		}
+		await embedder({ cache: sharedCache }).embedQuery('compact vector')
+		const stored = [...store.values()][0]
+		expect(stored?.startsWith('f32:')).toBe(true)
+
+		// A second embedder instance (cold in-process cache) reads the f32 payload back
+		const hit = await embedder({ cache: sharedCache }).embedQuery(
+			'compact vector'
+		)
+		expect(hit.cached).toBe(true)
+		expect(hit.embedding).toHaveLength(3)
+		expect(hit.embedding[0]).toBeCloseTo(0.1, 5)
+		expect(hit.embedding[1]).toBeCloseTo(0.2, 5)
+		expect(hit.embedding[2]).toBeCloseTo(0.3, 5)
+		expect(doEmbed).toHaveBeenCalledTimes(1)
+	})
+
+	test('includes providerOptions in the query cache key so variants do not collide', async () => {
+		const keys: string[] = []
+		const trackingCache = {
+			get: async (key: string) => {
+				keys.push(key)
+				return null
+			},
+			set: async () => {}
+		}
+		await embedder({ cache: trackingCache }).embedQuery('same')
+		await embedder({
+			cache: trackingCache,
+			providerOptions: { google: { taskType: 'RETRIEVAL_QUERY' } }
+		}).embedQuery('same')
+
+		expect(keys).toHaveLength(2)
+		expect(keys[0]).not.toBe(keys[1])
+	})
 })
 
 describe('embedMany', () => {

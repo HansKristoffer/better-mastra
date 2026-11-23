@@ -424,4 +424,40 @@ describe('sweepAbandonedRuns', () => {
 		})
 		expect(runs).toHaveLength(2)
 	})
+
+	test('accepts a ThreadLock shorthand directly via `lock`', async () => {
+		const workflows = await suspendedRuns(['chat:idle', 'chat:busy'])
+		const deleted = await sweepAbandonedRuns({
+			workflows,
+			olderThan: new Date('2026-10-10T00:00:00Z'),
+			lock: async ({ threadId }) =>
+				threadId === 'chat:busy' ? null : async () => {}
+		})
+
+		expect(deleted).toBe(1)
+	})
+})
+
+test('ownsThread checks resumable.resourceOf for a turn-1 thread not yet in memory', async () => {
+	const memory = {
+		getThreadById: async () => null
+	} as unknown as Parameters<typeof ownsThread>[0]['memory']
+
+	expect(
+		await ownsThread({
+			memory,
+			threadId: 'new-thread',
+			resourceId: 'user-a',
+			resumable: { resourceOf: async () => 'user-a' }
+		})
+	).toBe(true)
+
+	expect(
+		await ownsThread({
+			memory,
+			threadId: 'new-thread',
+			resourceId: 'user-b',
+			resumable: { resourceOf: async () => 'user-a' }
+		})
+	).toBe(false)
 })

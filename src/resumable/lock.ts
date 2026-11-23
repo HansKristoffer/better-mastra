@@ -10,7 +10,7 @@
  * on this replica.
  */
 
-import { getErrorMessage } from 'hanzio'
+import { getErrorMessage, withTimeout } from 'hanzio'
 
 import type { ThreadLockRedis } from './redis.js'
 
@@ -29,6 +29,11 @@ export interface ThreadLockOptions {
 	 * it: how long a thread stays held after its process died. Default 30 s.
 	 */
 	readonly ttlMs?: number
+	/**
+	 * Upper bound on each Redis command before falling back to the local
+	 * process lock so a Redis stall never hangs a turn. Default 2 s.
+	 */
+	readonly commandTimeoutMs?: number
 	readonly keyPrefix?: string
 	readonly logger?: ThreadLockLogger
 }
@@ -43,6 +48,7 @@ export function createThreadLock(options: ThreadLockOptions = {}): ThreadLock {
 	const {
 		redis,
 		ttlMs = 30_000,
+		commandTimeoutMs = 2_000,
 		keyPrefix = 'thread-lock:',
 		logger = {
 			// biome-ignore lint/suspicious/noConsole: default logger
@@ -57,7 +63,9 @@ export function createThreadLock(options: ThreadLockOptions = {}): ThreadLock {
 		work: Promise<T>
 	): Promise<T | undefined> => {
 		try {
-			return await work
+			return commandTimeoutMs > 0
+				? await withTimeout(work, commandTimeoutMs)
+				: await work
 		} catch (error) {
 			logger.warn(`thread lock: redis ${op} failed`, {
 				error: getErrorMessage(error)

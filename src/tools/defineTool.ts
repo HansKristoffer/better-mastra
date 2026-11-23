@@ -9,7 +9,7 @@
 
 import type { RequestContext } from '@mastra/core/request-context'
 import { createTool, type Tool } from '@mastra/core/tools'
-import { keyBy, mapValues, omit } from 'hanzio'
+import { keyBy, mapValues, omit, stableStringify } from 'hanzio'
 
 import {
 	CHANGE_UNREAD_SENTENCE,
@@ -17,7 +17,7 @@ import {
 	type ToolChangeCall
 } from './changes.js'
 import { dryRunResult, isDryRun, isDryRunResult } from './dryRun.js'
-import { withHiddenInputs } from './toolInputSchema.js'
+import { compactToolInputSchema, withHiddenInputs } from './toolInputSchema.js'
 
 type CreateToolOptions = Parameters<typeof createTool>[0]
 
@@ -50,6 +50,12 @@ export const TOOL_ERROR_SENTENCE =
 export interface ToolErrorMasking {
 	/** What the model reads instead. Default `TOOL_ERROR_SENTENCE`. */
 	readonly sentence?: string
+	/**
+	 * Treats matching errors as user-facing refusals (their message reaches the
+	 * model as-is), e.g. for `orpc-fn` tools that already throw formatted
+	 * refusals as plain `Error`s.
+	 */
+	readonly isRefusal?: (error: unknown) => boolean
 	/** The error the model does not see, for the log. */
 	readonly onError?: (
 		error: unknown,
@@ -81,6 +87,18 @@ export interface ToolDefinition<
 	readonly maxArrayItems?: number
 	/** The compact text the model reads instead of the full result; the client still gets the result. */
 	readonly toModelOutput?: (output: never) => unknown
+	/**
+	 * Caps the serialized size of the output sent to the model (in characters)
+	 * while keeping the full structured output intact for UI cards. Oversized
+	 * payloads are truncated with a note asking the model to narrow its query.
+	 */
+	readonly maxModelOutputChars?: number
+	/**
+	 * For `tier: 'read'` tools: memoizes identical calls within the same turn's
+	 * `requestContext` so repeated lookups avoid duplicate DB/API round trips.
+	 * Automatically invalidated if any non-read tool runs in the same turn.
+	 */
+	readonly memoizePerTurn?: boolean
 	/** JSON-only extras for the client manifest, such as how a confirm card shows the input. */
 	readonly manifest?: Readonly<Record<string, unknown>>
 	/**
@@ -98,6 +116,12 @@ export interface ToolDefinition<
 	 * other error becomes one fixed sentence. `true` uses the defaults.
 	 */
 	readonly maskErrors?: boolean | ToolErrorMasking
+	/**
+	 * How string format checks are sent in the tool's JSON schema. Defaults to
+	 * `'compact'`, stripping verbose Zod/oRPC format regexes while keeping
+	 * runtime validation untouched. Pass `'full'` to keep the original schema.
+	 */
+	readonly stringChecks?: 'compact' | 'full'
 }
 
 export interface DefinedTool<
@@ -114,6 +138,31 @@ export interface DefinedTool<
 	readonly invalidates: readonly string[]
 	readonly manifest: Readonly<Record<string, unknown>>
 	readonly meta: TMeta
+}
+
+/** Per-turn read-tool result cache scoped to a requestContext; auto-invalidated on any write tool call. */
+const turnReadCache = new WeakMap<object, Map<string, Promise<unknown>>>()
+
+/**
+ * Truncates an oversized tool output for the model to `maxChars` characters,
+ * returning `{ type: 'text', value }` when clipped or `undefined` when it
+ * already fits.
+ */
+export function truncateModelOutput(
+	output: unknown,
+	maxChars: number
+): { readonly type: 'text'; readonly value: string } | undefined {
+	if (maxChars <= 0) return undefined
+	const text =
+		typeof output === 'string'
+			? output
+			: (JSON.stringify(output) ?? String(output))
+	if (text.length <= maxChars) return undefined
+	const omitted = text.length - maxChars
+	return {
+		type: 'text',
+		value: `${text.slice(0, maxChars)}\n\n[Truncated ${omitted} chars. Narrow your query or request specific fields/pages.]`
+	}
 }
 
 /**
@@ -142,8 +191,11 @@ export function defineTool<
 			? definition.tool.execute
 			: base.execute
 	const toModelOutput = definition.toModelOutput
+	const maxModelOutputChars = definition.maxModelOutputChars
 	// Only a read is safe to run in an eval's dry run.
 	const honoursDryRun = definition.tier !== 'read'
+	const memoizesReads =
+		definition.tier === 'read' && definition.memoizePerTurn === true
 	const masking =
 		definition.maskErrors === true ? {} : definition.maskErrors || undefined
 	const { change } = definition
@@ -155,25 +207,62 @@ export function defineTool<
 			return dryRunResult(base.id)
 		}
 
-		const filled = fillHiddenInputs(input, hidden, context?.requestContext)
+		const requestContext = context?.requestContext
+		if (honoursDryRun && requestContext) {
+			// Any non-read tool invalidates memoized read results in the same turn.
+			turnReadCache.delete(requestContext)
+		}
+
+		const filled = fillHiddenInputs(input, hidden, requestContext)
 		const execute = () => baseExecute!(filled, context as never)
+
+		if (memoizesReads && requestContext) {
+			let cache = turnReadCache.get(requestContext)
+			if (!cache) {
+				cache = new Map()
+				turnReadCache.set(requestContext, cache)
+			}
+			const cacheKey = `${base.id}\0${stableStringify(filled)}`
+			const cached = cache.get(cacheKey)
+			if (cached) return cached
+
+			const pending = Promise.resolve().then(execute)
+			cache.set(cacheKey, pending)
+			pending.catch(() => {
+				if (cache?.get(cacheKey) === pending) cache.delete(cacheKey)
+			})
+			return pending
+		}
 
 		return change
 			? makeChange(change, base.id, execute, {
 					input: filled,
-					requestContext: context?.requestContext
+					requestContext
 				})
 			: execute()
 	}
 
-	const tool = createTool({
-		...(base as CreateToolOptions),
-		...(base.inputSchema &&
-			(hiddenNames.length > 0 || definition.maxArrayItems !== undefined) && {
-				inputSchema: withHiddenInputs(base.inputSchema, hiddenNames, {
+	const inputSchemaWithHidden =
+		base.inputSchema &&
+		(hiddenNames.length > 0 || definition.maxArrayItems !== undefined)
+			? withHiddenInputs(base.inputSchema, hiddenNames, {
 					maxArrayItems: definition.maxArrayItems
 				})
-			}),
+			: base.inputSchema
+	const nextInputSchema =
+		inputSchemaWithHidden &&
+		definition.stringChecks !== 'full' &&
+		'~standard' in inputSchemaWithHidden
+			? compactToolInputSchema(inputSchemaWithHidden)
+			: inputSchemaWithHidden
+
+	const hasModelOutputHook =
+		toModelOutput !== undefined ||
+		(maxModelOutputChars !== undefined && maxModelOutputChars > 0)
+
+	const tool = createTool({
+		...(base as CreateToolOptions),
+		...(nextInputSchema && { inputSchema: nextInputSchema }),
 		requireApproval:
 			definition.tier === 'approval' || base.requireApproval === true,
 		...(baseExecute && {
@@ -193,17 +282,34 @@ export function defineTool<
 					}
 				: run
 		}),
-		...(toModelOutput && {
+		...(hasModelOutputHook && {
 			toModelOutput: (output: unknown) => {
 				if (isDryRunResult(output)) {
 					return { type: 'text', value: JSON.stringify(output) }
 				}
 
-				const model = toModelOutput(output as never)
+				const raw = toModelOutput ? toModelOutput(output as never) : output
+				if (maxModelOutputChars !== undefined && maxModelOutputChars > 0) {
+					const payload =
+						typeof raw === 'object' &&
+						raw !== null &&
+						'type' in raw &&
+						(raw as { type?: unknown }).type === 'text' &&
+						'value' in raw &&
+						typeof (raw as { value?: unknown }).value === 'string'
+							? (raw as { value: string }).value
+							: raw
+					const clipped = truncateModelOutput(payload, maxModelOutputChars)
+					if (clipped) return clipped
+				}
 
-				return typeof model === 'string'
-					? { type: 'text', value: model }
-					: model
+				if (toModelOutput) {
+					return typeof raw === 'string' ? { type: 'text', value: raw } : raw
+				}
+
+				return typeof raw === 'string'
+					? { type: 'text', value: raw }
+					: { type: 'json', value: raw }
 			}
 		})
 	} as CreateToolOptions) as AnyTool
@@ -263,7 +369,9 @@ function maskedError(
 		context?.abortSignal?.aborted === true ||
 		(error instanceof Error && error.name === 'AbortError')
 
-	if (error instanceof ToolRefusal || aborted) return error
+	if (error instanceof ToolRefusal || aborted || masking.isRefusal?.(error)) {
+		return error
+	}
 
 	masking.onError?.(error, {
 		tool,

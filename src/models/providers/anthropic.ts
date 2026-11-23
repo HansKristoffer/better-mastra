@@ -1,5 +1,6 @@
 import { createAnthropic } from '@ai-sdk/anthropic'
 import type {
+	LanguageModelV4CallOptions,
 	LanguageModelV4Prompt,
 	SharedV4ProviderOptions
 } from '@ai-sdk/provider'
@@ -13,26 +14,42 @@ const BETWEEN_TOOLS_MODELS = new Set(['claude-sonnet-5-5'])
 /** Models that 400 on any non-default temperature, top_p or top_k. */
 const NO_SAMPLING_MODELS = new Set(['claude-sonnet-5-5', 'claude-haiku-5-5'])
 
+/** Anthropic allows at most four cache breakpoints across tools, system and messages (automatic caching takes one). */
+const ANTHROPIC_MAX_BREAKPOINTS = 4
+
+export interface AnthropicRouteOptions {
+	/**
+	 * Prompt-cache TTL for Anthropic's automatic top-level `cacheControl`
+	 * (`'5m'` default, or `'1h'` extended). Ignored when explicit markers in the
+	 * prompt use a shorter TTL, since Anthropic requires longest-TTL-first.
+	 */
+	readonly cacheTtl?: '5m' | '1h'
+}
+
 /**
  * Claude on Anthropic's own API. Claude caches only when asked:
  * `cacheControl` at the request level is Anthropic's automatic mode, where the
  * breakpoint sits on the last block and moves forward, so a turn's tool hops
  * and every later turn read the conversation so far at 0.1x input price
- * (writes cost 1.25x). Set on every call whose prompt carries no cache marker
- * of its own.
- *
- * A prompt that arrives with markers of its own (the chat turn marks its
- * instruction blocks and the conversation) is left to them: the automatic breakpoint
- * takes one of Anthropic's four slots, and with four markers placed already
- * the request is refused.
+ * (writes cost 1.25x for 5m, 2x for 1h). Set whenever the request has fewer
+ * than four explicit cache markers, so callers with 1–3 explicit breakpoints
+ * (e.g. a shared system prompt) still get automatic sliding-tail caching
+ * without exceeding Anthropic's four-slot limit.
  */
-export function anthropicRoute(apiKey: string): LlmRoute {
+export function anthropicRoute(
+	apiKey: string,
+	options: AnthropicRouteOptions = {}
+): LlmRoute {
 	// Pinned: the SDK otherwise honours ANTHROPIC_BASE_URL, which a developer's
 	// shell may point at a local gateway.
 	const provider = createAnthropic({
 		apiKey,
 		baseURL: 'https://api.anthropic.com/v1'
 	})
+	const automaticControl =
+		options.cacheTtl === '1h'
+			? { type: 'ephemeral' as const, ttl: '1h' as const }
+			: { type: 'ephemeral' as const }
 
 	return {
 		model: (modelId) =>
@@ -44,38 +61,68 @@ export function anthropicRoute(apiKey: string): LlmRoute {
 				>[0]['model'],
 				middleware: {
 					specificationVersion: 'v4',
-					transformParams: async ({ params }) => ({
-						// The 5.5 models have no sampling controls.
-						...(NO_SAMPLING_MODELS.has(modelId)
-							? withoutTemperature(params)
-							: params),
-						providerOptions: {
-							...params.providerOptions,
-							anthropic: {
-								...(!placesCacheMarkers(params.prompt) && {
-									cacheControl: { type: 'ephemeral' }
-								}),
-								...params.providerOptions?.anthropic
+					transformParams: async ({ params }) => {
+						const markers = inspectCacheMarkers(params.prompt, params.tools)
+						const cacheControl =
+							markers.hasFiveMin && automaticControl.ttl === '1h'
+								? { type: 'ephemeral' as const }
+								: automaticControl
+
+						return {
+							// The 5.5 models have no sampling controls.
+							...(NO_SAMPLING_MODELS.has(modelId)
+								? withoutTemperature(params)
+								: params),
+							providerOptions: {
+								...params.providerOptions,
+								anthropic: {
+									...(markers.count < ANTHROPIC_MAX_BREAKPOINTS && {
+										cacheControl
+									}),
+									...params.providerOptions?.anthropic
+								}
 							}
 						}
-					})
+					}
 				}
 			}),
 		reasoningOptions: anthropicReasoningOptions
 	}
 }
 
-/** Whether any message of the prompt, or any part of one, carries Anthropic's cache marker. */
-function placesCacheMarkers(prompt: LanguageModelV4Prompt): boolean {
-	const isMarked = (options: SharedV4ProviderOptions | undefined) =>
-		options?.anthropic?.cacheControl !== undefined
+/** Counts explicit Anthropic cache breakpoints and checks whether any use the shorter 5m TTL. */
+function inspectCacheMarkers(
+	prompt: LanguageModelV4Prompt,
+	tools?: LanguageModelV4CallOptions['tools']
+): { readonly count: number; readonly hasFiveMin: boolean } {
+	let count = 0
+	let hasFiveMin = false
 
-	return prompt.some(
-		(message) =>
-			isMarked(message.providerOptions) ||
-			(typeof message.content !== 'string' &&
-				message.content.some((part) => isMarked(part.providerOptions)))
-	)
+	const check = (options: SharedV4ProviderOptions | undefined) => {
+		const control = options?.anthropic?.cacheControl
+		if (control === undefined) return
+		count += 1
+		if (
+			typeof control === 'object' &&
+			control !== null &&
+			(control as { ttl?: unknown }).ttl !== '1h'
+		) {
+			hasFiveMin = true
+		}
+	}
+
+	for (const tool of tools ?? []) {
+		if ('providerOptions' in tool) check(tool.providerOptions)
+	}
+	for (const message of prompt) {
+		check(message.providerOptions)
+		if (typeof message.content !== 'string') {
+			for (const part of message.content) {
+				check(part.providerOptions)
+			}
+		}
+	}
+	return { count, hasFiveMin }
 }
 
 /**

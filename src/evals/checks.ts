@@ -60,6 +60,27 @@ export function detectReplyLanguage(
 	return best && best.score > (second?.score ?? 0) ? best.language : 'unknown'
 }
 
+/** Serializes unknown evidence safely, even when tool outputs contain BigInt or circular references. */
+function safeSerialize(value: unknown): string {
+	const seen = new WeakSet<object>()
+	try {
+		return (
+			JSON.stringify(value, (_key, item) => {
+				if (typeof item === 'bigint') return item.toString()
+				if (typeof item === 'object' && item !== null) {
+					if (seen.has(item)) return '[Circular]'
+					seen.add(item)
+				}
+				return item
+			}) ?? ''
+		)
+	} catch {
+		return ''
+	}
+}
+
+const ISO_DATE_TOKEN = /^\d{4}-\d{2}-\d{2}(?:[T_]\d{2}.*)?$/
+
 /**
  * Ids in the reply's links (`[Deal](/deals?dealId=deal_123)`) that appear in
  * neither the page state nor any tool result: links to records the assistant
@@ -69,15 +90,15 @@ export function inventedLinkIds(
 	reply: string,
 	evidence: { pageData: unknown; toolOutputs: readonly unknown[] }
 ) {
-	const seen = JSON.stringify([evidence.pageData, evidence.toolOutputs])
+	const seen = safeSerialize([evidence.pageData, evidence.toolOutputs])
 	const targets = [...reply.matchAll(/\]\(([^)\s]+)\)/g)].map(
 		(match) => match[1] ?? ''
 	)
 	const ids = targets.flatMap((target) =>
 		[...target.matchAll(/[A-Za-z0-9_-]{8,}/g)]
 			.map((match) => match[0])
-			// An id has digits; a path word like `knowledge-hub` does not.
-			.filter((token) => /\d/.test(token))
+			// An id has digits; a path word like `knowledge-hub` or an ISO date does not count.
+			.filter((token) => /\d/.test(token) && !ISO_DATE_TOKEN.test(token))
 	)
 	return getUniqueValues(ids).filter((id) => !seen.includes(id))
 }
@@ -98,7 +119,7 @@ export type EvalCheckOptions = {
 }
 
 const same = (name: string) => name
-const lower = (value: unknown) => JSON.stringify(value)?.toLowerCase() ?? ''
+const lower = (value: unknown) => safeSerialize(value).toLowerCase()
 
 /** The checks a case's expectation asks for. */
 export function expectationChecks(
@@ -214,7 +235,14 @@ export function answerRuleChecks(
 		})
 	}
 	for (const rule of options.forbidReply ?? []) {
-		checks.push({ check: rule.check, pass: !rule.pattern.test(reply) })
+		const pattern =
+			rule.pattern.global || rule.pattern.sticky
+				? new RegExp(
+						rule.pattern.source,
+						rule.pattern.flags.replace(/[gy]/g, '')
+					)
+				: rule.pattern
+		checks.push({ check: rule.check, pass: !pattern.test(reply) })
 	}
 
 	if (options.isClientAction) {

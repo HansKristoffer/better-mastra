@@ -32,6 +32,7 @@ export function createOptimisticRatings<R extends AnswerRating>(
 ): OptimisticRatings<R> {
 	const changes = createEmitter<{ change: undefined }>()
 	let own: ReadonlyMap<string, R> = new Map()
+	const committed = new WeakSet<R>()
 	let cache:
 		| {
 				stored: readonly R[]
@@ -49,6 +50,20 @@ export function createOptimisticRatings<R extends AnswerRating>(
 	return {
 		get: (stored) => {
 			if (cache?.stored !== stored || cache.own !== own) {
+				// Evict committed optimistic ratings once fresh `stored` data arrives
+				// containing that message id, preventing unbounded growth and stale shadowing.
+				if (cache !== undefined && cache.stored !== stored && own.size > 0) {
+					const storedIds = new Set(stored.map((rating) => rating.messageId))
+					let pruned: Map<string, R> | undefined
+					for (const [id, rating] of own) {
+						if (committed.has(rating) && storedIds.has(id)) {
+							pruned ??= new Map(own)
+							pruned.delete(id)
+						}
+					}
+					if (pruned) own = pruned
+				}
+
 				const merged = new Map([
 					...stored.map((rating) => [rating.messageId, rating] as const),
 					...own
@@ -71,6 +86,8 @@ export function createOptimisticRatings<R extends AnswerRating>(
 			submit(rating).then((taken) => {
 				if (taken === false) {
 					rollBack()
+				} else {
+					committed.add(rating)
 				}
 			}, rollBack)
 		},

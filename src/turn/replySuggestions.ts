@@ -34,10 +34,17 @@ export {
 
 /** One id, so each new list replaces the one before it in the client. */
 const REPLY_SUGGESTIONS_PART_ID = 'reply-suggestions'
+const DEFAULT_MAX_QUESTION_CHARS = 2_000
+const DEFAULT_MAX_ANSWER_CHARS = 4_000
+const DEFAULT_EMIT_INTERVAL_MS = 120
 
 export const replySuggestionsSchema = z.object({
 	suggestions: z.array(z.string()).max(REPLY_SUGGESTIONS_MAX)
 })
+
+function clipText(text: string, maxChars: number): string {
+	return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text
+}
 
 /**
  * The agent that writes the replies: no memory, no tools. `instructions` say
@@ -72,17 +79,29 @@ export function createReplySuggestionsAgent(input: {
 	})
 }
 
-/** The one message the replies are written from. */
+/** The one message the replies are written from, clipped to bound token cost. */
 export function toReplySuggestionsMessage(
 	question: string,
-	answer: string
+	answer: string,
+	options: {
+		readonly maxQuestionChars?: number
+		readonly maxAnswerChars?: number
+	} = {}
 ): string {
-	return `User: ${question}\nAssistant: ${answer}`
+	const clippedQuestion = clipText(
+		question,
+		options.maxQuestionChars ?? DEFAULT_MAX_QUESTION_CHARS
+	)
+	const clippedAnswer = clipText(
+		answer,
+		options.maxAnswerChars ?? DEFAULT_MAX_ANSWER_CHARS
+	)
+	return `User: ${clippedQuestion}\nAssistant: ${clippedAnswer}`
 }
 
 /** Streams the replies into `send`, each chunk the whole list so far; sends nothing when the model offers none, fails or runs out of time. */
 export async function sendReplySuggestions(input: {
-	readonly mastra: Mastra
+	readonly mastra: Mastra | (() => Mastra)
 	readonly agentId: string
 	readonly question: string
 	readonly answer: string
@@ -91,13 +110,22 @@ export async function sendReplySuggestions(input: {
 	/** The turn's signal: the client stopping ends the call. */
 	readonly signal: AbortSignal
 	readonly timeoutMs?: number
+	/** Minimum interval between incremental SSE suggestion updates. Default 120 ms. */
+	readonly minEmitIntervalMs?: number
 	readonly send: (chunk: UIMessageChunk) => void
+	readonly onUsage?: (usage: {
+		readonly totalUsage: unknown
+		readonly steps: readonly unknown[]
+	}) => void
 	readonly onError?: (error: unknown) => void
 }): Promise<void> {
 	const abortSignal = timeoutSignal(input.timeoutMs ?? 6_000, input.signal)
+	const minEmitIntervalMs = input.minEmitIntervalMs ?? DEFAULT_EMIT_INTERVAL_MS
 
 	try {
-		const stream = await input.mastra.getAgentById(input.agentId).stream(
+		const mastra =
+			typeof input.mastra === 'function' ? input.mastra() : input.mastra
+		const stream = await mastra.getAgentById(input.agentId).stream(
 			[
 				{
 					role: 'user',
@@ -108,24 +136,58 @@ export async function sendReplySuggestions(input: {
 				structuredOutput: { schema: replySuggestionsSchema },
 				requestContext: input.requestContext ?? new RequestContext(),
 				abortSignal,
-				tracingOptions: { tags: ['surface:reply-suggestions'] }
+				tracingOptions: { tags: ['surface:reply-suggestions'] },
+				...(input.onUsage && {
+					onFinish: (event: {
+						totalUsage: unknown
+						steps: readonly unknown[]
+					}) =>
+						input.onUsage?.({
+							totalUsage: event.totalUsage,
+							steps: event.steps
+						})
+				})
 			}
 		)
-		let sent = ''
+		let sentKey = ''
+		let sentCount = 0
+		let lastEmitAt = 0
+		let latestReplies: readonly string[] = []
+		let latestKey = ''
+
+		const emit = (replies: readonly string[], key: string) => {
+			sentKey = key
+			sentCount = replies.length
+			lastEmitAt = Date.now()
+			input.send({
+				type: REPLY_SUGGESTIONS_PART,
+				id: REPLY_SUGGESTIONS_PART_ID,
+				data: { suggestions: replies },
+				transient: true
+			})
+		}
 
 		for await (const partial of stream.objectStream) {
 			const replies = toReplySuggestions(partial.suggestions ?? [])
-			const key = JSON.stringify(replies)
+			if (replies.length === 0) continue
 
-			if (replies.length > 0 && key !== sent) {
-				sent = key
-				input.send({
-					type: REPLY_SUGGESTIONS_PART,
-					id: REPLY_SUGGESTIONS_PART_ID,
-					data: { suggestions: replies },
-					transient: true
-				})
+			const key = JSON.stringify(replies)
+			latestReplies = replies
+			latestKey = key
+
+			if (key === sentKey) continue
+			const now = Date.now()
+			if (
+				replies.length > sentCount ||
+				minEmitIntervalMs <= 0 ||
+				now - lastEmitAt >= minEmitIntervalMs
+			) {
+				emit(replies, key)
 			}
+		}
+
+		if (latestReplies.length > 0 && latestKey !== sentKey) {
+			emit(latestReplies, latestKey)
 		}
 
 		// A failed model call ends the stream rather than throwing.

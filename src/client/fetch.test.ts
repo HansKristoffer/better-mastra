@@ -115,6 +115,48 @@ describe('createChatFetch', () => {
 			ChatConnectionLostError
 		)
 	})
+	test('does not retry ambiguous post-receipt failures on POST, but retries pre-receipt connect failures', async () => {
+		const timeoutFetch = mock(async () => {
+			throw new Error('The request timed out')
+		})
+		const postTimeout = createChatFetch({ fetch: timeoutFetch, delay })
+		await expect(
+			postTimeout('https://api.test/chat', { method: 'POST', body: '{}' })
+		).rejects.toBeInstanceOf(ChatConnectionLostError)
+		expect(timeoutFetch).toHaveBeenCalledTimes(1)
+
+		const connectFetch = mock(async () => {
+			throw new TypeError('Failed to fetch')
+		})
+		const postConnect = createChatFetch({ fetch: connectFetch, delay })
+		await expect(
+			postConnect('https://api.test/chat', { method: 'POST', body: '{}' })
+		).rejects.toBeInstanceOf(ChatConnectionLostError)
+		expect(connectFetch).toHaveBeenCalledTimes(2)
+	})
+
+	test('honors Retry-After on 503 draining responses', async () => {
+		const waits: number[] = []
+		const responses = [
+			new Response(JSON.stringify({ status: 'draining' }), {
+				status: 503,
+				headers: { 'retry-after': '1' }
+			}),
+			new Response('ok', { status: 200 })
+		]
+		const chatFetch = createChatFetch({
+			fetch: async () => responses.shift() as Response,
+			delay: async (ms) => {
+				waits.push(ms)
+			}
+		})
+
+		const response = await chatFetch('https://api.test/chat')
+		expect(response.status).toBe(200)
+		expect(waits).toHaveLength(1)
+		expect(waits[0]).toBeGreaterThanOrEqual(750)
+		expect(waits[0]).toBeLessThanOrEqual(1_250)
+	})
 })
 
 describe('isTransientNetworkError', () => {

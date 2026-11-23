@@ -38,7 +38,10 @@ import {
 	typedSwitch
 } from 'hanzio'
 
+import type { ChatErrors } from '../protocol/index.js'
 import {
+	CLIENT_ACTION_DISPATCHER_TOOL,
+	CLIENT_ACTION_UNAVAILABLE,
 	type ClientAction,
 	type ClientToolCall,
 	type ClientToolDef,
@@ -49,6 +52,7 @@ import { ObservableChat } from './chat.js'
 import {
 	type ClassifyChatError,
 	classifyChatError,
+	createChatErrorClassifier,
 	isConnectionLost,
 	readErrorResponse
 } from './errors.js'
@@ -58,6 +62,7 @@ import {
 	countShownParts,
 	findStrandedToolCalls,
 	isUserFacingPart,
+	mergeThreadMessages,
 	REPLY_SUGGESTIONS_PART,
 	readReplySuggestions,
 	readUserMessage,
@@ -67,9 +72,11 @@ import {
 	USER_MESSAGE_PART
 } from './messages.js'
 import {
+	expiredChanges,
 	isApprovalStepAnswered,
 	type PendingChange,
-	readWaitingChanges
+	readWaitingChanges,
+	rebuildPendingApprovals
 } from './pending.js'
 import {
 	type ChangeMark,
@@ -152,12 +159,21 @@ export interface ChatSessionOptions<TResumeData = unknown> {
 	/** The client actions requests offer and the session carries out, read per request: the screen on top may change. */
 	readonly clientActions?:
 		readonly ClientAction[] | (() => readonly ClientAction[])
+	/**
+	 * Static dispatcher tool name (`run_page_action` by default) unwrapped into
+	 * matching `clientActions`. Pass `false` to disable.
+	 */
+	readonly clientActionDispatcher?: string | false
+	/** App error codes from `defineChatErrors` so renamed `change_expired` and retryable codes classify accurately. */
+	readonly errors?: Pick<ChatErrors<string>, 'rename'>
 	/** Reads a refusal from a response that is not OK. */
 	readonly classifyError?: ClassifyChatError
 	/** Which parts count as shown; observational memory's never do. */
 	readonly isUserFacingPart?: (part: UIMessage['parts'][number]) => boolean
 	/** The server keeps a run going when the connection drops, and serves its stream and stop routes. */
 	readonly resume?: boolean
+	/** Delay before reattaching after a mid-stream disconnect (ms, jittered ±25%). Default 150 ms; 0 disables. */
+	readonly resumeRetryDelayMs?: number
 	/** When to reattach to a running answer, with `resume`. */
 	readonly resumeOn?: readonly ResumeSignal[]
 	/** A tool's result arrived on the live stream, once per call: refresh the app's data after a write. */
@@ -271,9 +287,18 @@ export function createChatSession<TResumeData = unknown>(
 	options: ChatSessionOptions<TResumeData>
 ): ChatSession<TResumeData> {
 	const { threadId } = options
-	const classifyError = options.classifyError ?? classifyChatError
+	const classifyError =
+		options.classifyError ??
+		(options.errors
+			? createChatErrorClassifier(options.errors)
+			: classifyChatError)
 	const isUserFacing = options.isUserFacingPart ?? isUserFacingPart
 	const resumable = options.resume === true
+	const resumeRetryDelayMs = options.resumeRetryDelayMs ?? 150
+	const dispatcherTool =
+		options.clientActionDispatcher === false
+			? undefined
+			: (options.clientActionDispatcher ?? CLIENT_ACTION_DISPATCHER_TOOL)
 	const changes = createEmitter<{ change: undefined }>()
 	let snapshot: ChatSessionSnapshot = {
 		turn: initialChatTurnState,
@@ -283,6 +308,8 @@ export function createChatSession<TResumeData = unknown>(
 		answerComplete: false
 	}
 	let focused = true
+	let disposed = false
+	let resumeTimer: ReturnType<typeof setTimeout> | undefined
 	/** Tool results already reported or loaded from history, by tool call id: each is reported once, as it arrives. */
 	const knownResults = new Set<string>()
 	/** Errors the session posted for stranded server calls; a follow-up carries them like client results. */
@@ -319,6 +346,7 @@ export function createChatSession<TResumeData = unknown>(
 		return typeof actions === 'function' ? actions() : (actions ?? NO_ACTIONS)
 	}
 	const isClientAction = (toolName: string) =>
+		(dispatcherTool !== undefined && toolName === dispatcherTool) ||
 		clientActions().some((action) => action.name === toolName)
 	const isClientResult = (part: ToolPart) =>
 		postedErrors.has(part.toolCallId) || isClientAction(getToolName(part))
@@ -359,8 +387,16 @@ export function createChatSession<TResumeData = unknown>(
 			}
 		}),
 		onError: (error) => {
+			if (disposed) return
 			if (!repliesStreaming) {
 				requestError = error
+			}
+			// Approval requests triggered via `sendAutomaticallyWhen` have no caller
+			// promise: if fetch/HTTP fails before streaming starts, AI SDK invokes
+			// `onError` without `onFinish`, so settle here to avoid deadlocking.
+			if (sendsApprovalAnswers) {
+				sendsApprovalAnswers = false
+				queueMicrotask(() => finishRequest(endOf('send', undefined)))
 			}
 		},
 		onData: (part) => {
@@ -424,8 +460,13 @@ export function createChatSession<TResumeData = unknown>(
 			isApprovalStepAnswered(messages) && startApprovalRequest()
 	})
 
-	chat.subscribe(() => {
-		if (countShownParts(chat.lastMessage, isUserFacing) > shownPartsBefore) {
+	const unsubscribeChat = chat.subscribe(() => {
+		if (disposed) return
+
+		if (
+			snapshot.turn.kind === 'requesting' &&
+			countShownParts(chat.lastMessage, isUserFacing) > shownPartsBefore
+		) {
 			dispatch({ kind: 'content-shown' })
 		}
 
@@ -475,9 +516,31 @@ export function createChatSession<TResumeData = unknown>(
 				}
 			},
 			'resume-stream': () => {
-				startRequest('resume', () => chat.resumeStream())
+				if (resumeRetryDelayMs <= 0) {
+					startRequest('resume', () => chat.resumeStream())
+					return
+				}
+				clearTimeout(resumeTimer)
+				const number = requestCount
+				const jitteredMs = Math.round(
+					resumeRetryDelayMs * (0.75 + Math.random() * 0.5)
+				)
+				resumeTimer = setTimeout(() => {
+					resumeTimer = undefined
+					if (
+						disposed ||
+						!focused ||
+						number !== requestCount ||
+						!isOneOf(['requesting', 'streaming'], snapshot.turn.kind)
+					) {
+						return
+					}
+					startRequest('resume', () => chat.resumeStream())
+				}, jitteredMs)
 			},
 			'abort-request': () => {
+				clearTimeout(resumeTimer)
+				resumeTimer = undefined
 				void chat.stop()
 			},
 			'restore-draft': (restore) => {
@@ -636,12 +699,27 @@ export function createChatSession<TResumeData = unknown>(
 
 		const number = requestCount
 		const finish = (rejection?: Error) => {
-			if (number !== endedAtAnswer) {
+			if (!disposed && number !== endedAtAnswer) {
 				finishRequest(endOf(kind, rejection))
 			}
 		}
 
-		void (repliesStreaming ? chat.stop().then(request) : request()).then(
+		const run = () => {
+			if (!repliesStreaming) return request()
+			repliesStreaming = false
+			return chat.stop().then(() => {
+				if (
+					disposed ||
+					number !== requestCount ||
+					!isOneOf(['requesting', 'streaming'], snapshot.turn.kind)
+				) {
+					return
+				}
+				return request()
+			})
+		}
+
+		void run().then(
 			() => finish(),
 			(error: unknown) => finish(toError(error))
 		)
@@ -687,50 +765,62 @@ export function createChatSession<TResumeData = unknown>(
 	 * a client action called beside one waits with the step.
 	 */
 	function finishRequest(end: RequestEnd | 'nothing-to-resume'): void {
+		if (disposed) return
+
 		if (end === 'nothing-to-resume') {
 			dispatch({ kind: 'nothing-to-resume' })
 
 			return
 		}
 
+		const stateBefore = snapshot.turn
 		const isAnswered = !end.isAbort && !end.isError
-		const calls = isAnswered ? actionCalls : []
-
-		// A cut-off answer is a failure, or goes on in a follow-up that reports.
-		if (isAnswered && end.finishReason !== 'length') {
-			options.onSaved?.({ threadId, message: chat.lastMessage })
-		}
-		const waiting =
-			isAnswered && chat.lastMessage?.role === 'assistant'
-				? readWaitingChanges(chat.lastMessage)
-				: []
+		const isTruncated = isAnswered && end.finishReason === 'length'
+		const calls = isAnswered && !isTruncated ? actionCalls : []
 
 		actionCalls = []
 
-		if (waiting.length > 0) {
-			dispatch({ kind: 'changes-waiting', changes: waiting })
-
-			return
-		}
-
-		const stranded = isAnswered
-			? findStrandedToolCalls(chat.lastMessage, isClientAction)
-			: []
-
-		if (calls.length > 0 || stranded.length > 0) {
-			dispatch({ kind: 'request-finished', continues: true })
-
-			// Stop or a focus change ended the user turn as its request ended.
-			if (snapshot.turn.kind === 'continuing') {
-				void carryOut(calls, stranded, requestCount)
+		// A cut-off answer fails as `truncated` right away: any incomplete tool
+		// call left in `input-available` never ran and must not auto-resubmit.
+		if (!isTruncated) {
+			if (isAnswered) {
+				options.onSaved?.({ threadId, message: chat.lastMessage })
 			}
 
-			return
+			const waiting =
+				isAnswered && chat.lastMessage?.role === 'assistant'
+					? readWaitingChanges(chat.lastMessage)
+					: []
+
+			if (waiting.length > 0) {
+				dispatch({ kind: 'changes-waiting', changes: waiting })
+
+				return
+			}
+
+			const stranded = isAnswered
+				? findStrandedToolCalls(chat.lastMessage, isClientAction)
+				: []
+
+			if (calls.length > 0 || stranded.length > 0) {
+				dispatch({ kind: 'request-finished', continues: true })
+
+				// Stop or a focus change ended the user turn as its request ended.
+				if (snapshot.turn.kind === 'continuing') {
+					void carryOut(calls, stranded, requestCount)
+				}
+
+				return
+			}
 		}
 
 		const event = toTurnEvent(end)
 		const effects = dispatch(event)
-		const code = failureCodeOf(event, end)
+		const wasSilent =
+			stateBefore.kind === 'stopping' ||
+			(stateBefore.kind === 'requesting' &&
+				stateBefore.userTurn.watching !== false)
+		const code = wasSilent ? undefined : failureCodeOf(event, end)
 
 		if (code !== undefined) {
 			options.onFailure?.({
@@ -840,10 +930,34 @@ export function createChatSession<TResumeData = unknown>(
 		}
 
 		for (const call of calls) {
-			await settle(runClientAction(chat, clientActions(), call))
+			if (disposed) return
+			const running = runClientAction(chat, clientActions(), call, {
+				...(options.clientActionDispatcher !== undefined && {
+					dispatcherTool: options.clientActionDispatcher
+				})
+			})
+			if (running === null) {
+				// Screen navigated away mid-stream: post an error output so the next
+				// request never sends an unanswered tool call.
+				postedErrors.add(call.toolCallId)
+				await settle(
+					chat.addToolOutput({
+						state: 'output-error',
+						tool: call.toolName,
+						toolCallId: call.toolCallId,
+						errorText: CLIENT_ACTION_UNAVAILABLE
+					})
+				)
+			} else {
+				await settle(running)
+			}
 		}
 
-		if (request === requestCount && snapshot.turn.kind === 'continuing') {
+		if (
+			!disposed &&
+			request === requestCount &&
+			snapshot.turn.kind === 'continuing'
+		) {
 			dispatch({ kind: 'follow-up-ready' })
 		}
 	}
@@ -977,19 +1091,38 @@ export function createChatSession<TResumeData = unknown>(
 		},
 		// A failed turn keeps its messages: Try again sends them again.
 		showStored: ({ messages, pendingChanges }) => {
-			if (snapshot.turn.kind !== 'idle') {
+			const watching =
+				snapshot.turn.kind === 'requesting' &&
+				snapshot.turn.userTurn.watching !== false
+			if (snapshot.turn.kind !== 'idle' && !watching) {
 				return
 			}
 
-			for (const part of messages.flatMap((message) => message.parts)) {
+			const rebuilt = rebuildPendingApprovals(messages, pendingChanges)
+
+			for (const part of rebuilt.flatMap((message) => message.parts)) {
 				if (isToolUIPart(part)) {
 					knownResults.add(part.toolCallId)
 				}
 			}
 
-			chat.messages = [...messages]
+			if (watching) {
+				chat.messages = mergeThreadMessages(rebuilt, chat.messages)
+				shownBeforeRequest = new Set(chat.messages.map((message) => message.id))
+				return
+			}
 
-			const last = messages.at(-1)
+			chat.messages = rebuilt
+			const marks = expiredChanges(rebuilt, pendingChanges)
+			publish({
+				...snapshot,
+				restoredDraft: undefined,
+				replySuggestions: NO_REPLY_SUGGESTIONS,
+				answerComplete: false,
+				changeMarks: marks.size > 0 ? marks : NO_CHANGE_MARKS
+			})
+
+			const last = rebuilt.at(-1)
 			const waiting = (
 				last?.role === 'assistant' ? readWaitingChanges(last) : []
 			).filter((change) =>
@@ -1010,10 +1143,24 @@ export function createChatSession<TResumeData = unknown>(
 			focused = isFocused
 
 			if (!isFocused) {
-				stop()
+				if (resumable) {
+					// Keep server-side resumable runs alive across thread switches:
+					// detach locally without posting `/stop`.
+					dispatch({ kind: 'stop-pressed' })
+				} else {
+					stop()
+				}
+			} else if (resumable) {
+				resumeStream()
 			}
 		},
 		dispose: () => {
+			disposed = true
+			focused = false
+			clearTimeout(resumeTimer)
+			resumeTimer = undefined
+			unsubscribeChat()
+
 			for (const unsubscribe of unsubscribeSignals) {
 				unsubscribe()
 			}
@@ -1027,7 +1174,7 @@ export function createChatSession<TResumeData = unknown>(
 export interface ChatSessions {
 	/** The key's session, created the first time it is asked for. */
 	readonly get: (key: string) => ChatSession
-	/** Makes this the session on screen: every other one stops and sends nothing until it is on screen again. */
+	/** Makes this the session on screen: every other one stops (or detaches when resumable) and sends nothing until it is on screen again. */
 	readonly focus: (key: string) => void
 	/** Stops the key's session and forgets it; the next screen that asks gets a new one. */
 	readonly forget: (key: string) => void
@@ -1036,9 +1183,33 @@ export interface ChatSessions {
 }
 
 export function createChatSessions(
-	create: (key: string) => ChatSession
+	create: (key: string) => ChatSession,
+	options: {
+		/** Maximum cached sessions before evicting the least-recently-used idle unfocused session. Default 50 (0 disables). */
+		readonly maxSessions?: number
+	} = {}
 ): ChatSessions {
+	const maxSessions = options.maxSessions ?? 50
 	const sessions = new Map<string, ChatSession>()
+	let focusedKey: string | undefined
+
+	const touch = (key: string, session: ChatSession) => {
+		sessions.delete(key)
+		sessions.set(key, session)
+	}
+
+	const evictIfNeeded = () => {
+		if (maxSessions <= 0 || sessions.size <= maxSessions) return
+		for (const [key, session] of sessions) {
+			if (sessions.size <= maxSessions) break
+			if (key === focusedKey) continue
+			const kind = session.getSnapshot().turn.kind
+			if (kind === 'idle' || kind === 'failed') {
+				session.dispose()
+				sessions.delete(key)
+			}
+		}
+	}
 
 	return {
 		get: (key) => {
@@ -1047,20 +1218,29 @@ export function createChatSessions(
 			if (session === undefined) {
 				session = create(key)
 				sessions.set(key, session)
+				evictIfNeeded()
+			} else {
+				touch(key, session)
 			}
 
 			return session
 		},
 		focus: (key) => {
+			focusedKey = key
+			const current = sessions.get(key)
+			if (current) touch(key, current)
+
 			for (const [sessionKey, session] of sessions) {
 				session.setFocused(sessionKey === key)
 			}
 		},
 		forget: (key) => {
+			if (focusedKey === key) focusedKey = undefined
 			sessions.get(key)?.dispose()
 			sessions.delete(key)
 		},
 		clear: () => {
+			focusedKey = undefined
 			for (const session of sessions.values()) {
 				session.dispose()
 			}

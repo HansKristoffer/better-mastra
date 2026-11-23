@@ -27,7 +27,19 @@ export interface ResumableRedis {
 		onMessage: (message: string) => void
 	): Promise<() => Promise<void>>
 	xadd(key: string, value: string): Promise<void>
-	/** Opens a dedicated connection for one reader. */
+	/**
+	 * Non-blocking `XREAD STREAMS key afterId` on the shared command client.
+	 * When present, cross-replica reconnects multiplex over the replica's single
+	 * control subscriber + non-blocking catch-up (O(1) Redis connections).
+	 */
+	xread?(key: string, afterId: string): Promise<StreamEntry[]>
+	/** Runs a Lua script (`EVAL script numkeys keys... args...`), shared with `admitUserRequest`. */
+	eval?(
+		script: string,
+		keys: readonly string[],
+		args: readonly (string | number)[]
+	): Promise<unknown>
+	/** Opens a dedicated connection for one reader (fallback when `xread` is omitted). */
 	reader(): Promise<BlockingReader>
 }
 
@@ -104,7 +116,26 @@ function fromSend(
 			void (await send('PUBLISH', [channel, message])),
 		xadd: async (key, value) =>
 			void (await send('XADD', [key, '*', 'd', value])),
+		xread: async (key, afterId) =>
+			parseXread(await send('XREAD', ['STREAMS', key, afterId])),
+		eval: (script, keys, args) =>
+			send('EVAL', [script, String(keys.length), ...keys, ...args.map(String)]),
 		...rest
+	}
+}
+
+/** Wraps a `ResumableRedis` adapter as an `EmbeddingCache` (converting seconds to ms). */
+export function toEmbeddingCache(redis: Pick<ResumableRedis, 'get' | 'set'>): {
+	readonly get: (key: string) => Promise<string | null>
+	readonly set: (
+		key: string,
+		value: string,
+		ttlSeconds: number
+	) => Promise<unknown>
+} {
+	return {
+		get: (key) => redis.get(key),
+		set: (key, value, ttlSeconds) => redis.set(key, value, ttlSeconds * 1_000)
 	}
 }
 
@@ -279,6 +310,8 @@ export function upstashRedis(
 		},
 		xadd: async (key, value) =>
 			void (await redis().xadd(key, '*', { d: value })),
+		eval: (script, keys, args) =>
+			redis().eval(script, [...keys], args.map(String)),
 		async reader() {
 			let closed = false
 			let wake: (() => void) | undefined

@@ -56,13 +56,16 @@ export function openRouterRoute(input: {
 			usage: { include: true },
 			...(upstream ? { provider: upstream } : {})
 		})
+		const middleware = [
+			keepRouting,
+			...(/^anthropic\//i.test(modelId)
+				? [openRouterAnthropicCompatMiddleware]
+				: []),
+			...(/^google\//i.test(modelId) ? [thoughtSignatureRecovery] : [])
+		]
 		return wrapLanguageModel({
 			model,
-			middleware: [
-				keepRouting,
-				openRouterAnthropicCompatMiddleware,
-				thoughtSignatureRecovery
-			]
+			middleware
 		})
 	}
 
