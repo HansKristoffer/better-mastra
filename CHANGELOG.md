@@ -2,6 +2,13 @@
 
 A release with a breaking or wiring change has upgrade notes in [UPGRADING.md](./UPGRADING.md), which ships beside this file: the removed exports with their replacements, the wiring as code, and a check for duplicate peers.
 
+## [0.11.0](https://github.com/HansKristoffer/better-mastra/compare/v0.10.0...v0.11.0) (2026-11-23)
+
+
+### Features
+
+* improve assistant performance, caching, multi-replica scaling and client rendering ([#46](https://github.com/HansKristoffer/better-mastra/issues/46)) ([942cef3](https://github.com/HansKristoffer/better-mastra/commit/942cef3addfc0a621db55cfaeffa60e48ec49818))
+
 ## [0.10.0](https://github.com/HansKristoffer/better-mastra/compare/v0.9.0...v0.10.0) (2026-11-14)
 
 
