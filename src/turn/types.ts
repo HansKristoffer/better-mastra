@@ -9,6 +9,7 @@ import type { LanguageModel, UIMessage } from 'ai'
 
 import type { ChatErrorCode } from '../protocol/index.js'
 import { chatErrorCodes } from '../protocol/index.js'
+import type { PromptCacheTtl } from './promptCache.js'
 
 /** The thread one turn runs on and the memory resource it belongs to. */
 export interface ThreadKey {
@@ -76,6 +77,30 @@ export interface ChatTurnPlan {
 	readonly toolTiers?: Readonly<Record<string, string>>
 	readonly maxSteps: number
 	readonly maxOutputTokens?: number
+	/**
+	 * Overrides the agent's default tool-call concurrency for this turn.
+	 * `createChatAgent` defaults to `{ limit: 10, strategy: 'called' }` so
+	 * parallel read-tool batches run concurrently even when approval/suspend
+	 * tools are registered.
+	 */
+	readonly toolCallConcurrency?: AgentExecutionOptions['toolCallConcurrency']
+	/**
+	 * Anthropic/OpenRouter prompt-cache TTL: `'5m'` (default) or `'1h'`, or
+	 * separate TTLs for the shared instruction prefix and sliding conversation
+	 * tail (e.g. `{ instructions: '1h', conversation: '5m' }`). Anthropic
+	 * requires longest-TTL-first, so `{ conversation: '1h' }` also marks
+	 * instructions `'1h'`.
+	 */
+	readonly cacheTtl?:
+		| PromptCacheTtl
+		| {
+				readonly instructions?: PromptCacheTtl
+				readonly conversation?: PromptCacheTtl
+		  }
+	/** OpenAI `prompt_cache_key` to route requests with a shared prefix to the same cache shard. */
+	readonly promptCacheKey?: string
+	/** OpenAI `prompt_cache_retention` (`'in_memory'` or `'24h'`). */
+	readonly promptCacheRetention?: 'in_memory' | '24h'
 	/**
 	 * Set by the server; nothing a client sends reaches it. The AI SDK's
 	 * shape, as `createLlmRegistry().resolveLlm()` returns it.

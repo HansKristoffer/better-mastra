@@ -206,12 +206,17 @@ describe('links to records', () => {
 		).toEqual(['deal_made_up_77'])
 	})
 
-	test('ignores path words without digits', () => {
+	test('ignores path words without digits, ISO dates, and handles BigInt/circular evidence', () => {
+		const circular: Record<string, unknown> = { count: 42n }
+		circular.self = circular
 		expect(
-			inventedLinkIds('Open [Sources](/knowledge-hub/sources)', {
-				pageData: null,
-				toolOutputs: []
-			})
+			inventedLinkIds(
+				'Open [Sources](/knowledge-hub/sources?from=2026-04-01&to=2026-04-30)',
+				{
+					pageData: circular,
+					toolOutputs: [circular]
+				}
+			)
 		).toEqual([])
 	})
 

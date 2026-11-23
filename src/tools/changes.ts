@@ -78,10 +78,11 @@ export function tallyUndo(
 	outcomes: readonly UndoOutcome[],
 	tally: UndoTally = NO_UNDO
 ): UndoTally {
-	return outcomes.reduce(
-		(counted, outcome) => ({ ...counted, [outcome]: counted[outcome] + 1 }),
-		tally
-	)
+	const counted = { ...tally }
+	for (const outcome of outcomes) {
+		counted[outcome] += 1
+	}
+	return counted
 }
 
 /**

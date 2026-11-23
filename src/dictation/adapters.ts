@@ -76,9 +76,9 @@ interface MediaRecorderLike {
 		listener: (event: { readonly data: Blob }) => void
 	): void
 	addEventListener(
-		type: 'stop',
+		type: 'stop' | 'error',
 		listener: () => void,
-		options: { once: true }
+		options?: { once: true }
 	): void
 }
 
@@ -109,6 +109,12 @@ export const DICTATION_BUFFER_SAMPLES = 1_600
 
 /** Small browser chunks keep the first words on screen within a few hundred ms. */
 const MEDIA_RECORDER_TIMESLICE_MS = 120
+
+/** Caps waiting frames before WebSocket open so a stalled connect cannot grow memory unboundedly. */
+const MAX_WAITING_FRAMES = 128
+
+/** Fallback wait for MediaRecorder's `stop` event when a device disconnects mid-recording. */
+const DEFAULT_MEDIA_STOP_TIMEOUT_MS = 2_000
 
 const WEBSOCKET_OPEN = 1
 
@@ -152,6 +158,10 @@ export function webSocketFactory(
 			}
 
 			socket.addEventListener('open', () => {
+				if (closed) {
+					return
+				}
+
 				for (const frame of waiting.splice(0)) {
 					socket.send(frame)
 				}
@@ -171,11 +181,16 @@ export function webSocketFactory(
 					if (socket.readyState === WEBSOCKET_OPEN) {
 						socket.send(frame)
 					} else {
+						if (waiting.length >= MAX_WAITING_FRAMES) {
+							// Keep index 0 (the start request) and drop the oldest queued audio frame.
+							waiting.splice(1, 1)
+						}
 						waiting.push(frame)
 					}
 				},
 				close() {
 					closed = true
+					waiting.length = 0
 					socket.close()
 				}
 			}
@@ -183,8 +198,10 @@ export function webSocketFactory(
 	}
 }
 
-// The library asks for one recorder for the app's lifetime.
+// The library asks for one recorder for the app's lifetime; an owner token keeps
+// an older session's cleanup from stopping a newer session that already started.
 let sharedRecorder: AudioApiRecorder | undefined
+let sharedRecorderOwner: symbol | undefined
 
 /**
  * The phone's microphone through `react-native-audio-api`, loaded on first use
@@ -197,6 +214,8 @@ let sharedRecorder: AudioApiRecorder | undefined
 export function audioApiMicrophone(
 	load: () => Promise<AudioApiModule>
 ): DictationMicrophone {
+	let owner: symbol | undefined
+
 	return {
 		async requestPermission() {
 			const { AudioManager } = await load()
@@ -205,6 +224,10 @@ export function audioApiMicrophone(
 		},
 		async start(onAudio) {
 			const { AudioManager, AudioRecorder } = await load()
+			const token = Symbol('dictation')
+			owner = token
+			sharedRecorderOwner = token
+
 			AudioManager.setAudioSessionOptions({
 				iosCategory: 'record',
 				iosMode: 'default',
@@ -219,21 +242,39 @@ export function audioApiMicrophone(
 					bufferLength: DICTATION_BUFFER_SAMPLES,
 					channelCount: 1
 				},
-				({ buffer }) =>
+				({ buffer }) => {
+					if (sharedRecorderOwner !== token) return
 					onAudio({
 						kind: 'pcm',
 						samples: buffer.getChannelData(0),
 						sampleRate: buffer.sampleRate
 					})
+				}
 			)
 
 			if (hasErrorStatus(listening)) {
+				if (sharedRecorderOwner === token) {
+					sharedRecorderOwner = undefined
+					await AudioManager.setAudioSessionActivity(false).catch(() => {})
+				}
 				return false
 			}
 
-			return (await sharedRecorder.start()).status === 'success'
+			const started = (await sharedRecorder.start()).status === 'success'
+			if (!started && sharedRecorderOwner === token) {
+				sharedRecorder.clearOnAudioReady()
+				sharedRecorderOwner = undefined
+				await AudioManager.setAudioSessionActivity(false).catch(() => {})
+			}
+			return started
 		},
 		async stop() {
+			const token = owner
+			owner = undefined
+			if (token !== undefined && sharedRecorderOwner !== token) {
+				return
+			}
+
 			const recorder = sharedRecorder
 
 			// Stopping hands the last partial buffer to the callback, so it is cleared after.
@@ -242,6 +283,9 @@ export function audioApiMicrophone(
 			}
 
 			recorder?.clearOnAudioReady()
+			if (token === undefined || sharedRecorderOwner === token) {
+				sharedRecorderOwner = undefined
+			}
 			const { AudioManager } = await load()
 			await AudioManager.setAudioSessionActivity(false).catch(() => {})
 		}
@@ -255,21 +299,34 @@ export function audioApiMicrophone(
  * stream; a refusal is `false`, a missing microphone throws.
  */
 export function mediaRecorderMicrophone(
-	options: { readonly audio?: object } = {}
+	options: {
+		readonly audio?: object
+		/** Maximum wait for `MediaRecorder`'s `stop` event before releasing tracks anyway. Default 2 s. */
+		readonly stopTimeoutMs?: number
+	} = {}
 ): DictationMicrophone {
 	const browser = globalThis as unknown as BrowserAudio
+	const stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_MEDIA_STOP_TIMEOUT_MS
 	let stream: MediaStreamLike | undefined
 	let recorder: MediaRecorderLike | undefined
+
+	const releaseTracks = (target: MediaStreamLike | undefined) => {
+		for (const track of target?.getTracks() ?? []) {
+			track.stop()
+		}
+	}
 
 	return {
 		async requestPermission() {
 			try {
-				stream = await browser.navigator.mediaDevices.getUserMedia({
+				const nextStream = await browser.navigator.mediaDevices.getUserMedia({
 					audio: options.audio ?? {
 						echoCancellation: true,
 						noiseSuppression: true
 					}
 				})
+				releaseTracks(stream)
+				stream = nextStream
 				return true
 			} catch (error) {
 				if (
@@ -305,20 +362,33 @@ export function mediaRecorderMicrophone(
 		/** The recorder flushes its final chunk before `stop` fires. */
 		async stop() {
 			const active = recorder
-
-			if (active && active.state !== 'inactive') {
-				await new Promise<void>((resolve) => {
-					active.addEventListener('stop', () => resolve(), { once: true })
-					active.stop()
-				})
-			}
-
-			for (const track of stream?.getTracks() ?? []) {
-				track.stop()
-			}
-
+			const activeStream = stream
 			recorder = undefined
 			stream = undefined
+
+			try {
+				if (active && active.state !== 'inactive') {
+					await new Promise<void>((resolve) => {
+						let settled = false
+						const done = () => {
+							if (settled) return
+							settled = true
+							clearTimeout(timer)
+							resolve()
+						}
+						const timer = setTimeout(done, stopTimeoutMs)
+						active.addEventListener('stop', done, { once: true })
+						active.addEventListener('error', done, { once: true })
+						try {
+							active.stop()
+						} catch {
+							done()
+						}
+					})
+				}
+			} finally {
+				releaseTracks(activeStream)
+			}
 		}
 	}
 }

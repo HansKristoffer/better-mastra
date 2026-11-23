@@ -37,6 +37,8 @@ export {
 	type ModelPricing,
 	type ModelRates
 } from './pricing.js'
+export type { AnthropicRouteOptions } from './providers/anthropic.js'
+export type { OpenAiRouteOptions } from './providers/openai.js'
 export type { VertexKeys } from './providers/vertex.js'
 export {
 	defaultModelRoute,

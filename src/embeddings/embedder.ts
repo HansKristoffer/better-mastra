@@ -4,10 +4,44 @@ import {
 	backgroundPromise,
 	chunkArray,
 	normalizeWhitespace,
-	pMap
+	pMap,
+	stableStringify
 } from 'hanzio'
 import { errorAttributes, type Logger, silentLogger } from '../models/route.js'
 import { BoundedPromiseCache } from './bounded-promise-cache.js'
+
+/** Provider-specific options passed through to AI SDK `embed` and `embedMany` (e.g. `{ openai: { dimensions: 1024 } }`). */
+export type EmbeddingProviderOptions = Parameters<
+	typeof embed
+>[0]['providerOptions']
+
+const FLOAT32_CACHE_PREFIX = 'f32:'
+
+function encodeVector(vector: readonly number[]): string {
+	const floats = Float32Array.from(vector)
+	return (
+		FLOAT32_CACHE_PREFIX +
+		Buffer.from(floats.buffer, floats.byteOffset, floats.byteLength).toString(
+			'base64'
+		)
+	)
+}
+
+function decodeVector(raw: string): number[] | null {
+	if (raw.startsWith(FLOAT32_CACHE_PREFIX)) {
+		const buf = Buffer.from(raw.slice(FLOAT32_CACHE_PREFIX.length), 'base64')
+		if (buf.byteLength === 0 || buf.byteLength % 4 !== 0) return null
+		const copy = new Uint8Array(buf.byteLength)
+		copy.set(buf)
+		return Array.from(new Float32Array(copy.buffer))
+	}
+	const parsed: unknown = JSON.parse(raw)
+	return Array.isArray(parsed) &&
+		parsed.length > 0 &&
+		parsed.every((value) => typeof value === 'number')
+		? (parsed as number[])
+		: null
+}
 
 /** A shared cache for query embeddings; Redis `get`/`setex` fit as they are. */
 export type EmbeddingCache = {
@@ -35,11 +69,16 @@ function modelIdOf(model: EmbeddingModel) {
 export function queryEmbeddingCacheKey(
 	modelId: string,
 	query: string,
-	prefix = 'qemb'
+	prefix = 'qemb',
+	variant?: string
 ) {
 	const normalized = normalizeWhitespace(query.toLowerCase())
 	const digest = createHash('sha256')
-		.update(`${modelId}:${normalized}`)
+		.update(
+			variant
+				? `${modelId}:${variant}:${normalized}`
+				: `${modelId}:${normalized}`
+		)
 		.digest('hex')
 	return `${prefix}:${digest}`
 }
@@ -62,6 +101,8 @@ export function createEmbedder<TContext = undefined>(input: {
 	usage?: (usage: EmbeddingUsage<TContext>) => void
 	/** Every vector must have this length. */
 	dimensions?: number
+	/** Provider-specific options passed to `embed`/`embedMany` (e.g. `{ openai: { dimensions: 1024 } }`). */
+	providerOptions?: EmbeddingProviderOptions
 	batchSize?: number
 	concurrency?: number
 	logger?: Logger
@@ -70,6 +111,9 @@ export function createEmbedder<TContext = undefined>(input: {
 	const batchSize = input.batchSize ?? 100
 	const concurrency = input.concurrency ?? 3
 	const logger = input.logger ?? silentLogger
+	const cacheVariant = input.providerOptions
+		? stableStringify(input.providerOptions)
+		: undefined
 	const memory = new BoundedPromiseCache<string, number[]>({
 		freshMs: MEMORY_TTL_MS,
 		maxEntries: MEMORY_MAX_ENTRIES
@@ -96,12 +140,7 @@ export function createEmbedder<TContext = undefined>(input: {
 		try {
 			const raw = await input.cache.get(key)
 			if (!raw) return null
-			const parsed: unknown = JSON.parse(raw)
-			return Array.isArray(parsed) &&
-				parsed.length > 0 &&
-				parsed.every((value) => typeof value === 'number')
-				? (parsed as number[])
-				: null
+			return decodeVector(raw)
 		} catch (error) {
 			logger.warn('Query embedding cache read failed', errorAttributes(error))
 			return null
@@ -109,18 +148,27 @@ export function createEmbedder<TContext = undefined>(input: {
 	}
 
 	async function embedQuery(value: string, context?: TContext) {
-		const key = queryEmbeddingCacheKey(modelId, value, input.cachePrefix)
+		const key = queryEmbeddingCacheKey(
+			modelId,
+			value,
+			input.cachePrefix,
+			cacheVariant
+		)
 		let tokens = 0
 		let cached = true
 		const embedding = await memory.getOrLoad(key, async () => {
 			const shared = await readShared(key)
 			if (shared) return shared
 			cached = false
-			const result = await embed({ model: input.model, value })
+			const result = await embed({
+				model: input.model,
+				value,
+				...(input.providerOptions && { providerOptions: input.providerOptions })
+			})
 			tokens = result.usage.tokens ?? 0
 			const vector = checked(result.embedding)
 			backgroundPromise(async () =>
-				input.cache?.set(key, JSON.stringify(vector), SHARED_TTL_SECONDS)
+				input.cache?.set(key, encodeVector(vector), SHARED_TTL_SECONDS)
 			)
 			return vector
 		})
@@ -132,7 +180,13 @@ export function createEmbedder<TContext = undefined>(input: {
 		const results = await pMap(
 			chunkArray(values, batchSize),
 			async (batch) => {
-				const result = await aiEmbedMany({ model: input.model, values: batch })
+				const result = await aiEmbedMany({
+					model: input.model,
+					values: batch,
+					...(input.providerOptions && {
+						providerOptions: input.providerOptions
+					})
+				})
 				if (result.embeddings.length !== batch.length) {
 					throw new Error(
 						`Incomplete embedding batch: ${result.embeddings.length} of ${batch.length}`

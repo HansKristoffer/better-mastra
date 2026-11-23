@@ -82,9 +82,10 @@ export function useDictation(options: UseDictationOptions) {
 
 				options.onEnd?.(end)
 				phase.value = 'idle'
-				notice.value = end.kind === 'failed' ? 'unavailable' : undefined
+				const failedEmpty = end.kind === 'failed' && end.text === ''
+				notice.value = failedEmpty ? 'unavailable' : undefined
 
-				if (end.kind === 'failed') options.onNotice?.('unavailable')
+				if (failedEmpty) options.onNotice?.('unavailable')
 			}
 		})
 		starting = undefined
@@ -108,6 +109,10 @@ export function useDictation(options: UseDictationOptions) {
 	}
 
 	function stop() {
+		if (starting) {
+			starting.abort()
+			return
+		}
 		if (session) {
 			phase.value = 'finishing'
 			void session.stop()

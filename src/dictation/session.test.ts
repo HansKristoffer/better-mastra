@@ -68,12 +68,13 @@ describe('startDictation', () => {
 		)
 	})
 
-	test('should report dictation as unavailable and release the microphone when the API gives no key', async () => {
+	test('should report dictation as unavailable and release the microphone when the API gives no key, without double-calling requestKey', async () => {
 		const fake = createFakes({ key: new Error('SERVICE_UNAVAILABLE') })
 
 		const start = await startDictation(fake.options)
 
 		expect(start).toEqual({ kind: 'unavailable' })
+		expect(fake.options.requestKey).toHaveBeenCalledTimes(1)
 		expect(fake.socketFactory.open).not.toHaveBeenCalled()
 		expect(fake.microphone.stop).toHaveBeenCalled()
 	})
@@ -250,6 +251,28 @@ describe('startDictation', () => {
 
 		expect(late.ends).toEqual([{ kind: 'cancelled', text: 'Hej' }])
 		await expectReleased(late)
+	})
+
+	test('should cancel cleanly without firing onEnd when aborted during microphone.start()', async () => {
+		const controller = new AbortController()
+		const fake = createFakes({ signal: controller.signal })
+		let finishMicStart: (() => void) | undefined
+		fake.microphone.start.mockImplementation(async () => {
+			await new Promise<void>((resolve) => {
+				finishMicStart = resolve
+			})
+			return true
+		})
+
+		const starting = startDictation(fake.options)
+		await flushPromises()
+		controller.abort()
+		finishMicStart?.()
+
+		expect(await starting).toEqual({ kind: 'cancelled' })
+		expect(fake.ends).toEqual([])
+		expect(fake.microphone.stop).toHaveBeenCalled()
+		expect(fake.socket.closed).toBe(true)
 	})
 })
 

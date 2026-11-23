@@ -7,12 +7,14 @@ import { z } from 'zod'
 import {
 	createCardRegistry,
 	createChatSession,
+	createChatSessions,
 	createScreenContextStack,
 	type ToolPart
 } from '../client/index.js'
 import {
 	ToolParts,
 	useChatSession,
+	useChatThread,
 	useScreenContext,
 	useWordReveal
 } from './index.js'
@@ -63,6 +65,83 @@ describe('useChatSession', () => {
 		session.chat.messages = []
 
 		expect(chat.messages.value).toHaveLength(2)
+	})
+
+	test('useChatThread switches threads reactively and ignores stale loads', async () => {
+		const sessions = createChatSessions((id) =>
+			createChatSession({
+				threadId: id,
+				transport: { api: 'https://api.test/chat' }
+			})
+		)
+		const threadId = ref('t1')
+		let resolveT1: (() => void) | undefined
+		const scope = effectScope()
+		const thread = scope.run(() =>
+			useChatThread({
+				sessions,
+				threadId,
+				load: async (id) => {
+					if (id === 't1') {
+						await new Promise<void>((r) => {
+							resolveT1 = r
+						})
+						return {
+							messages: [
+								{
+									id: 'm1',
+									role: 'user',
+									parts: [{ type: 'text', text: 'stale' }]
+								}
+							]
+						}
+					}
+					return {
+						messages: [
+							{
+								id: 'm2',
+								role: 'user',
+								parts: [{ type: 'text', text: 'fresh' }]
+							},
+							{
+								id: 'a2',
+								role: 'assistant',
+								parts: [
+									{
+										type: 'dynamic-tool',
+										toolName: 'edit',
+										toolCallId: 'c1',
+										state: 'input-available',
+										input: {}
+									}
+								]
+							}
+						],
+						pendingChanges: [
+							{
+								kind: 'approval',
+								runId: 'r1',
+								toolCallId: 'c1',
+								toolName: 'edit',
+								approvalId: 'r1::c1'
+							}
+						]
+					}
+				}
+			})
+		)!
+
+		threadId.value = 't2'
+		await nextTick()
+		await wait(10)
+		// Stale t1 load resolves late — must NOT overwrite t2
+		resolveT1?.()
+		await wait(10)
+
+		expect(thread.threadId.value).toBe('t2')
+		expect(thread.messages.value.map((m) => m.id)).toEqual(['m2', 'a2'])
+		expect(thread.pendingApproval.value?.approvalId).toBe('r1::c1')
+		scope.stop()
 	})
 })
 

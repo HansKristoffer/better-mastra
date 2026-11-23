@@ -76,18 +76,19 @@ export function stripReasoningFromPrompt(
 	const next: LanguageModelV4Prompt = prompt.map((message) => {
 		if (message.role !== 'assistant') return message
 
+		let messageMutated = false
 		let providerOptions = message.providerOptions
 		const cleanedMessageOptions =
 			stripOpenRouterReasoningDetails(providerOptions)
 		if (cleanedMessageOptions) {
 			providerOptions = cleanedMessageOptions
-			mutated = true
+			messageMutated = true
 		}
 
 		const content: typeof message.content = []
 		for (const part of message.content) {
 			if (part.type === 'reasoning') {
-				mutated = true
+				messageMutated = true
 				continue
 			}
 			if (part.type !== 'tool-call') {
@@ -101,11 +102,12 @@ export function stripReasoningFromPrompt(
 				content.push(part)
 				continue
 			}
-			mutated = true
+			messageMutated = true
 			content.push({ ...part, providerOptions: cleanedPartOptions })
 		}
 
-		if (!mutated) return message
+		if (!messageMutated) return message
+		mutated = true
 		const { providerOptions: _previous, ...rest } = message
 		return {
 			...rest,

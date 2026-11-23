@@ -43,7 +43,11 @@ import {
 	toUserFacingMessage,
 	toUserFacingStream
 } from './stream.js'
-import type { RunUsage } from '../usage/stream.js'
+import {
+	readStreamTextUsage,
+	type RunUsage,
+	type StreamTextUsage
+} from '../usage/stream.js'
 import { deriveThreadTitle, persistThreadMetadata } from './title.js'
 import {
 	type AnyRequestContext,
@@ -123,11 +127,15 @@ export interface TurnFinishedEvent<TScope> extends TurnSummary {
 	/** Everything the answer wrote. Keep it out of analytics. */
 	readonly answerText: string
 	/**
-	 * The run's usage, as `sinks.usage` got it; undefined when the run
-	 * reported none before its stream closed, as a stopped run may not.
+	 * The run's usage, as `sinks.usage` got it, plus normalized `tokens`
+	 * (`readStreamTextUsage(totalUsage)`); undefined when the run reported none
+	 * before its stream closed, as a stopped run may not.
 	 */
 	readonly usage:
-		Pick<TurnUsageEvent<TScope>, 'totalUsage' | 'steps'> | undefined
+		| (Pick<TurnUsageEvent<TScope>, 'totalUsage' | 'steps'> & {
+				readonly tokens: StreamTextUsage | null
+		  })
+		| undefined
 }
 
 /**
@@ -164,23 +172,28 @@ export interface ChatTurnSinks<TScope> {
 	scoreTurn?(event: TurnFinishedEvent<TScope>): void
 }
 
+/** Every pre-stream stage of a turn, in order, for metrics and logs. */
+export const chatTurnStages = [
+	'scope',
+	'gate',
+	'thread_lock',
+	'usage_limit',
+	'preparation',
+	'thread',
+	'tool',
+	'model'
+] as const
+
 /** The part of a turn that failed, for the log. */
-export type ChatTurnStage =
-	| 'scope'
-	| 'gate'
-	| 'thread_lock'
-	| 'usage_limit'
-	| 'preparation'
-	| 'thread'
-	| 'tool'
-	| 'model'
+export type ChatTurnStage = (typeof chatTurnStages)[number]
 
 export interface ChatTurnLogger {
 	error(message: string, attributes: Record<string, unknown>): void
 }
 
 export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
-	readonly mastra: Mastra
+	/** The Mastra instance, or a lazy getter `() => mastra` to avoid module import cycles. */
+	readonly mastra: Mastra | (() => Mastra)
 	readonly agentId: string
 	/** The agent's memory: thread ownership and titles. */
 	readonly memory: MastraMemory
@@ -288,6 +301,21 @@ const consoleLogger: ChatTurnLogger = {
 	error: (message, attributes) => console.error(message, attributes)
 }
 
+function resolveMastra(mastra: Mastra | (() => Mastra)): Mastra {
+	return typeof mastra === 'function' ? mastra() : mastra
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+	if (signal.aborted) {
+		throw signal.reason instanceof Error
+			? signal.reason
+			: new DOMException(
+					'The chat turn was aborted before starting.',
+					'AbortError'
+				)
+	}
+}
+
 /** Everything after authentication for one chat request: the stream, or a refusal. */
 export async function runChatTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	request: ChatTurnRequest<TAuth, TBody>,
@@ -310,6 +338,10 @@ export async function runChatTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			scope = resolved
 		})
 	} catch (error) {
+		if (request.signal.aborted) {
+			throw error
+		}
+
 		const staged = error instanceof ChatTurnStageError ? error : undefined
 
 		logger.error('[better-mastra] the turn failed before its stream started', {
@@ -350,23 +382,33 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 	if (messages === 'system') return refusedWith(deps, 'invalid_request')
 	if (messages === 'too_long') return refusedWith(deps, 'message_too_long')
 
+	throwIfAborted(request.signal)
+
 	const scope = await atStage('scope', () => deps.resolveScope(request))
 
 	if (scope === undefined) return refusedWith(deps, 'forbidden')
 
 	onScope(scope)
-
-	const gateRefusal = await atStage('gate', async () =>
-		deps.gate?.(scope, request.body)
-	)
-
-	if (gateRefusal) return refused(gateRefusal)
+	throwIfAborted(request.signal)
 
 	const threadKey = deps.deriveThreadKey(scope, request.body)
 
-	const thread = await atStage('thread', () =>
+	// Run gate and the thread ownership lookup in parallel to shave a DB round-trip off TTFT.
+	const gatePromise = atStage('gate', async () =>
+		deps.gate?.(scope, request.body)
+	)
+	const threadPromise = atStage('thread', () =>
 		deps.memory.getThreadById({ threadId: threadKey.threadId })
 	)
+	// Avoid unhandled rejection if `gate` refuses or throws while `thread` also fails.
+	threadPromise.catch(() => {})
+
+	const gateRefusal = await gatePromise
+
+	if (gateRefusal) return refused(gateRefusal)
+
+	const thread = await threadPromise
+	throwIfAborted(request.signal)
 
 	// A thread that exists must belong to the turn's resource; one that does not yet is the caller's to create.
 	if (thread && thread.resourceId !== threadKey.resourceId) {
@@ -382,6 +424,8 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 	const release = releaseOnce(lock, logger)
 
 	try {
+		throwIfAborted(request.signal)
+
 		const usageRefusal = await atStage('usage_limit', async () =>
 			deps.admit?.(scope)
 		)
@@ -390,6 +434,8 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 			await release()
 			return refused(usageRefusal)
 		}
+
+		throwIfAborted(request.signal)
 
 		return await startTurn(
 			{
@@ -443,6 +489,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		})
 	)
 	const { requestContext, plan } = prepared
+	throwIfAborted(request.signal)
 	const labels = prepared.labels ?? {}
 
 	// The reserved keys force every memory operation in the run onto this thread.
@@ -512,9 +559,10 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		})
 	}
 
+	const mastra = resolveMastra(deps.mastra)
 	const streamStart = atStage('model', () =>
 		handleChatStream({
-			mastra: deps.mastra,
+			mastra,
 			agentId: deps.agentId,
 			version: 'v7',
 			sendReasoning: deps.sendReasoning ?? false,
@@ -537,7 +585,11 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 					totalUsage: RunUsage | undefined
 					steps: readonly unknown[]
 				}) => {
-					const reported = { totalUsage: event.totalUsage, steps: event.steps }
+					const reported = {
+						totalUsage: event.totalUsage,
+						steps: event.steps,
+						tokens: readStreamTextUsage(event.totalUsage)
+					}
 
 					usage = reported
 					report('sinks.usage', () =>
@@ -546,7 +598,8 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 							threadKey,
 							labels,
 							modelId,
-							...reported
+							totalUsage: event.totalUsage,
+							steps: event.steps
 						})
 					)
 				}
@@ -585,9 +638,19 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	const newMessageText = newMessage ? textOf(newMessage) : ''
 	const deriveTitle = deps.deriveTitle ?? deriveThreadTitle
 
-	const close = async (ending: TurnStreamEnding) => {
-		await turn.release()
+	const suggestions = deps.replySuggestions
+	// Start reply suggestions in parallel with `close()` (metadata write + lock
+	// release) while buffering early suggestion chunks until `ANSWER_COMPLETE_PART`
+	// is emitted after the thread lock is released.
+	let pendingSuggestions:
+		| {
+				readonly promise: Promise<void>
+				readonly buffered: UIMessageChunk[]
+				liveSend: ((chunk: UIMessageChunk) => void) | undefined
+		  }
+		| undefined
 
+	const close = async (ending: TurnStreamEnding) => {
 		const finished: TurnFinishedEvent<TScope> = {
 			...observer.summary({ ending, ...stopOf(request.signal) }),
 			scope,
@@ -603,27 +666,74 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			usage
 		}
 
-		report('sinks.turnFinished', () => deps.sinks?.turnFinished?.(finished))
+		if (
+			suggestions &&
+			ending === 'finished' &&
+			finished.outcome === 'answered'
+		) {
+			const answer = observer.answerToFollow()
+			const question = newMessageText.trim()
+			if (answer && question.length > 0) {
+				const state: NonNullable<typeof pendingSuggestions> = {
+					buffered: [],
+					liveSend: undefined,
+					promise: Promise.resolve()
+				}
+				pendingSuggestions = {
+					...state,
+					promise: sendReplySuggestions({
+						mastra,
+						agentId: suggestions.agentId,
+						question,
+						answer,
+						signal: request.signal,
+						send: (chunk) => {
+							if (pendingSuggestions?.liveSend) {
+								pendingSuggestions.liveSend(chunk)
+							} else {
+								pendingSuggestions?.buffered.push(chunk)
+							}
+						},
+						...(suggestions.timeoutMs && { timeoutMs: suggestions.timeoutMs }),
+						...(suggestions.requestContext && {
+							requestContext: suggestions.requestContext(scope)
+						}),
+						onError: (error) =>
+							logger.error('[better-mastra] the reply suggestions failed', {
+								error
+							})
+					})
+				}
+			}
+		}
 
 		const title =
 			deriveTitle === false
 				? null
 				: (report('deriveTitle', () => deriveTitle(turn.messages)) ?? null)
 
-		// Nothing to write means no read either: a thread that has its title
-		// and already holds the turn's values, or a turn that gives neither.
-		if (needsThreadMetadata(turn.thread, title, prepared.threadMetadata)) {
-			// Awaited: the client refreshes its thread list when the stream closes.
-			await persistThreadMetadata({
-				memory: deps.memory,
-				key: threadKey,
-				title,
-				...(prepared.threadMetadata && { metadata: prepared.threadMetadata })
-			}).catch((error: unknown) =>
-				logger.error('[better-mastra] the thread metadata was not written', {
-					error
-				})
-			)
+		try {
+			report('sinks.turnFinished', () => deps.sinks?.turnFinished?.(finished))
+
+			// Nothing to write means no read either: a thread that has its title
+			// and already holds the turn's values, or a turn that gives neither.
+			// Held under the thread lock so a fast follow-up turn never reads stale
+			// metadata or races on the read-modify-write.
+			if (needsThreadMetadata(turn.thread, title, prepared.threadMetadata)) {
+				// Awaited: the client refreshes its thread list when the stream closes.
+				await persistThreadMetadata({
+					memory: deps.memory,
+					key: threadKey,
+					title,
+					...(prepared.threadMetadata && { metadata: prepared.threadMetadata })
+				}).catch((error: unknown) =>
+					logger.error('[better-mastra] the thread metadata was not written', {
+						error
+					})
+				)
+			}
+		} finally {
+			await turn.release()
 		}
 
 		if (finished.outcome === 'answered') {
@@ -631,37 +741,18 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		}
 	}
 
-	const suggestions = deps.replySuggestions
 	// Replies follow an answer that ended normally and leaves nothing to answer on a card.
 	const epilogue =
 		suggestions &&
 		(async (send: (chunk: UIMessageChunk) => void) => {
-			const { outcome } = observer.summary({
-				ending: 'finished',
-				...stopOf(request.signal)
-			})
-			const answer = observer.answerToFollow()
-			const question = newMessageText.trim()
-
-			if (outcome !== 'answered' || !answer || question.length === 0) return
+			if (!pendingSuggestions) return
 
 			send({ type: ANSWER_COMPLETE_PART, data: {}, transient: true })
-			await sendReplySuggestions({
-				mastra: deps.mastra,
-				agentId: suggestions.agentId,
-				question,
-				answer,
-				signal: request.signal,
-				send,
-				...(suggestions.timeoutMs && { timeoutMs: suggestions.timeoutMs }),
-				...(suggestions.requestContext && {
-					requestContext: suggestions.requestContext(scope)
-				}),
-				onError: (error) =>
-					logger.error('[better-mastra] the reply suggestions failed', {
-						error
-					})
-			})
+			for (const chunk of pendingSuggestions.buffered.splice(0)) {
+				send(chunk)
+			}
+			pendingSuggestions.liveSend = send
+			await pendingSuggestions.promise
 		})
 
 	return {
@@ -753,7 +844,10 @@ function readWaitingChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 	if (turn.thread === null) return Promise.resolve([])
 
 	const read = turn.atStage('thread', () =>
-		listPendingChanges(deps.mastra.getAgentById(deps.agentId), turn.threadKey)
+		listPendingChanges(
+			resolveMastra(deps.mastra).getAgentById(deps.agentId),
+			turn.threadKey
+		)
 	)
 	// A failed preparation leaves it unawaited; awaiting it later still throws.
 	read.catch(() => {})
@@ -795,7 +889,7 @@ async function classifyChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 
 		await turn.atStage('tool', () =>
 			moveOnFromWaitingChanges(changes.waiting, {
-				agent: deps.mastra.getAgentById(deps.agentId),
+				agent: resolveMastra(deps.mastra).getAgentById(deps.agentId),
 				memory,
 				requestContext,
 				signal,

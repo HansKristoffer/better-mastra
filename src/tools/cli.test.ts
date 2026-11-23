@@ -53,13 +53,14 @@ Write the client tool manifest module for a tools export
 Arguments:
   <module>  Module that exports the tools
   <out>     File to write
-  [export]  Export holding the defineTool array (default: "tools")
+  [export]  Export holding the defineTool array, factory or static manifest (default: "tools")
 
 Options:
-  --name <string>  Name of the generated export (default: "toolManifest")
-  --type <string>  Annotate the export with <Type>:<module> instead of as const
-  --check          Write nothing; fail when <out> is out of date
-  -h, --help       Show help
+  --name <string>     Name of the generated export (default: "toolManifest")
+  --type <string>     Annotate the export with <Type>:<module> instead of as const
+  --preload <string>  Module to import before <module> (e.g. env/secret stubs)
+  --check             Write nothing; fail when <out> is out of date
+  -h, --help          Show help
 `,
 			stderr: ''
 		})
@@ -118,7 +119,46 @@ Options:
 		expect(cli('tools.ts', 'manifest.ts')).toEqual({
 			exitCode: 1,
 			stdout: '',
-			stderr: 'tools.ts has no array export named tools.\n'
+			stderr: 'tools.ts has no array, factory or manifest export named tools.\n'
 		})
+	})
+
+	test('supports --preload, factory exports and static defineToolManifest exports', () => {
+		writeFileSync(
+			join(dir, 'preload.ts'),
+			'process.env.TOOL_MANIFEST_PRELOADED = "yes"\n'
+		)
+		writeFileSync(
+			join(dir, 'static.ts'),
+			`import { defineToolManifest } from ${JSON.stringify(join(import.meta.dir, 'manifest.ts'))}
+if (process.env.TOOL_MANIFEST_PRELOADED !== 'yes') throw new Error('missing preload')
+export const manifest = defineToolManifest({ budget_get: { tier: 'read' } })
+export const lazyTools = () => manifest
+`
+		)
+
+		expect(
+			cli('static.ts', 'from-static.ts', 'manifest', '--preload', 'preload.ts')
+		).toEqual({
+			exitCode: 0,
+			stdout: 'Wrote 1 tools to from-static.ts.\n',
+			stderr: ''
+		})
+		expect(
+			cli(
+				'static.ts',
+				'from-factory.ts',
+				'lazyTools',
+				'--preload',
+				'preload.ts'
+			)
+		).toEqual({
+			exitCode: 0,
+			stdout: 'Wrote 1 tools to from-factory.ts.\n',
+			stderr: ''
+		})
+		expect(readFileSync(join(dir, 'from-static.ts'), 'utf8')).toBe(
+			readFileSync(join(dir, 'from-factory.ts'), 'utf8')
+		)
 	})
 })

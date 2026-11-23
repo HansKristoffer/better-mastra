@@ -1,4 +1,4 @@
-import { promiseTimeout, safeJsonParse, tryCatch } from 'hanzio'
+import { raceAbort, promiseTimeout, safeJsonParse, tryCatch } from 'hanzio'
 /**
  * The chat's fetch: the platform's fetch (`expo/fetch` on React Native, which
  * streams a body) with the headers the app adds, one connect retry for a
@@ -34,6 +34,8 @@ export interface ChatFetchOptions {
 		readonly connect?: number | false
 		/** Wait before retrying a request a draining server turned away (`503 { status: 'draining' }`). */
 		readonly draining?: number | false
+		/** Maximum retries on `503 { status: 'draining' }`. Default 2. */
+		readonly drainingRetries?: number
 	}
 	/** Hears of every response that is not OK, after the retries. */
 	readonly onErrorResponse?: (response: ChatErrorResponse) => void
@@ -57,11 +59,8 @@ export const CHAT_CONNECT_RETRY_DELAY_MS = 300
 /** Wait before retrying a request a draining server turned away: its `Retry-After` is one second. */
 export const CHAT_DRAINING_RETRY_DELAY_MS = 1_000
 
-/**
- * Words in the messages fetch implementations give a request the network
- * dropped: browsers, Node, and the iOS and Android errors `expo/fetch` passes on.
- */
-const TRANSIENT_NETWORK_ERROR_WORDS = [
+/** Errors that happen before the server can receive the request (safe to retry on POST). */
+const PRE_RECEIPT_NETWORK_ERROR_WORDS = [
 	'network',
 	'offline',
 	'failed to fetch',
@@ -70,7 +69,15 @@ const TRANSIENT_NETWORK_ERROR_WORDS = [
 	'could not connect',
 	'failed to connect',
 	'unable to resolve host',
-	'hostname could not be found',
+	'hostname could not be found'
+] as const
+
+/**
+ * Words in the messages fetch implementations give a request the network
+ * dropped: browsers, Node, and the iOS and Android errors `expo/fetch` passes on.
+ */
+const TRANSIENT_NETWORK_ERROR_WORDS = [
+	...PRE_RECEIPT_NETWORK_ERROR_WORDS,
 	'timed out',
 	'timeout',
 	'connection reset',
@@ -99,16 +106,40 @@ export class ChatConnectionLostError extends TypeError {
 export function createChatFetch(options: ChatFetchOptions = {}): ChatFetch {
 	const baseFetch: ChatFetch =
 		options.fetch ?? ((input, init) => globalThis.fetch(input, init))
-	const delay = options.delay ?? ((ms: number) => promiseTimeout(ms))
+	const hasCustomDelay = options.delay !== undefined
+	const wait = async (ms: number, signal: SignalLike): Promise<void> => {
+		if (options.delay) {
+			await options.delay(ms)
+			throwIfAborted(signal)
+			return
+		}
+		if (signal && 'addEventListener' in signal) {
+			await raceAbort(promiseTimeout(ms), signal as AbortSignal).catch(
+				(error) => {
+					if (isAbort(error, signal)) throwIfAborted(signal)
+					throw error
+				}
+			)
+		} else {
+			await promiseTimeout(ms)
+			throwIfAborted(signal)
+		}
+	}
 	const connectDelay = options.retry?.connect ?? CHAT_CONNECT_RETRY_DELAY_MS
 	const drainingDelay = options.retry?.draining ?? CHAT_DRAINING_RETRY_DELAY_MS
+	const maxDrainingRetries = options.retry?.drainingRetries ?? 2
 
 	const send = async (
 		input: string | URL | Request,
 		init: RequestInit | undefined,
-		retries: number
+		connectRetries: number,
+		drainingRetries: number
 	): Promise<Response> => {
 		let response: Response
+		const method = (
+			init?.method ?? (input instanceof Request ? input.method : 'GET')
+		).toUpperCase()
+		const isIdempotent = method === 'GET' || method === 'HEAD'
 
 		try {
 			response = await baseFetch(input, init)
@@ -117,22 +148,24 @@ export function createChatFetch(options: ChatFetchOptions = {}): ChatFetch {
 				throw error
 			}
 
-			if (
-				retries === 0 &&
+			const canRetryConnect =
+				connectRetries === 0 &&
 				connectDelay !== false &&
-				isTransientNetworkError(error)
-			) {
-				await delay(connectDelay)
-				throwIfAborted(init?.signal)
+				(isIdempotent
+					? isTransientNetworkError(error)
+					: isPreReceiptNetworkError(error))
 
-				return send(input, init, retries + 1)
+			if (canRetryConnect) {
+				await wait(connectDelay, init?.signal)
+
+				return send(input, init, connectRetries + 1, drainingRetries)
 			}
 
 			throw new ChatConnectionLostError(error)
 		}
 
 		if (response.ok) {
-			return withLostConnectionBody(response)
+			return withLostConnectionBody(response, init?.signal)
 		}
 
 		const text = await readText(response)
@@ -140,14 +173,19 @@ export function createChatFetch(options: ChatFetchOptions = {}): ChatFetch {
 		const body = parsed.ok ? parsed.data : undefined
 
 		if (
-			retries === 0 &&
+			drainingRetries < maxDrainingRetries &&
 			drainingDelay !== false &&
 			isDraining(response.status, body)
 		) {
-			await delay(drainingDelay)
-			throwIfAborted(init?.signal)
+			const retryAfter = parseRetryAfterMs(response.headers.get('retry-after'))
+			const baseMs = retryAfter ?? drainingDelay
+			// Spread deploy reconnects across a +/-25% jitter window to prevent thundering herds.
+			const jitteredMs = hasCustomDelay
+				? baseMs
+				: Math.round(baseMs * (0.75 + Math.random() * 0.5))
+			await wait(jitteredMs, init?.signal)
 
-			return send(input, init, retries + 1)
+			return send(input, init, connectRetries, drainingRetries + 1)
 		}
 
 		if (response.status === 401) {
@@ -164,7 +202,22 @@ export function createChatFetch(options: ChatFetchOptions = {}): ChatFetch {
 		})
 	}
 
-	return async (input, init) => send(input, await withHeaders(init, options), 0)
+	return async (input, init) =>
+		send(input, await withHeaders(init, options), 0, 0)
+}
+
+function isPreReceiptNetworkError(error: unknown): boolean {
+	if (!(error instanceof Error) || error.name === 'AbortError') {
+		return false
+	}
+	const message = error.message.toLowerCase()
+	return PRE_RECEIPT_NETWORK_ERROR_WORDS.some((word) => message.includes(word))
+}
+
+function parseRetryAfterMs(header: string | null): number | undefined {
+	if (!header) return undefined
+	const seconds = Number(header.trim())
+	return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : undefined
 }
 
 /** Whether an error looks like the network dropped the request, which a retry may get past. An abort never does. */
@@ -207,12 +260,15 @@ async function withHeaders(
  * reason but Stop. A proxy rather than a new `Response`, because React
  * Native's `Response` cannot wrap a stream.
  */
-function withLostConnectionBody(response: Response): Response {
+function withLostConnectionBody(
+	response: Response,
+	signal: SignalLike
+): Response {
 	if (response.body === null) {
 		return response
 	}
 
-	const body = failAsLostConnection(response.body)
+	const body = failAsLostConnection(response.body, signal)
 
 	return new Proxy(response, {
 		get: (target, key) => {
@@ -228,7 +284,8 @@ function withLostConnectionBody(response: Response): Response {
 }
 
 function failAsLostConnection(
-	stream: ReadableStream<Uint8Array>
+	stream: ReadableStream<Uint8Array>,
+	signal: SignalLike
 ): ReadableStream<Uint8Array> {
 	const reader = stream.getReader()
 
@@ -244,7 +301,7 @@ function failAsLostConnection(
 				}
 			} catch (error) {
 				controller.error(
-					isAbort(error, undefined) ? error : new ChatConnectionLostError(error)
+					isAbort(error, signal) ? error : new ChatConnectionLostError(error)
 				)
 			}
 		},

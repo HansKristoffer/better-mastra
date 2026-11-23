@@ -44,11 +44,6 @@ export interface UserFacingStreamHandlers {
 	onInternalError?(error: unknown): void
 }
 
-type SourceRead =
-	| { readonly kind: 'chunk'; readonly chunk: UIMessageChunk }
-	| { readonly kind: 'done' }
-	| { readonly kind: 'failed'; readonly error: unknown }
-
 export { isUserFacingPart, toUserFacingMessage, USER_MESSAGE_PART }
 
 /** The default only error text a client receives; the real error stays in the server log. */
@@ -109,27 +104,26 @@ async function pump(
 		}
 	}
 	const reader = source.getReader()
-	let next = await readNext(reader)
+	try {
+		for (;;) {
+			const { done, value: chunk } = await reader.read()
+			if (done || chunk === undefined) break
 
-	while (next.kind === 'chunk') {
-		observe(next.chunk)
+			observe(chunk)
 
-		if (next.chunk.type === 'finish' && holdsFinish) {
-			finish = next.chunk
-		} else if (isUserFacingPart(next.chunk)) {
-			send(next.chunk.type === 'error' ? errorChunk : next.chunk)
+			if (chunk.type === 'finish' && holdsFinish) {
+				finish = chunk
+			} else if (isUserFacingPart(chunk)) {
+				send(chunk.type === 'error' ? errorChunk : chunk)
 
-			if (next.chunk.type === 'start' && afterStart) {
-				send(afterStart)
-				afterStart = undefined
+				if (chunk.type === 'start' && afterStart) {
+					send(afterStart)
+					afterStart = undefined
+				}
 			}
 		}
-
-		next = await readNext(reader)
-	}
-
-	if (next.kind === 'failed') {
-		report(next.error)
+	} catch (error) {
+		report(error)
 		observe(errorChunk)
 		send(errorChunk)
 	}
@@ -141,20 +135,6 @@ async function pump(
 	}
 
 	if (finish) send(finish)
-}
-
-async function readNext(reader: {
-	read(): Promise<{ done: boolean; value?: UIMessageChunk | undefined }>
-}): Promise<SourceRead> {
-	try {
-		const next = await reader.read()
-
-		return next.done || next.value === undefined
-			? { kind: 'done' }
-			: { kind: 'chunk', chunk: next.value }
-	} catch (error) {
-		return { kind: 'failed', error }
-	}
 }
 
 function defaultReport(error: unknown): void {

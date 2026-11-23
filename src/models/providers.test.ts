@@ -175,14 +175,57 @@ describe('anthropicRoute', () => {
 		const model = anthropicRoute('test-key').model('claude-haiku-5-5')
 
 		try {
-			// When one call has a plain prompt and the next marks its system message
+			// When calls have 0, 1, and 4 explicit cache breakpoints
+			const mark = { anthropic: { cacheControl: { type: 'ephemeral' } } }
+			await generateText({ model, prompt: 'Hej' })
+			await generateText({
+				model,
+				messages: [
+					{ role: 'system', content: 'Stable.', providerOptions: mark },
+					{ role: 'user', content: 'Hej' }
+				],
+				allowSystemInMessages: true
+			})
+			await generateText({
+				model,
+				messages: [
+					{ role: 'system', content: 'A.', providerOptions: mark },
+					{ role: 'system', content: 'B.', providerOptions: mark },
+					{ role: 'user', content: 'C', providerOptions: mark },
+					{ role: 'assistant', content: 'D', providerOptions: mark },
+					{ role: 'user', content: 'E' }
+				],
+				allowSystemInMessages: true
+			})
+
+			// Then automatic caching is kept for 0–3 explicit markers (≤ 4 total) and omitted at 4
+			const [plain, oneMarked, fourMarked] = fetch.bodies()
+			expect(plain?.cache_control).toEqual({ type: 'ephemeral' })
+			expect(oneMarked?.cache_control).toEqual({ type: 'ephemeral' })
+			expect(JSON.stringify(oneMarked?.system)).toContain('cache_control')
+			expect(fourMarked?.cache_control).toBeUndefined()
+		} finally {
+			fetch.restore()
+		}
+	})
+
+	it('supports 1h automatic cache TTL and downgrades safely when an explicit marker uses 5m', async () => {
+		const { generateText } = await import('ai')
+		const { anthropicRoute } = await import('./providers/anthropic')
+		const { stubFetch } = await import('./stub-fetch.test')
+		const fetch = stubFetch(answer)
+		const model = anthropicRoute('test-key', { cacheTtl: '1h' }).model(
+			'claude-haiku-5-5'
+		)
+
+		try {
 			await generateText({ model, prompt: 'Hej' })
 			await generateText({
 				model,
 				messages: [
 					{
 						role: 'system',
-						content: 'Stable.',
+						content: 'Short TTL.',
 						providerOptions: {
 							anthropic: { cacheControl: { type: 'ephemeral' } }
 						}
@@ -192,13 +235,61 @@ describe('anthropicRoute', () => {
 				allowSystemInMessages: true
 			})
 
-			// Then only the plain one takes the automatic breakpoint
-			const [plain, marked] = fetch.bodies()
-			expect(plain?.cache_control).toEqual({ type: 'ephemeral' })
-			expect(marked?.cache_control).toBeUndefined()
-			expect(JSON.stringify(marked?.system)).toContain('cache_control')
+			const [oneHour, downgraded] = fetch.bodies()
+			expect(oneHour?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+			expect(downgraded?.cache_control).toEqual({ type: 'ephemeral' })
 		} finally {
 			fetch.restore()
 		}
+	})
+})
+
+describe('openAiRoute prompt caching & openrouter-compat identity', () => {
+	it('forwards promptCacheKey and promptCacheRetention on openAiRoute', async () => {
+		const { generateText } = await import('ai')
+		const { openAiRoute } = await import('./providers/openai')
+		const { stubFetch } = await import('./stub-fetch.test')
+		const fetch = stubFetch(() =>
+			Response.json({
+				id: 'resp_1',
+				object: 'response',
+				created_at: 1,
+				model: 'gpt-5-mini',
+				output: [
+					{
+						id: 'msg_1',
+						type: 'message',
+						role: 'assistant',
+						status: 'completed',
+						content: [{ type: 'output_text', text: 'Hej', annotations: [] }]
+					}
+				],
+				usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11 }
+			})
+		)
+		const model = openAiRoute('test-key', {
+			promptCacheKey: 'hellu-buddy',
+			promptCacheRetention: '24h'
+		}).model('gpt-5-mini')
+
+		try {
+			await generateText({ model, prompt: 'Hej' })
+			const [body] = fetch.bodies()
+			expect(body?.prompt_cache_key).toBe('hellu-buddy')
+			expect(body?.prompt_cache_retention).toBe('24h')
+		} finally {
+			fetch.restore()
+		}
+	})
+
+	it('stripReasoningFromPrompt preserves identity of untouched assistant messages', async () => {
+		const { stripReasoningFromPrompt } = await import('./openrouter-compat')
+		const untouched = {
+			role: 'assistant' as const,
+			content: [{ type: 'text' as const, text: 'Plain reply' }]
+		}
+		const stripped = stripReasoningFromPrompt([...prompt, untouched])
+		expect(stripped).toBeDefined()
+		expect(stripped?.at(-1)).toBe(untouched)
 	})
 })

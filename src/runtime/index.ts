@@ -1,4 +1,8 @@
 export {
+	BoundedPromiseCache,
+	type BoundedPromiseCacheOptions
+} from '../embeddings/bounded-promise-cache.js'
+export {
 	type DependencyCheck,
 	type DependencyHealth,
 	type DependencyStatus,

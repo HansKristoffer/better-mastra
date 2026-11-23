@@ -54,20 +54,36 @@ return 1
  * Charges one request of `userId` against every window of `operation`, or
  * refuses it. No user id reaches Redis: the keys carry an HMAC of it under
  * `secret`, in one hash slot per user. Each operation counts on its own.
+ *
+ * Pass either `runScript` or a Redis adapter with `eval` (`bunRedis`,
+ * `ioRedis`, `upstashRedis`).
  */
-export async function admitUserRequest(input: {
-	readonly runScript: RunRedisScript
-	/** Signs the user id in the keys; changing it starts every count from zero. */
-	readonly secret: string
-	/** Such as `app:ai-usage`. A new prefix starts the counts from zero. */
-	readonly keyPrefix: string
-	/** Such as `receipt` or `assistant`. */
-	readonly operation: string
-	readonly userId: string
-	readonly windows: readonly UserRequestWindow[]
-	/** Default 3 seconds. */
-	readonly timeoutMs?: number
-}): Promise<UserRequestAdmission> {
+export async function admitUserRequest(
+	input: (
+		| { readonly runScript: RunRedisScript; readonly redis?: undefined }
+		| {
+				readonly redis: {
+					eval?(
+						script: string,
+						keys: readonly string[],
+						args: readonly (string | number)[]
+					): Promise<unknown>
+				}
+				readonly runScript?: undefined
+		  }
+	) & {
+		/** Signs the user id in the keys; changing it starts every count from zero. */
+		readonly secret: string
+		/** Such as `app:ai-usage`. A new prefix starts the counts from zero. */
+		readonly keyPrefix: string
+		/** Such as `receipt` or `assistant`. */
+		readonly operation: string
+		readonly userId: string
+		readonly windows: readonly UserRequestWindow[]
+		/** Default 3 seconds. */
+		readonly timeoutMs?: number
+	}
+): Promise<UserRequestAdmission> {
 	const digest = createHmac('sha256', input.secret)
 		.update(input.userId)
 		.digest('hex')
@@ -75,10 +91,21 @@ export async function admitUserRequest(input: {
 
 	const signal = AbortSignal.timeout(input.timeoutMs ?? 3_000)
 
+	const runScript: RunRedisScript =
+		input.runScript ??
+		((script, keys, args) => {
+			if (!input.redis?.eval) {
+				return Promise.reject(
+					new Error('admitUserRequest: redis adapter does not implement eval()')
+				)
+			}
+			return input.redis.eval(script, keys, args)
+		})
+
 	try {
 		// The deadline holds even for a client that ignores the signal.
 		const result = await raceAbort(
-			input.runScript(
+			runScript(
 				USER_REQUEST_ADMISSION_SCRIPT,
 				input.windows.map((window) => `${prefix}:${window.name}`),
 				input.windows.flatMap((window) => [window.limit, window.seconds]),

@@ -60,6 +60,9 @@ export function toReplySuggestions(
 	return replies.slice(0, REPLY_SUGGESTIONS_MAX)
 }
 
+/** Default tool name for the cache-stable single-tool client action dispatcher. */
+export const CLIENT_ACTION_DISPATCHER_TOOL = 'run_page_action'
+
 /** `@mastra/ai-sdk` names an approval `<runId>::<toolCallId>` and reads its answer back by that id. */
 export const APPROVAL_ID_SEPARATOR = '::'
 
@@ -121,6 +124,8 @@ export interface ChatErrors<TCode extends string> {
 	 * `runChatTurn`'s and `createChatRoute`'s `refusals`.
 	 */
 	readonly refusals: Partial<Record<ChatErrorCode, ChatErrorRefusal<TCode>>>
+	/** Map from renamed built-in code to the app's wire code, used by `createChatErrorClassifier`. */
+	readonly rename: Readonly<Partial<Record<ChatErrorCode, TCode>>>
 	/** The `{ error }` body of every refusal, for the client to parse. */
 	readonly bodySchema: z.ZodType<{
 		error: TCode
@@ -155,12 +160,11 @@ export function defineChatErrors<
 		...chatErrorStatuses,
 		...definition.codes
 	}
-	const codes = [
+	const codeSet = new Set<string>([
 		...chatErrorCodes.filter((code) => rename[code] === undefined),
-		...Object.keys(definition.codes).filter(
-			(code) => !(code in chatErrorStatuses)
-		)
-	] as Code[]
+		...Object.keys(definition.codes)
+	])
+	const codes = [...codeSet] as Code[]
 	const status = (code: string) => {
 		const found = statuses[code]
 
@@ -185,6 +189,7 @@ export function defineChatErrors<
 				{ code: own as Code, status: status(own) }
 			])
 		),
+		rename: rename as Readonly<Partial<Record<ChatErrorCode, Code>>>,
 		bodySchema: z.object({
 			error: z.enum(codes as [Code, ...Code[]]),
 			retryAfterSeconds: z.number().optional()

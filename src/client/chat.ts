@@ -74,11 +74,10 @@ class ObservableChatState<M extends UIMessage> implements ChatState<M> {
 	}
 
 	replaceMessage = (index: number, message: M): void => {
-		this.#messages = [
-			...this.#messages.slice(0, index),
-			this.snapshot(message),
-			...this.#messages.slice(index + 1)
-		]
+		const previous = this.#messages[index]
+		const next = this.#messages.slice()
+		next[index] = this.#snapshotMessage(message, previous)
+		this.#messages = next
 		this.#notify()
 	}
 
@@ -94,6 +93,26 @@ class ObservableChatState<M extends UIMessage> implements ChatState<M> {
 		}
 
 		return { ...value, parts: value.parts.map((part: object) => ({ ...part })) }
+	}
+
+	/**
+	 * Copies a streaming message while keeping object identity for unchanged
+	 * earlier parts (completed tool cards, earlier paragraphs), so UI memos and
+	 * card caches stay warm on every streamed token delta.
+	 */
+	#snapshotMessage(message: M, previous: M | undefined): M {
+		const prevParts = previous?.parts
+		if (!prevParts || prevParts.length === 0) {
+			return this.snapshot(message)
+		}
+		const parts = message.parts.map((part, index) => {
+			const prev = prevParts[index]
+			if (prev && shallowEqualPart(prev, part)) {
+				return prev
+			}
+			return { ...part }
+		})
+		return { ...message, parts }
 	}
 
 	getSnapshot = (): ChatSnapshot<M> => {
@@ -138,6 +157,9 @@ export class ObservableChat<
 
 // FUNCTIONS
 
+/** Default render throttle (ms) for streaming chat updates (~25 fps). */
+export const DEFAULT_CHAT_THROTTLE_MS = 40
+
 /** A subscribe whose listener hears at most one change per `ms`, the last one always: a render throttle for a streaming answer. */
 export function throttleSubscribe(
 	subscribe: (listener: () => void) => () => void,
@@ -156,4 +178,57 @@ export function throttleSubscribe(
 			unsubscribe()
 		}
 	}
+}
+
+/**
+ * Throttles intra-message streaming deltas while flushing structural changes
+ * (status transitions, new/removed messages, errors) immediately with zero lag.
+ */
+export function throttleChatSubscribe<M extends UIMessage>(
+	chat: Pick<ObservableChat<M>, 'subscribe' | 'getSnapshot'>,
+	ms: number | undefined
+): (listener: () => void) => () => void {
+	if (ms === undefined || ms <= 0) {
+		return chat.subscribe
+	}
+
+	return (listener) => {
+		let last = chat.getSnapshot()
+		const throttled = throttle(() => {
+			last = chat.getSnapshot()
+			listener()
+		}, ms)
+		const unsubscribe = chat.subscribe(() => {
+			const next = chat.getSnapshot()
+			const structural =
+				next.status !== last.status ||
+				next.error !== last.error ||
+				next.messages.length !== last.messages.length
+			if (structural) {
+				throttled.cancel()
+				last = next
+				listener()
+			} else {
+				throttled()
+			}
+		})
+
+		return () => {
+			throttled.cancel()
+			unsubscribe()
+		}
+	}
+}
+
+function shallowEqualPart(a: object, b: object): boolean {
+	if (a === b) return true
+	const aRec = a as Record<string, unknown>
+	const bRec = b as Record<string, unknown>
+	const aKeys = Object.keys(aRec)
+	const bKeys = Object.keys(bRec)
+	if (aKeys.length !== bKeys.length) return false
+	for (const key of aKeys) {
+		if (!Object.is(aRec[key], bRec[key])) return false
+	}
+	return true
 }

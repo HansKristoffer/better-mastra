@@ -10,10 +10,14 @@ export {
 } from './changes.js'
 export {
 	buildClientActionTools,
+	CLIENT_ACTION_DISPATCHER_TOOL,
 	type ClientToolDef,
-	clientToolDefSchema
+	clientToolDefSchema,
+	createClientActionDispatcherTool,
+	formatClientActionsSignal
 } from './clientActions.js'
 export {
+	createDeferredToolSupport,
 	type DeferredToolEntry,
 	type DeferredToolRanking,
 	deferredTool,
@@ -30,7 +34,8 @@ export {
 	type ToolKind,
 	type ToolTier,
 	toToolName,
-	toToolSet
+	toToolSet,
+	truncateModelOutput
 } from './defineTool.js'
 export {
 	DRY_RUN_KEY,
@@ -42,6 +47,7 @@ export {
 } from './dryRun.js'
 export {
 	buildToolManifest,
+	defineToolManifest,
 	renderToolManifestSource,
 	type ToolManifest,
 	type ToolManifestEntry
@@ -49,6 +55,9 @@ export {
 export { type JsonProjection, toJsonProjection } from './projection.js'
 export {
 	coerceDateStrings,
+	compactJsonSchema,
+	compactTool,
+	compactToolInputSchema,
 	jsonSchemaInput,
 	type ToolInputSchema,
 	type ToolInputSchemaOptions,

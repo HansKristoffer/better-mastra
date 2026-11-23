@@ -6,23 +6,33 @@
  * any tool in `stopAfterTools`.
  */
 
-import { Agent, type AgentExecutionOptions } from '@mastra/core/agent'
+import {
+	Agent,
+	type AgentExecutionOptions,
+	type ToolsInput
+} from '@mastra/core/agent'
 import type { MastraMemory } from '@mastra/core/memory'
-import type {
-	ErrorProcessorOrWorkflow,
-	InputProcessorOrWorkflow,
-	OutputProcessorOrWorkflow,
-	ProcessInputStepResult
+import {
+	type ErrorProcessorOrWorkflow,
+	type InputProcessorOrWorkflow,
+	type OutputProcessorOrWorkflow,
+	PrefillErrorHandler,
+	type ProcessInputStepResult
 } from '@mastra/core/processors'
 import type { LanguageModel } from 'ai'
 import type { z } from 'zod'
 
+import { compactTool } from '../tools/toolInputSchema.js'
 import {
 	RetryBeforeAnswerText,
 	ToolCallBudgetStop,
 	TurnSignals
 } from './processors.js'
-import { CACHE_MARKER, withConversationCache } from './promptCache.js'
+import {
+	cacheMarkerFor,
+	type PromptCacheTtl,
+	withConversationCache
+} from './promptCache.js'
 import {
 	type ChatTurnPlan,
 	findTurnPlan,
@@ -55,6 +65,32 @@ export interface CreateChatAgentOptions {
 	readonly maxProcessorRetries?: number
 	/** Tool calls per step of the plan's budget before the run stops. Default 3. */
 	readonly toolCallsPerStep?: number
+	/**
+	 * Strips verbose Zod/oRPC string format regexes from tool JSON schemas
+	 * before sending to the model (keeping runtime validation untouched).
+	 * Defaults to `true`; pass `false` to send tool schemas unmodified.
+	 */
+	readonly compactToolSchemas?: boolean
+	/**
+	 * Includes Mastra's `PrefillErrorHandler` so Anthropic accepts continuation
+	 * turns ending with assistant messages (tool results / approvals). Defaults
+	 * to `true`; pass `false` to omit it.
+	 */
+	readonly prefillErrorHandler?: boolean
+	/**
+	 * Concurrent tool executions per step. Defaults to `{ limit: 10, strategy: 'called' }`
+	 * so batches of read tools run in parallel even when approval/suspend tools
+	 * are registered on the agent, while any step calling an approval/suspend
+	 * tool still runs sequentially.
+	 */
+	readonly toolCallConcurrency?: AgentExecutionOptions['toolCallConcurrency']
+}
+
+const DEFAULT_TOOL_CALL_CONCURRENCY: NonNullable<
+	AgentExecutionOptions['toolCallConcurrency']
+> = {
+	limit: 10,
+	strategy: 'called'
 }
 
 /**
@@ -85,10 +121,19 @@ const UNPREPARED_MODEL: LanguageModelObject = {
 
 export function createChatAgent(options: CreateChatAgentOptions): Agent {
 	const stopAfterTools = options.stopAfterTools ?? []
+	const compactTools = options.compactToolSchemas !== false
+	const defaultConcurrency =
+		options.toolCallConcurrency ?? DEFAULT_TOOL_CALL_CONCURRENCY
 	const timeout = {
 		totalMs: options.turnTimeoutMs ?? 80_000,
 		firstChunkMs: options.firstChunkTimeoutMs ?? 20_000
 	}
+	const extraErrorProcessors = options.errorProcessors ?? []
+	const hasPrefillHandler = extraErrorProcessors.some(
+		(processor) =>
+			processor instanceof PrefillErrorHandler ||
+			('id' in processor && processor.id === 'prefill-error-handler')
+	)
 	const staticProcessors: InputProcessorOrWorkflow[] = [
 		new ToolCallBudgetStop(options.toolCallsPerStep),
 		new TurnSignals(),
@@ -107,10 +152,17 @@ export function createChatAgent(options: CreateChatAgentOptions): Agent {
 		maxRetries: 0,
 		maxProcessorRetries: options.maxProcessorRetries ?? 2,
 		instructions: ({ requestContext }) => instructionsFor(requestContext),
-		tools: ({ requestContext }) => findTurnPlan(requestContext)?.tools ?? {},
+		tools: ({ requestContext }) =>
+			normalizeTools(findTurnPlan(requestContext)?.tools, compactTools),
 		model: ({ requestContext }) => modelFor(findTurnPlan(requestContext)),
 		defaultOptions: ({ requestContext }) =>
-			defaultOptionsFor(findTurnPlan(requestContext), stopAfterTools, timeout),
+			defaultOptionsFor(
+				findTurnPlan(requestContext),
+				stopAfterTools,
+				timeout,
+				compactTools,
+				defaultConcurrency
+			),
 		inputProcessors: ({ requestContext }) => [
 			...(findTurnPlan(requestContext)?.inputProcessors ?? []),
 			...staticProcessors
@@ -120,8 +172,11 @@ export function createChatAgent(options: CreateChatAgentOptions): Agent {
 			...(options.outputProcessors ?? [])
 		],
 		errorProcessors: [
+			...(options.prefillErrorHandler !== false && !hasPrefillHandler
+				? [new PrefillErrorHandler()]
+				: []),
 			new RetryBeforeAnswerText(),
-			...(options.errorProcessors ?? [])
+			...extraErrorProcessors
 		]
 	})
 }
@@ -150,6 +205,20 @@ export function asStepModel(
 	>
 }
 
+function resolveCacheTtls(cacheTtl: ChatTurnPlan['cacheTtl']): {
+	readonly instructions: PromptCacheTtl
+	readonly conversation: PromptCacheTtl
+} {
+	if (typeof cacheTtl === 'string') {
+		return { instructions: cacheTtl, conversation: cacheTtl }
+	}
+	const conversation = cacheTtl?.conversation ?? '5m'
+	// Anthropic requires longest-TTL-first: a 1h conversation tail requires 1h instructions.
+	const instructions =
+		conversation === '1h' ? '1h' : (cacheTtl?.instructions ?? '5m')
+	return { instructions, conversation }
+}
+
 /**
  * One system message per stable block, the last two with the cache marker (a
  * string plan is one block, marked); the per-request part follows without one.
@@ -161,12 +230,13 @@ function instructionsFor(requestContext: object) {
 		return UNPREPARED_INSTRUCTIONS
 	}
 
+	const marker = cacheMarkerFor(resolveCacheTtls(plan.cacheTtl).instructions)
 	const blocks = stableInstructionBlocks(plan.instructions)
 	const firstMarked = blocks.length - MAX_CACHED_INSTRUCTION_BLOCKS
 	const stable = blocks.map((content, index) => ({
 		role: 'system' as const,
 		content,
-		...(index >= firstMarked && { providerOptions: CACHE_MARKER })
+		...(index >= firstMarked && { providerOptions: marker })
 	}))
 	const messages = plan.perRequestInstructions
 		? [
@@ -180,21 +250,43 @@ function instructionsFor(requestContext: object) {
 }
 
 function modelFor(plan: ChatTurnPlan | undefined): LanguageModelObject {
-	return plan
-		? withConversationCache(asAgentModel(plan.model))
-		: UNPREPARED_MODEL
+	if (!plan) return UNPREPARED_MODEL
+	const { conversation } = resolveCacheTtls(plan.cacheTtl)
+	return withConversationCache(asAgentModel(plan.model), { ttl: conversation })
+}
+
+/**
+ * Sorts tool keys deterministically so the prompt cache prefix never jitters
+ * across requests or replicas, and compacts tool schemas when enabled.
+ */
+function normalizeTools(
+	tools: ToolsInput | undefined,
+	compactTools: boolean
+): ToolsInput {
+	if (!tools) return {}
+
+	const sorted: ToolsInput = {}
+	for (const key of Object.keys(tools).sort()) {
+		const tool = tools[key]
+		if (!tool) continue
+		sorted[key] = compactTools ? compactTool(tool as never) : tool
+	}
+	return sorted
 }
 
 function defaultOptionsFor(
 	plan: ChatTurnPlan | undefined,
 	stopAfterTools: readonly string[],
-	timeout: { readonly totalMs: number; readonly firstChunkMs: number }
+	timeout: { readonly totalMs: number; readonly firstChunkMs: number },
+	compactTools: boolean,
+	defaultConcurrency: NonNullable<AgentExecutionOptions['toolCallConcurrency']>
 ): AgentExecutionOptions<undefined> {
 	const options: AgentExecutionOptions<undefined> = {
 		// Mastra streams signals to the client unless they are hidden.
 		hideSignals: ['reactive', 'system-reminder'],
 		// While a suspended tool is in the history it rewrites the system message on every call.
 		autoResumeSuspendedTools: false,
+		toolCallConcurrency: plan?.toolCallConcurrency ?? defaultConcurrency,
 		...(stopAfterTools.length > 0 && {
 			stopWhen: stopAfterToolCall(stopAfterTools)
 		})
@@ -204,14 +296,38 @@ function defaultOptionsFor(
 		return options
 	}
 
+	const openAiCache =
+		plan.promptCacheKey !== undefined || plan.promptCacheRetention !== undefined
+			? {
+					...(plan.promptCacheKey !== undefined && {
+						promptCacheKey: plan.promptCacheKey
+					}),
+					...(plan.promptCacheRetention !== undefined && {
+						promptCacheRetention: plan.promptCacheRetention
+					})
+				}
+			: undefined
+	const mergedProviderOptions = openAiCache
+		? ({
+				...plan.providerOptions,
+				openai: {
+					...openAiCache,
+					...(plan.providerOptions?.openai as
+						Record<string, unknown> | undefined)
+				}
+			} as ProviderOptions)
+		: (plan.providerOptions as ProviderOptions | undefined)
+
 	return {
 		...options,
 		maxSteps: plan.maxSteps,
 		// Mastra types each provider's options; the AI SDK's are the same record, untyped.
-		...(plan.providerOptions && {
-			providerOptions: plan.providerOptions as ProviderOptions
+		...(mergedProviderOptions && {
+			providerOptions: mergedProviderOptions
 		}),
-		...(plan.clientTools && { clientTools: plan.clientTools }),
+		...(plan.clientTools && {
+			clientTools: normalizeTools(plan.clientTools, compactTools)
+		}),
 		modelSettings: {
 			...(plan.maxOutputTokens && { maxOutputTokens: plan.maxOutputTokens }),
 			timeout

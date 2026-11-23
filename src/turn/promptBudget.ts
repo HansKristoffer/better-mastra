@@ -64,3 +64,91 @@ export async function measureToolSchemas(
 
 	return sizes
 }
+
+/** What changed in the cached prefix (`tools` and stable `instructions`) between two turn plans. */
+export interface PromptPrefixDiff {
+	/** True when both plans send the exact same tool schemas and stable instruction blocks. */
+	readonly cacheStable: boolean
+	/** True when both plans send identical tool definitions (names, descriptions, schemas). */
+	readonly sameTools: boolean
+	readonly addedTools: readonly string[]
+	readonly removedTools: readonly string[]
+	readonly changedTools: readonly string[]
+	/** True when all stable instruction blocks match identically. */
+	readonly sameInstructionBlocks: boolean
+	/** Index of the first differing stable instruction block, or null when identical. */
+	readonly firstChangedBlockIndex: number | null
+}
+
+/**
+ * Compares the cached prefix (`tools` + `clientTools` + stable `instructions`)
+ * of two turn plans—for example across two pages or two users—to catch prompt
+ * cache invalidations in CI tests.
+ */
+export async function diffPromptPrefixes(
+	a: Pick<ChatTurnPlan, 'instructions' | 'tools' | 'clientTools'>,
+	b: Pick<ChatTurnPlan, 'instructions' | 'tools' | 'clientTools'>
+): Promise<PromptPrefixDiff> {
+	const [toolsA, toolsB] = await Promise.all([
+		serializeToolSchemas({ ...a.tools, ...a.clientTools }),
+		serializeToolSchemas({ ...b.tools, ...b.clientTools })
+	])
+	const keysA = Object.keys(toolsA).sort()
+	const keysB = Object.keys(toolsB).sort()
+	const setA = new Set(keysA)
+	const setB = new Set(keysB)
+
+	const addedTools = keysB.filter((key) => !setA.has(key))
+	const removedTools = keysA.filter((key) => !setB.has(key))
+	const changedTools = keysA.filter(
+		(key) => setB.has(key) && toolsA[key] !== toolsB[key]
+	)
+	const sameTools =
+		addedTools.length === 0 &&
+		removedTools.length === 0 &&
+		changedTools.length === 0
+
+	const blocksA = stableInstructionBlocks(a.instructions)
+	const blocksB = stableInstructionBlocks(b.instructions)
+	const maxLen = Math.max(blocksA.length, blocksB.length)
+	let firstChangedBlockIndex: number | null = null
+	for (let i = 0; i < maxLen; i += 1) {
+		if (blocksA[i] !== blocksB[i]) {
+			firstChangedBlockIndex = i
+			break
+		}
+	}
+	const sameInstructionBlocks = firstChangedBlockIndex === null
+
+	return {
+		cacheStable: sameTools && sameInstructionBlocks,
+		sameTools,
+		addedTools,
+		removedTools,
+		changedTools,
+		sameInstructionBlocks,
+		firstChangedBlockIndex
+	}
+}
+
+async function serializeToolSchemas(
+	tools: ToolsInput
+): Promise<Record<string, string>> {
+	const serialized: Record<string, string> = {}
+
+	for (const name of Object.keys(tools).sort()) {
+		const tool = tools[name]
+		if (!tool) continue
+		const core = makeCoreToolV5(tool as never, { name } as never, 'tool')
+		const schema = await (core.inputSchema as { jsonSchema: unknown })
+			.jsonSchema
+		serialized[name] = JSON.stringify({
+			name,
+			description: core.description,
+			schema,
+			providerOptions: (tool as { providerOptions?: unknown }).providerOptions
+		})
+	}
+
+	return serialized
+}

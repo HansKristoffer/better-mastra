@@ -8,6 +8,7 @@
  * both options; give them Mastra's processor instead.
  */
 
+import type { InputProcessor } from '@mastra/core/processors'
 import { createTool, type Tool } from '@mastra/core/tools'
 import { z } from 'zod'
 import { sortBy } from 'hanzio'
@@ -27,8 +28,37 @@ export type DeferredToolRanking = (
 	entries: readonly DeferredToolEntry[]
 ) => readonly string[]
 
+const MAX_CACHED_SEARCH_TOOLS = 256
 const deferredCopies = new WeakMap<AnyTool, AnyTool>()
 const searchTools = new Map<string, AnyTool>()
+
+/** Common 2-letter stopwords excluded from ranking while preserving domain abbreviations (`id`, `ai`, `hr`, `pr`, `db`, `ui`). */
+const TWO_CHAR_STOPWORDS = new Set([
+	'am',
+	'an',
+	'as',
+	'at',
+	'be',
+	'by',
+	'do',
+	'go',
+	'he',
+	'if',
+	'in',
+	'is',
+	'it',
+	'me',
+	'my',
+	'no',
+	'of',
+	'on',
+	'or',
+	'so',
+	'to',
+	'up',
+	'us',
+	'we'
+])
 
 const DEFAULT_SEARCH_DESCRIPTION =
 	'Find tools you cannot see yet by what you need to do (e.g. "list tasks assigned to me"). The tools it finds become available to call right away.'
@@ -59,20 +89,34 @@ export function deferredTool<T extends AnyTool>(tool: T): T {
 	return copy as T
 }
 
-/** A word in a tool's name counts three times a word in its description. */
+/**
+ * A word in a tool's name counts three times a word in its description, with
+ * prefix/stem matching so singular/plural and verb inflections (`task` vs
+ * `tasks`, `delete` vs `deleting`) still match.
+ */
 export function rankToolsByName(topK = 5): DeferredToolRanking {
 	return (query, entries) => {
-		const wanted = new Set(words(query))
+		const wanted = [...new Set(words(query))]
+		if (wanted.length === 0) return []
 
 		const scored = entries
 			.map((entry) => {
-				const name = new Set(words(entry.name))
-				const description = new Set(words(entry.tool.description ?? ''))
+				const nameTokens = words(entry.name)
+				const descTokens = words(entry.tool.description ?? '')
+				const nameSet = new Set(nameTokens)
+				const descSet = new Set(descTokens)
 				let score = 0
 
 				for (const word of wanted) {
-					if (name.has(word)) score += 3
-					else if (description.has(word)) score += 1
+					if (nameSet.has(word)) {
+						score += 3
+					} else if (matchesStem(word, nameTokens)) {
+						score += 2
+					} else if (descSet.has(word)) {
+						score += 1
+					} else if (matchesStem(word, descTokens)) {
+						score += 0.7
+					}
 				}
 
 				return { name: entry.name, score }
@@ -87,8 +131,8 @@ export function rankToolsByName(topK = 5): DeferredToolRanking {
 
 /**
  * `search_tools` for a deferred catalog: it answers with tool references, so
- * the tools it finds load inside the conversation. One tool per `key`, which
- * names the catalog, so a request with the same catalog gets the same tool.
+ * the tools it finds load inside the conversation. One tool per `key` (LRU
+ * capped at 256 catalogs), so a request with the same catalog gets the same tool.
  */
 export function deferredToolSearch(
 	key: string,
@@ -98,11 +142,23 @@ export function deferredToolSearch(
 		/** The search tool's description. */
 		readonly describe?: string
 		readonly rank?: DeferredToolRanking
+		/**
+		 * When `false`, returns plain text listing matched tool names instead of
+		 * Anthropic `tool-reference` blocks (used with `createDeferredToolSupport`
+		 * on non-Anthropic providers). Defaults to `true`.
+		 */
+		readonly anthropicToolReferences?: boolean
 	} = {}
 ): AnyTool {
-	const cached = searchTools.get(key)
+	const useReferences = options.anthropicToolReferences !== false
+	const cacheKey = `${useReferences ? 'ref' : 'txt'}\0${key}`
+	const cached = searchTools.get(cacheKey)
 
-	if (cached) return cached
+	if (cached) {
+		searchTools.delete(cacheKey)
+		searchTools.set(cacheKey, cached)
+		return cached
+	}
 
 	const rank = options.rank ?? rankToolsByName(options.topK)
 	const tool = createTool({
@@ -120,8 +176,10 @@ export function deferredToolSearch(
 		toModelOutput: (output) => {
 			const { found } = searchOutputSchema.parse(output)
 
+			if (found.length === 0) return { type: 'text', value: NO_MATCH } as never
+
 			return (
-				found.length > 0
+				useReferences
 					? {
 							type: 'content',
 							value: found.map((toolName) => ({
@@ -131,22 +189,161 @@ export function deferredToolSearch(
 								}
 							}))
 						}
-					: { type: 'text', value: NO_MATCH }
+					: {
+							type: 'text',
+							value: `Loaded tools: ${found.join(', ')}. You can call them now.`
+						}
 			) as never
 		}
 	}) as AnyTool
 
-	searchTools.set(key, tool)
+	if (searchTools.size >= MAX_CACHED_SEARCH_TOOLS) {
+		const oldest = searchTools.keys().next().value
+		if (oldest !== undefined) searchTools.delete(oldest)
+	}
+	searchTools.set(cacheKey, tool)
 
 	return tool
 }
 
-/** `workItem_getAll` becomes `work item get all`; words of three letters or more. */
+/**
+ * Provider-aware deferred tools: on Anthropic direct (`deferLoading: true`),
+ * every deferred tool stays in `tools` with Anthropic's `defer_loading` and
+ * `search_tools` returns tool references so the prompt cache never changes. On
+ * other providers, only `search_tools` is mounted initially and a lightweight
+ * input processor mounts tools returned by `search_tools` on subsequent steps.
+ */
+export function createDeferredToolSupport(options: {
+	readonly key: string
+	readonly entries: readonly DeferredToolEntry[]
+	/** True for `anthropic-direct` (supports `defer_loading` + `tool-reference`). */
+	readonly supportsAnthropicDeferLoading: boolean
+	readonly topK?: number
+	readonly describe?: string
+	readonly rank?: DeferredToolRanking
+}): {
+	readonly tools: Record<string, AnyTool>
+	readonly inputProcessors: readonly InputProcessor[]
+} {
+	if (options.entries.length === 0) {
+		return { tools: {}, inputProcessors: [] }
+	}
+
+	if (options.supportsAnthropicDeferLoading) {
+		const tools: Record<string, AnyTool> = {
+			search_tools: deferredToolSearch(options.key, options.entries, {
+				...(options.topK !== undefined && { topK: options.topK }),
+				...(options.describe !== undefined && { describe: options.describe }),
+				...(options.rank !== undefined && { rank: options.rank }),
+				anthropicToolReferences: true
+			})
+		}
+		for (const entry of options.entries) {
+			tools[entry.name] = deferredTool(entry.tool)
+		}
+		return { tools, inputProcessors: [] }
+	}
+
+	const byName = new Map(
+		options.entries.map((entry) => [entry.name, entry.tool])
+	)
+	const search = deferredToolSearch(options.key, options.entries, {
+		...(options.topK !== undefined && { topK: options.topK }),
+		...(options.describe !== undefined && { describe: options.describe }),
+		...(options.rank !== undefined && { rank: options.rank }),
+		anthropicToolReferences: false
+	})
+
+	const revealProcessor: InputProcessor = {
+		id: 'better-mastra-deferred-tools',
+		processInputStep: ({ messages, tools }) => {
+			const revealed = findRevealedToolNames(messages)
+			if (revealed.size === 0) return
+
+			const nextTools: Record<string, unknown> = { ...(tools ?? {}) }
+			let changed = false
+			for (const name of revealed) {
+				if (name in nextTools) continue
+				const found = byName.get(name)
+				if (found) {
+					nextTools[name] = found
+					changed = true
+				}
+			}
+			if (changed) return { tools: nextTools as never }
+		}
+	}
+
+	return {
+		tools: { search_tools: search },
+		inputProcessors: [revealProcessor]
+	}
+}
+
+function findRevealedToolNames(messages: readonly unknown[]): Set<string> {
+	const found = new Set<string>()
+	for (const message of messages) {
+		if (!message || typeof message !== 'object') continue
+		const content = (message as { content?: { parts?: readonly unknown[] } })
+			.content
+		const parts = Array.isArray(content)
+			? content
+			: Array.isArray(content?.parts)
+				? content.parts
+				: []
+		for (const part of parts) {
+			if (!part || typeof part !== 'object') continue
+			const p = part as {
+				type?: string
+				toolInvocation?: { toolName?: string; result?: unknown }
+				toolName?: string
+				output?: unknown
+				result?: unknown
+			}
+			const toolName = p.toolInvocation?.toolName ?? p.toolName
+			if (toolName !== 'search_tools') continue
+			const result = p.toolInvocation?.result ?? p.output ?? p.result
+			const parsed = searchOutputSchema.safeParse(result)
+			if (parsed.success) {
+				for (const name of parsed.data.found) found.add(name)
+			}
+		}
+	}
+	return found
+}
+
+function stem(word: string): string {
+	if (word.length > 5 && word.endsWith('ing')) return word.slice(0, -3)
+	if (word.length > 4 && word.endsWith('ies')) return `${word.slice(0, -3)}y`
+	if (word.length > 4 && word.endsWith('es')) return word.slice(0, -2)
+	if (word.length > 4 && word.endsWith('ed')) return word.slice(0, -2)
+	if (word.length > 3 && word.endsWith('s')) return word.slice(0, -1)
+	return word
+}
+
+function matchesStem(wanted: string, candidates: readonly string[]): boolean {
+	if (wanted.length < 3) return false
+	const wantedStem = stem(wanted)
+	for (const candidate of candidates) {
+		if (candidate.length < 3) continue
+		const candidateStem = stem(candidate)
+		if (
+			wantedStem === candidateStem ||
+			(wantedStem.length >= 4 && candidate.startsWith(wantedStem)) ||
+			(candidateStem.length >= 4 && wanted.startsWith(candidateStem))
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+/** `workItem_getAll` becomes `work item get all`; keeps meaningful 2-letter abbreviations (`id`, `ai`, `hr`, `db`). */
 function words(text: string): string[] {
 	return (
 		text
 			.replace(/([a-z])([A-Z])/g, '$1 $2')
 			.toLowerCase()
-			.match(/\p{L}{3,}/gu) ?? []
-	)
+			.match(/\p{L}{2,}/gu) ?? []
+	).filter((word) => word.length >= 3 || !TWO_CHAR_STOPWORDS.has(word))
 }

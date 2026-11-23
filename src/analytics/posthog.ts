@@ -18,8 +18,10 @@ export interface PostHogEvent {
 	readonly properties: Readonly<Record<string, string | number | boolean>>
 }
 
-/** Sends one event; it must not throw. */
-export type PostHogCapture = (event: PostHogEvent) => void | Promise<void>
+/** Sends one event; it must not throw. May expose `batch` to send a group in one HTTP request. */
+export type PostHogCapture = ((event: PostHogEvent) => void | Promise<void>) & {
+	readonly batch?: (events: readonly PostHogEvent[]) => void | Promise<void>
+}
 
 export const POSTHOG_US_HOST = 'https://us.i.posthog.com'
 export const POSTHOG_EU_HOST = 'https://eu.i.posthog.com'
@@ -29,6 +31,9 @@ export const POSTHOG_EU_HOST = 'https://eu.i.posthog.com'
  * send goes to `onError`, without the event's properties. Events carry
  * `$geoip_disable`, because a server's address says nothing about where the
  * user is. Without an API key it sends nothing.
+ *
+ * Also exposes `capture.batch(events)` which posts multiple events to `/batch/`
+ * in a single HTTP request (used automatically by `posthogGenerations`).
  */
 export function createPostHogCapture(options: {
 	readonly apiKey: string | undefined
@@ -44,13 +49,25 @@ export function createPostHogCapture(options: {
 }): PostHogCapture {
 	const { apiKey, onError } = options
 	const send = options.fetch ?? fetch
-	const url = `${(options.host ?? POSTHOG_US_HOST).replace(/\/+$/, '')}/i/v0/e/`
+	const baseHost = (options.host ?? POSTHOG_US_HOST).replace(/\/+$/, '')
+	const singleUrl = `${baseHost}/i/v0/e/`
+	const batchUrl = `${baseHost}/batch/`
+	const timeoutMs = options.timeoutMs ?? 5_000
 
-	if (!apiKey) return () => {}
+	if (!apiKey) {
+		const noop: PostHogCapture = Object.assign(() => {}, {
+			batch: () => {}
+		})
+		return noop
+	}
 
-	return async ({ event, distinctId, properties }) => {
+	const captureSingle = async ({
+		event,
+		distinctId,
+		properties
+	}: PostHogEvent) => {
 		try {
-			const response = await send(url, {
+			const response = await send(singleUrl, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
@@ -59,7 +76,7 @@ export function createPostHogCapture(options: {
 					distinct_id: distinctId,
 					properties: { ...properties, $geoip_disable: true }
 				}),
-				signal: AbortSignal.timeout(options.timeoutMs ?? 5_000)
+				signal: AbortSignal.timeout(timeoutMs)
 			})
 
 			if (!response.ok) {
@@ -72,6 +89,41 @@ export function createPostHogCapture(options: {
 			onError?.(error, { event })
 		}
 	}
+
+	const captureBatch = async (events: readonly PostHogEvent[]) => {
+		if (events.length === 0) return
+		if (events.length === 1) {
+			await captureSingle(events[0]!)
+			return
+		}
+		const eventName = events[0]!.event
+		try {
+			const response = await send(batchUrl, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					api_key: apiKey,
+					batch: events.map(({ event, distinctId, properties }) => ({
+						event,
+						distinct_id: distinctId,
+						properties: { ...properties, $geoip_disable: true }
+					}))
+				}),
+				signal: AbortSignal.timeout(timeoutMs)
+			})
+
+			if (!response.ok) {
+				onError?.(new Error('PostHog rejected an event.'), {
+					event: eventName,
+					status: response.status
+				})
+			}
+		} catch (error) {
+			onError?.(error, { event: eventName })
+		}
+	}
+
+	return Object.assign(captureSingle, { batch: captureBatch })
 }
 
 /**
@@ -130,9 +182,10 @@ export function toAiGenerationEvent(
 
 /**
  * A `sinks.usage` for `runChatTurn` that sends one `$ai_generation` per model
- * call of the turn. A turn without a trace sends none rather than one under
- * another id. `identify` returns undefined for a user who must not be
- * tracked, such as one without analytics consent.
+ * call of the turn (batched into one HTTP call when `capture.batch` exists).
+ * A turn without a Mastra trace sends none unless `traceId` provides a fallback
+ * (e.g. `() => crypto.randomUUID()` when `observabilitySchema: false`).
+ * `identify` returns undefined for a user who must not be tracked.
  */
 export function posthogGenerations<TScope>(options: {
 	readonly capture: PostHogCapture
@@ -150,7 +203,20 @@ export function posthogGenerations<TScope>(options: {
 		| undefined
 	readonly provider?: string
 	readonly spanName?: string
-	readonly costOf?: (step: unknown) => number | undefined
+	readonly costOf?: (
+		step: unknown,
+		call: Omit<ModelCall, 'costUsd'>
+	) => number | undefined
+	/**
+	 * Fallback trace id when Mastra observability is off and steps carry no
+	 * `traceId` (e.g. `() => crypto.randomUUID()`).
+	 */
+	readonly traceId?: (event: {
+		readonly scope: TScope
+		readonly labels: Readonly<Record<string, string | number | boolean | null>>
+		readonly modelId: string
+		readonly steps: readonly unknown[]
+	}) => string | undefined
 }): (event: {
 	readonly scope: TScope
 	readonly labels: Readonly<Record<string, string | number | boolean | null>>
@@ -159,19 +225,28 @@ export function posthogGenerations<TScope>(options: {
 }) => void {
 	return (event) => {
 		const who = options.identify(event.scope, event.labels)
-		const traceId = readTurnTraceId(event.steps)
+		const traceId = readTurnTraceId(event.steps) ?? options.traceId?.(event)
 
 		if (!who || !traceId) return
 
-		for (const call of readModelCalls(event.steps, event.modelId, options)) {
-			void options.capture(
-				toAiGenerationEvent(call, {
-					...who,
-					traceId,
-					...(options.provider && { provider: options.provider }),
-					...(options.spanName && { spanName: options.spanName })
-				})
-			)
+		const calls = readModelCalls(event.steps, event.modelId, options)
+		if (calls.length === 0) return
+
+		const events = calls.map((call) =>
+			toAiGenerationEvent(call, {
+				...who,
+				traceId,
+				...(options.provider && { provider: options.provider }),
+				...(options.spanName && { spanName: options.spanName })
+			})
+		)
+
+		if (options.capture.batch) {
+			void options.capture.batch(events)
+		} else {
+			for (const phEvent of events) {
+				void options.capture(phEvent)
+			}
 		}
 	}
 }

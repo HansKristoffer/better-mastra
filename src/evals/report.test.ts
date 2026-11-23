@@ -151,6 +151,13 @@ test('a comparison lists the cases whose pass count moved', () => {
 	expect(table).toContain('| Passed runs | 2/4 (50%) | 3/4 (75%) |')
 	expect(table).toContain('| b | 0/2 | 1/2 |')
 	expect(table).not.toContain('| a |')
+
+	// Cases removed from candidate also show up with '-' after
+	const shrunk = compareReports(
+		before,
+		report([result('a', 'answer', [true, true])])
+	)
+	expect(shrunk).toContain('| b | 0/2 | - |')
 })
 
 test('a model comparison has one row per model', () => {

@@ -40,7 +40,10 @@ export type PgStorageOptions = (
 	/** The observability pool never grows past this (default 2): it writes in the background. */
 	observabilityPoolMax?: number
 	ssl?: PoolConfig['ssl']
+	/** Wait for a free pool connection before failing. Defaults to 10_000 ms; pass 0 to disable. */
 	connectionTimeoutMillis?: number
+	/** Cancels a runaway query after this many ms (`statement_timeout`). */
+	statementTimeoutMs?: number
 	retention?: RetentionConfig
 	logger?: Logger
 }

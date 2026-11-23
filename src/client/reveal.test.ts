@@ -81,14 +81,14 @@ describe('trimIncompleteMarkdown', () => {
 })
 
 describe('markdownParagraphs', () => {
-	test('splits paragraphs, and keeps a code fence or a list continuation whole', () => {
+	test('splits paragraphs around code fences while keeping fence interiors and list continuations whole', () => {
 		expect([
 			markdownParagraphs('Første afsnit.\n\nAndet afsnit.'),
-			markdownParagraphs('Kode:\n\n```\na\n\nb\n```'),
+			markdownParagraphs('Kode:\n\n```\na\n\nb\n```\n\nSlut.'),
 			markdownParagraphs('- Mad\n\n  - Dagligvarer')
 		]).toEqual([
 			['Første afsnit.', 'Andet afsnit.'],
-			['Kode:\n\n```\na\n\nb\n```'],
+			['Kode:', '```\na\n\nb\n```', 'Slut.'],
 			['- Mad\n\n  - Dagligvarer']
 		])
 	})

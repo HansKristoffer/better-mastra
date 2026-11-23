@@ -61,6 +61,17 @@ export function createMemory(input: {
 	 * the prompt of a long-running thread small.
 	 */
 	reflectionObservationTokens?: number
+	/**
+	 * Run background observation buffering when a turn ends and the thread
+	 * becomes idle so the next turn's TTFT does not block on a synchronous
+	 * Observer call. Defaults to `true`.
+	 */
+	bufferOnIdle?: boolean
+	/**
+	 * Multiplier (>= 1) or token count above which synchronous blocking
+	 * observation is allowed when async buffering hasn't finished yet.
+	 */
+	blockAfter?: number
 	// biome-ignore lint/suspicious/noExplicitAny: extractors may use any schema
 	extract?: Extractor<any>[]
 	/** Retries of the Observer and the Reflector; Mastra defaults to 8. */
@@ -87,6 +98,10 @@ export function createMemory(input: {
 								model: toModelInstance(observer),
 								messageTokens:
 									input.observationMessageTokens ?? OBSERVATION_MESSAGE_TOKENS,
+								bufferOnIdle: input.bufferOnIdle ?? true,
+								...(input.blockAfter !== undefined && {
+									blockAfter: input.blockAfter
+								}),
 								...outputCap(input.observerMaxOutputTokens),
 								maxRetries,
 								failurePolicy: 'continue',

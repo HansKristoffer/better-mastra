@@ -3,8 +3,33 @@ import { wrapLanguageModel } from 'ai'
 import type { LlmEffort } from '../effort.js'
 import { type LlmRoute, withoutTemperature } from '../route.js'
 
-export function openAiRoute(apiKey: string): LlmRoute {
+export interface OpenAiRouteOptions {
+	/**
+	 * Stable routing key sent as OpenAI's `prompt_cache_key` to keep requests
+	 * sharing a prefix on the same GPU cache shard under multi-user concurrency.
+	 */
+	readonly promptCacheKey?: string
+	/** OpenAI prompt-cache retention (`'in_memory'` default or `'24h'`). */
+	readonly promptCacheRetention?: 'in_memory' | '24h'
+}
+
+export function openAiRoute(
+	apiKey: string,
+	options: OpenAiRouteOptions = {}
+): LlmRoute {
 	const provider = createOpenAI({ apiKey })
+	const defaultCacheOptions =
+		options.promptCacheKey !== undefined ||
+		options.promptCacheRetention !== undefined
+			? {
+					...(options.promptCacheKey !== undefined && {
+						promptCacheKey: options.promptCacheKey
+					}),
+					...(options.promptCacheRetention !== undefined && {
+						promptCacheRetention: options.promptCacheRetention
+					})
+				}
+			: undefined
 
 	return {
 		model: (modelId) =>
@@ -17,12 +42,27 @@ export function openAiRoute(apiKey: string): LlmRoute {
 					transformParams: async ({ params }) => {
 						const next =
 							modelId === 'chat-latest' ? withoutTemperature(params) : params
-						if (!next.tools) return next
+						const withCache = defaultCacheOptions
+							? {
+									...next,
+									providerOptions: {
+										...next.providerOptions,
+										openai: {
+											...defaultCacheOptions,
+											...next.providerOptions?.openai
+										}
+									}
+								}
+							: next
+
+						if (!withCache.tools) {
+							return withCache
+						}
 						return {
-							...next,
+							...withCache,
 							// Preserve optional tool inputs; Responses otherwise normalizes
 							// an unspecified strict flag to strict schemas with required fields.
-							tools: next.tools.map((tool) =>
+							tools: withCache.tools.map((tool) =>
 								tool.type === 'function'
 									? { ...tool, strict: tool.strict ?? false }
 									: tool

@@ -9,7 +9,6 @@
 
 import { isMastraTimeoutError } from '@mastra/core/loop'
 import type { UIMessageChunk } from 'ai'
-import { typedSwitch } from 'hanzio'
 
 import type { TurnOutcome } from '../protocol/index.js'
 import type { TurnStreamEnding } from './stream.js'
@@ -84,57 +83,54 @@ export function createTurnObserver(
 
 	return {
 		observe(chunk) {
-			typedSwitch(
-				chunk,
-				'type',
-				{
-					'start-step': () => {
-						steps += 1
-					},
-					'tool-input-start': (start) => {
-						names.set(start.toolCallId, start.toolName)
-					},
-					'tool-input-available': (input) => {
-						names.set(input.toolCallId, input.toolName)
-						startedAt.set(input.toolCallId, elapsedMs())
-						toolCalls += 1
-						waiting.add(input.toolCallId)
-					},
-					'tool-output-available': (output) => {
-						// A preliminary output is an interim frame; the final one follows.
-						if (output.preliminary !== true) {
-							settle(output.toolCallId, 'success')
-						}
-					},
-					'tool-output-error': (output) => {
-						settle(output.toolCallId, 'error')
-					},
-					'tool-output-denied': (output) => {
-						settle(output.toolCallId, 'denied')
-					},
-					'tool-approval-request': () => {
-						waitsForApproval = true
-					},
-					'text-delta': (delta) => {
-						if (timeToFirstTextMs === undefined && delta.delta.length > 0) {
-							timeToFirstTextMs = elapsedMs()
-							handlers.onFirstText?.(timeToFirstTextMs)
-						}
-						text += delta.delta
-					},
-					'data-tripwire': () => {
-						sawTripwire = true
-					},
-					error: () => {
-						sawError = true
-					},
-					// Mastra's finish reason of the run's last model call.
-					finish: (finish) => {
-						wasCutOff = finish.finishReason === 'length'
+			switch (chunk.type) {
+				case 'start-step':
+					steps += 1
+					return
+				case 'tool-input-start':
+					names.set(chunk.toolCallId, chunk.toolName)
+					return
+				case 'tool-input-available':
+					names.set(chunk.toolCallId, chunk.toolName)
+					startedAt.set(chunk.toolCallId, elapsedMs())
+					toolCalls += 1
+					waiting.add(chunk.toolCallId)
+					return
+				case 'tool-output-available':
+					// A preliminary output is an interim frame; the final one follows.
+					if (chunk.preliminary !== true) {
+						settle(chunk.toolCallId, 'success')
 					}
-				},
-				() => {}
-			)
+					return
+				case 'tool-output-error':
+					settle(chunk.toolCallId, 'error')
+					return
+				case 'tool-output-denied':
+					settle(chunk.toolCallId, 'denied')
+					return
+				case 'tool-approval-request':
+					waitsForApproval = true
+					return
+				case 'text-delta':
+					if (timeToFirstTextMs === undefined && chunk.delta.length > 0) {
+						timeToFirstTextMs = elapsedMs()
+						handlers.onFirstText?.(timeToFirstTextMs)
+					}
+					text += chunk.delta
+					return
+				case 'data-tripwire':
+					sawTripwire = true
+					return
+				case 'error':
+					sawError = true
+					return
+				// Mastra's finish reason of the run's last model call.
+				case 'finish':
+					wasCutOff = chunk.finishReason === 'length'
+					return
+				default:
+					return
+			}
 		},
 		failed(error) {
 			lastErrorWasTimeout = isMastraTimeoutError(error)

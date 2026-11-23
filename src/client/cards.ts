@@ -81,38 +81,77 @@ export function createCardRegistry<const S extends CardSchemas>(
 	options: CardRegistryOptions<S>
 ): CardRegistry<S> {
 	const select = options.select ?? ((output: unknown) => output)
+	const partCache = new WeakMap<ToolPart, Card<S>>()
+	const parsedOutputCache = new WeakMap<
+		object,
+		Map<string, { readonly ok: boolean; readonly data: unknown }>
+	>()
+
+	const parseOutput = (
+		schema: z.ZodType,
+		kind: string,
+		toolName: string,
+		output: unknown
+	): { readonly ok: boolean; readonly data: unknown } => {
+		if (output !== null && typeof output === 'object') {
+			let byKind = parsedOutputCache.get(output)
+			const cached = byKind?.get(`${kind}\0${toolName}`)
+			if (cached) return cached
+
+			const parsed = schema.safeParse(select(output, toolName))
+			const entry = parsed.success
+				? { ok: true, data: parsed.data }
+				: { ok: false, data: undefined }
+			if (!byKind) {
+				byKind = new Map()
+				parsedOutputCache.set(output, byKind)
+			}
+			byKind.set(`${kind}\0${toolName}`, entry)
+			return entry
+		}
+
+		const parsed = schema.safeParse(select(output, toolName))
+		return parsed.success
+			? { ok: true, data: parsed.data }
+			: { ok: false, data: undefined }
+	}
 
 	const resolve = (part: ToolPart): Card<S> => {
+		const cached = partCache.get(part)
+		if (cached) return cached
+
 		const toolName = getToolName(part)
 		const kind = options.toolCard(toolName)
 
+		let card: Card<S>
 		if (kind === 'silent') {
-			return { kind: 'silent', part }
+			card = { kind: 'silent', part }
+		} else {
+			const schema =
+				kind === undefined || kind === 'generic'
+					? undefined
+					: options.schemas[kind]
+
+			if (kind === undefined || schema === undefined) {
+				card = { kind: 'generic', toolName, part }
+			} else if (
+				part.state === 'output-error' ||
+				part.state === 'output-denied'
+			) {
+				card = { kind: 'generic', toolName, part }
+			} else if (part.state !== 'output-available') {
+				card = { kind, state: 'running', part } as Card<S>
+			} else {
+				const parsed = parseOutput(schema, kind, toolName, part.output)
+				// The schema of `kind` parsed the data, so it is that card's data.
+				card = parsed.ok
+					? ({ kind, state: 'done', data: parsed.data, part } as Card<S>)
+					: { kind: 'generic', toolName, part }
+			}
 		}
 
-		const schema =
-			kind === undefined || kind === 'generic'
-				? undefined
-				: options.schemas[kind]
-
-		if (kind === undefined || schema === undefined) {
-			return { kind: 'generic', toolName, part }
-		}
-
-		if (part.state === 'output-error' || part.state === 'output-denied') {
-			return { kind: 'generic', toolName, part }
-		}
-
-		if (part.state !== 'output-available') {
-			return { kind, state: 'running', part } as Card<S>
-		}
-
-		const parsed = schema.safeParse(select(part.output, toolName))
-
-		// The schema of `kind` parsed the data, so it is that card's data.
-		return parsed.success
-			? ({ kind, state: 'done', data: parsed.data, part } as Card<S>)
-			: { kind: 'generic', toolName, part }
+		partCache.set(part, card)
+		return card
 	}
 
 	const isStep = (card: Card<S>): boolean =>

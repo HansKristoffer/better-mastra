@@ -82,13 +82,64 @@ export function trimIncompleteMarkdown(text: string): string {
 	return closeOpenMarkers(trimIncompleteLink(withoutBareMarker))
 }
 
-/** One string per paragraph. A fenced code block may hold blank lines, so text with a fence stays whole. */
+/**
+ * One string per paragraph, keeping fenced code blocks (even with blank lines
+ * inside) and list continuations whole so preceding paragraphs stay memoized
+ * while the tail streams.
+ */
 export function markdownParagraphs(text: string): readonly string[] {
-	if (text.includes(CODE_FENCE)) {
-		return [text]
+	if (!text.includes(CODE_FENCE)) {
+		return text.split(PARAGRAPH_BREAK).filter((paragraph) => paragraph !== '')
 	}
 
-	return text.split(PARAGRAPH_BREAK).filter((paragraph) => paragraph !== '')
+	const lines = text.split('\n')
+	const paragraphs: string[] = []
+	let current: string[] = []
+	let inFence = false
+
+	const flush = () => {
+		// Trim trailing blank lines on the completed paragraph.
+		while (current.length > 0 && current[current.length - 1]?.trim() === '') {
+			current.pop()
+		}
+		if (current.length > 0) {
+			paragraphs.push(current.join('\n'))
+			current = []
+		}
+	}
+
+	for (let i = 0; i < lines.length; i += 1) {
+		const line = lines[i] ?? ''
+		const trimmedStart = line.trimStart()
+		const isFenceLine = trimmedStart.startsWith(CODE_FENCE)
+
+		if (inFence) {
+			current.push(line)
+			if (isFenceLine) inFence = false
+			continue
+		}
+
+		if (
+			line.trim() === '' &&
+			current.length > 0 &&
+			i + 1 < lines.length &&
+			/^\S/.test(lines[i + 1] ?? '')
+		) {
+			// A blank line before a non-indented line starts a new paragraph.
+			flush()
+			continue
+		}
+
+		if (current.length === 0 && line.trim() === '') {
+			continue
+		}
+
+		current.push(line)
+		if (isFenceLine) inFence = true
+	}
+
+	flush()
+	return paragraphs
 }
 
 /** Splits text into tokens that join back to it, each word carrying the whitespace before it. */
@@ -149,14 +200,25 @@ export function isWebUrl(url: string): boolean {
 function wordEndsAfter(text: string, from: number): number[] {
 	const wordEnd = /\S+(?=\s)/g
 	wordEnd.lastIndex = from
+	const ends: number[] = []
 
-	return Array.from(
-		text.matchAll(wordEnd),
-		(match) => match.index + match[0].length
-	)
+	for (
+		let match = wordEnd.exec(text);
+		match !== null;
+		match = wordEnd.exec(text)
+	) {
+		ends.push(match.index + match[0].length)
+	}
+
+	return ends
 }
 
 function trimIncompleteLink(text: string): string {
+	// Never strip `[` inside an unclosed fenced code block (e.g. `arr[0`).
+	if (countOccurrences(text, CODE_FENCE) % 2 === 1) {
+		return text
+	}
+
 	const withUrl = /!?\[([^\]]*)\]\([^)]*$/.exec(text)
 
 	if (withUrl) {
@@ -179,7 +241,9 @@ function closeOpenMarkers(text: string): string {
 		return `${text}\n${CODE_FENCE}`
 	}
 
-	const outsideFences = text.replaceAll(CODE_FENCE, '')
+	// Remove closed fenced code blocks completely (not just their delimiters),
+	// so backticks or asterisks inside code examples never trigger stray closers.
+	const outsideFences = text.replace(/```[\s\S]*?```/g, '')
 	const inlineCode = countOccurrences(outsideFences, '`') % 2 === 1 ? '`' : ''
 	// Emphasis never crosses a blank line, so only the last paragraph can
 	// leave any open; an asterisk between spaces is a sign, not a marker.

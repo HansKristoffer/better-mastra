@@ -77,6 +77,18 @@ describe('useChatSession', () => {
 		])
 		expect(result.current.send).toBe(send)
 	})
+
+	test('renders cleanly under React SSR without throwing for missing getServerSnapshot', () => {
+		const session = createChatSession({
+			threadId: 'thread-ssr',
+			transport: { api: 'https://api.test/chat' }
+		})
+		function View() {
+			const state = useChatSession(session)
+			return createElement('span', null, state.turn.kind)
+		}
+		expect(renderToStaticMarkup(createElement(View))).toBe('<span>idle</span>')
+	})
 })
 
 describe('useScreenContext', () => {

@@ -54,6 +54,10 @@ export function useDictation(options: UseDictationOptions) {
 	latest.current = options
 
 	const stop = useCallback(() => {
+		if (starting.current) {
+			starting.current.abort()
+			return
+		}
 		if (session.current) {
 			setPhase('finishing')
 			void session.current.stop()
@@ -95,9 +99,10 @@ export function useDictation(options: UseDictationOptions) {
 
 				latest.current.onEnd?.(end)
 				setPhase('idle')
-				setNotice(end.kind === 'failed' ? 'unavailable' : undefined)
+				const failedEmpty = end.kind === 'failed' && end.text === ''
+				setNotice(failedEmpty ? 'unavailable' : undefined)
 
-				if (end.kind === 'failed') latest.current.onNotice?.('unavailable')
+				if (failedEmpty) latest.current.onNotice?.('unavailable')
 			}
 		})
 		starting.current = undefined

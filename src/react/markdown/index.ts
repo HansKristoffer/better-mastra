@@ -15,6 +15,7 @@ import {
 	type ReactNode,
 	useEffect,
 	useMemo,
+	useRef,
 	useState
 } from 'react'
 import {
@@ -135,10 +136,13 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
 	const shown = useWordReveal(text, streaming)
 	const source = streaming ? trimIncompleteMarkdown(shown) : shown
 	const fadeIn = streaming && !reducedMotion
+	const onLinkPressRef = useRef(onLinkPress)
+	onLinkPressRef.current = onLinkPress
 	const opensLink = useMemo(() => {
 		const isSafe = safeLinks === 'web' ? isWebUrl : isSafeUrl
-		return (url: string) => isSafe(url) && (onLinkPress?.(url) ?? true)
-	}, [onLinkPress, safeLinks])
+		return (url: string) =>
+			isSafe(url) && (onLinkPressRef.current?.(url) ?? true)
+	}, [safeLinks])
 
 	return createElement(
 		View,
@@ -158,6 +162,43 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
 	)
 })
 
+interface MarkdownParagraphProps {
+	readonly source: string
+	readonly style: MarkdownStyles | undefined
+	readonly fadeIn: boolean
+	readonly onLinkPress: (url: string) => boolean
+	readonly rules: RenderRules | undefined
+	readonly markdownit: MarkdownProps['markdownit'] | undefined
+}
+
+function sameParagraphProps(
+	prev: MarkdownParagraphProps,
+	next: MarkdownParagraphProps
+): boolean {
+	if (
+		prev.source !== next.source ||
+		prev.style !== next.style ||
+		prev.onLinkPress !== next.onLinkPress ||
+		prev.rules !== next.rules ||
+		prev.markdownit !== next.markdownit
+	) {
+		return false
+	}
+
+	if (prev.fadeIn === next.fadeIn) {
+		return true
+	}
+
+	// Keep already-fading paragraphs mounted without re-parsing when streaming ends,
+	// unless the app passed custom `text` or `body` rules that fade temporarily replaced.
+	return (
+		prev.fadeIn &&
+		!next.fadeIn &&
+		next.rules?.text === undefined &&
+		next.rules?.body === undefined
+	)
+}
+
 const MarkdownParagraph = memo(function MarkdownParagraph({
 	source,
 	style,
@@ -165,14 +206,7 @@ const MarkdownParagraph = memo(function MarkdownParagraph({
 	onLinkPress,
 	rules: appRules,
 	markdownit
-}: {
-	readonly source: string
-	readonly style: MarkdownStyles | undefined
-	readonly fadeIn: boolean
-	readonly onLinkPress: (url: string) => boolean
-	readonly rules: RenderRules | undefined
-	readonly markdownit: MarkdownProps['markdownit'] | undefined
-}): ReactNode {
+}: MarkdownParagraphProps): ReactNode {
 	// A paragraph on screen before the fade starts has been read; one mounted
 	// while it runs fades from its first word.
 	const [pass] = useState(() => createFadePass({ settled: !fadeIn }))
@@ -180,6 +214,8 @@ const MarkdownParagraph = memo(function MarkdownParagraph({
 		() => ({ ...appRules, ...(fadeIn ? fadeRules(pass) : NO_IMAGES) }),
 		[appRules, fadeIn, pass]
 	)
+	// Reset before each render so an aborted concurrent or StrictMode pass never shifts word offsets.
+	pass.words = 0
 
 	return createElement(
 		Markdown,
@@ -193,7 +229,7 @@ const MarkdownParagraph = memo(function MarkdownParagraph({
 		},
 		source
 	)
-})
+}, sameParagraphProps)
 
 function FadingText({
 	tokens,
@@ -287,11 +323,39 @@ function FadingWord({
 
 // FUNCTIONS
 
-/** An `rgb()` or `rgba()` colour at the given opacity; any other format is returned unchanged. */
+/** An `rgb()`, `rgba()`, or `#hex` colour scaled by the given opacity; any other format is returned unchanged. */
 export function withAlpha(color: string, alpha: number): string {
-	const rgb = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/.exec(color)
+	const rgb =
+		/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/.exec(
+			color.trim()
+		)
 
-	return rgb ? `rgba(${rgb[1]}, ${rgb[2]}, ${rgb[3]}, ${alpha})` : color
+	if (rgb) {
+		const baseAlpha = rgb[4] === undefined ? 1 : Number(rgb[4])
+		const combined = Number.isFinite(baseAlpha) ? baseAlpha * alpha : alpha
+		return `rgba(${rgb[1]}, ${rgb[2]}, ${rgb[3]}, ${combined})`
+	}
+
+	const hex = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(
+		color.trim()
+	)
+
+	if (!hex) {
+		return color
+	}
+
+	const raw = hex[1]!
+	const expanded =
+		raw.length === 3 || raw.length === 4
+			? [...raw].map((ch) => ch + ch).join('')
+			: raw
+	const r = Number.parseInt(expanded.slice(0, 2), 16)
+	const g = Number.parseInt(expanded.slice(2, 4), 16)
+	const b = Number.parseInt(expanded.slice(4, 6), 16)
+	const baseAlpha =
+		expanded.length === 8 ? Number.parseInt(expanded.slice(6, 8), 16) / 255 : 1
+
+	return `rgba(${r}, ${g}, ${b}, ${baseAlpha * alpha})`
 }
 
 function createFadePass({ settled }: { readonly settled: boolean }): FadePass {

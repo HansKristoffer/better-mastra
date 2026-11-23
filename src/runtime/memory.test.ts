@@ -147,12 +147,13 @@ describe('createMemory', () => {
 				KEY.resourceId
 			)
 			const config = record?.config as {
-				observation: { messageTokens: number }
+				observation: { messageTokens: number; bufferOnIdle?: boolean }
 				reflection: { observationTokens: number }
 			}
 
 			// The observation preset stays whatever the reflection is set to
 			expect(config.observation.messageTokens).toBe(15_000)
+			expect(config.observation.bufferOnIdle).toBe(true)
 
 			return config.reflection.observationTokens
 		}

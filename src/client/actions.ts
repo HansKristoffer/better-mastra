@@ -15,7 +15,14 @@ import {
 } from 'hanzio'
 import { z } from 'zod'
 
+import {
+	CLIENT_ACTION_DISPATCHER_TOOL,
+	type ClientToolDef
+} from '../protocol/index.js'
+import { compactJsonSchema } from '../protocol/jsonSchema.js'
 import { currentUserTurn } from './messages.js'
+
+export { CLIENT_ACTION_DISPATCHER_TOOL, type ClientToolDef }
 
 // TYPES
 
@@ -50,14 +57,6 @@ export interface ClientAction<TName extends string = string> {
 		input: unknown,
 		context: ClientActionContext
 	) => Promise<unknown>
-}
-
-/** A client action as a request carries it, for the server to offer the model. */
-export interface ClientToolDef {
-	readonly name: string
-	readonly description: string
-	readonly jsonSchema: unknown
-	readonly requiresApproval?: boolean
 }
 
 /** A tool call the stream handed to the client. */
@@ -230,17 +229,34 @@ export function normalizeModelNulls(
 	)
 }
 
-/** The definitions a request carries, for the server to offer the model as client tools. */
+/** What the model reads when a queued client action's screen closed before it could run. */
+export const CLIENT_ACTION_UNAVAILABLE =
+	'That page action is no longer available because the user navigated away from the screen.'
+
+const clientToolSchemaCache = new WeakMap<z.ZodType, Record<string, unknown>>()
+
+function toCompactClientJsonSchema(schema: z.ZodType): Record<string, unknown> {
+	let cached = clientToolSchemaCache.get(schema)
+	if (!cached) {
+		cached = compactJsonSchema(
+			z.toJSONSchema(schema, {
+				io: 'input',
+				unrepresentable: 'any'
+			}) as Record<string, unknown>
+		)
+		clientToolSchemaCache.set(schema, cached)
+	}
+	return cached
+}
+
+/** The definitions a request carries, for the server to offer the model as client tools. Memoized per schema and compacted. */
 export function toClientToolDefs(
 	actions: readonly ClientAction[]
 ): ClientToolDef[] {
 	return actions.map((action) => ({
 		name: action.name,
 		description: action.description,
-		jsonSchema: z.toJSONSchema(action.inputSchema, {
-			io: 'input',
-			unrepresentable: 'any'
-		}),
+		jsonSchema: toCompactClientJsonSchema(action.inputSchema),
 		...(action.requiresApproval === undefined
 			? {}
 			: { requiresApproval: action.requiresApproval })
@@ -248,9 +264,10 @@ export function toClientToolDefs(
 }
 
 /**
- * Carries out the client action a tool call names and posts its result on the
- * chat; null when no action has that name (a server tool: its result arrives
- * on the stream). A call the user turn already made with the same input
+ * Carries out the client action a tool call names (including calls wrapped in
+ * `CLIENT_ACTION_DISPATCHER_TOOL` `{ action, input }`) and posts its result on
+ * the chat; null when no action has that name (a server tool: its result
+ * arrives on the stream). A call the user turn already made with the same input
  * (`null`s aside) is refused instead of carried out again, unless the action
  * has its own `onRepeat`.
  *
@@ -260,13 +277,49 @@ export function toClientToolDefs(
 export function runClientAction(
 	chat: ClientActionChat,
 	actions: readonly ClientAction[],
-	toolCall: ClientToolCall
+	toolCall: ClientToolCall,
+	options: { readonly dispatcherTool?: string | false } = {}
 ): Promise<void> | null {
-	const action = actions.find(
-		(candidate) => candidate.name === toolCall.toolName
-	)
+	const dispatcher =
+		options.dispatcherTool === false
+			? undefined
+			: (options.dispatcherTool ?? CLIENT_ACTION_DISPATCHER_TOOL)
+	const isDispatched =
+		dispatcher !== undefined && toolCall.toolName === dispatcher
+
+	let targetName = toolCall.toolName
+	let targetInput = toolCall.input
+	if (isDispatched) {
+		if (
+			!isRecord(toolCall.input) ||
+			typeof toolCall.input.action !== 'string'
+		) {
+			return Promise.resolve(
+				chat.addToolOutput({
+					state: 'output-error',
+					tool: toolCall.toolName,
+					toolCallId: toolCall.toolCallId,
+					errorText: CLIENT_ACTION_INVALID_INPUT
+				})
+			)
+		}
+		targetName = toolCall.input.action
+		targetInput = toolCall.input.input ?? {}
+	}
+
+	const action = actions.find((candidate) => candidate.name === targetName)
 
 	if (action === undefined) {
+		if (isDispatched) {
+			return Promise.resolve(
+				chat.addToolOutput({
+					state: 'output-error',
+					tool: toolCall.toolName,
+					toolCallId: toolCall.toolCallId,
+					errorText: CLIENT_ACTION_UNAVAILABLE
+				})
+			)
+		}
 		return null
 	}
 
@@ -285,7 +338,13 @@ export function runClientAction(
 	}
 
 	return (async () => {
-		const repeated = isRepeatInTurn(chat.messages, action, toolCall)
+		const repeated = isRepeatInTurn(
+			chat.messages,
+			action,
+			toolCall,
+			targetInput,
+			dispatcher
+		)
 
 		if (repeated && action.onRepeat === undefined) {
 			await fail(CLIENT_ACTION_REPEATED)
@@ -295,8 +354,8 @@ export function runClientAction(
 
 		try {
 			const output = await (repeated && action.onRepeat
-				? action.onRepeat(toolCall.input, context)
-				: action.run(toolCall.input, context))
+				? action.onRepeat(targetInput, context)
+				: action.run(targetInput, context))
 
 			await chat.addToolOutput({
 				tool: toolCall.toolName,
@@ -316,19 +375,35 @@ export function runClientAction(
 function isRepeatInTurn(
 	messages: readonly UIMessage[],
 	action: ClientAction,
-	toolCall: ClientToolCall
+	toolCall: ClientToolCall,
+	targetInput: unknown,
+	dispatcher: string | undefined
 ): boolean {
-	const key = callKey(action, toolCall.input)
+	const key = callKey(action, targetInput)
 
 	return currentUserTurn(messages).some((message) =>
-		message.parts.some(
-			(part) =>
-				isToolUIPart(part) &&
-				part.toolCallId !== toolCall.toolCallId &&
-				part.state === 'output-available' &&
-				getToolName(part) === action.name &&
-				callKey(action, part.input) === key
-		)
+		message.parts.some((part) => {
+			if (
+				!isToolUIPart(part) ||
+				part.toolCallId === toolCall.toolCallId ||
+				part.state !== 'output-available'
+			) {
+				return false
+			}
+			const partName = getToolName(part)
+			if (partName === action.name) {
+				return callKey(action, part.input) === key
+			}
+			if (
+				dispatcher !== undefined &&
+				partName === dispatcher &&
+				isRecord(part.input) &&
+				part.input.action === action.name
+			) {
+				return callKey(action, part.input.input ?? {}) === key
+			}
+			return false
+		})
 	)
 }
 

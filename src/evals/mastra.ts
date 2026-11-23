@@ -146,6 +146,13 @@ function toolCallsOf(messages: readonly MastraDBMessage[]) {
 	)
 }
 
+/** Every tool call of the run's messages in chronological order, including failed and waiting calls. */
+export function readRunToolCalls(
+	output: readonly MastraDBMessage[]
+): RunToolResult[] {
+	return toolCallsOf(uniqueMessages(output)).map(({ result }) => result)
+}
+
 /**
  * What scorers read from a run: the answers in order, the tools called
  * (failed and waiting calls included), each successful tool result with the
@@ -362,11 +369,42 @@ export async function findOrCreateDataset(
 	}
 }
 
-/** Every item of the dataset's latest version. */
-export async function listDatasetItems(dataset: Dataset) {
+const DATASET_PAGE_SIZE = 100
+const MAX_DATASET_PAGES = 1_000
+
+/** Every item of the dataset's latest version, paginating through all pages. */
+export async function listDatasetItems(
+	dataset: Dataset
+): Promise<DatasetItem[]> {
 	const { version } = await dataset.getDetails()
-	const items = await dataset.listItems({ version })
-	return Array.isArray(items) ? items : items.items
+	const first = await dataset.listItems({
+		version,
+		page: 0,
+		perPage: DATASET_PAGE_SIZE
+	})
+	if (Array.isArray(first)) return first
+
+	const all = [...first.items]
+	let page = 0
+	let hasMore = first.pagination?.hasMore === true
+
+	while (hasMore && page < MAX_DATASET_PAGES) {
+		page += 1
+		const next = await dataset.listItems({
+			version,
+			page,
+			perPage: DATASET_PAGE_SIZE
+		})
+		if (Array.isArray(next)) {
+			all.push(...next)
+			break
+		}
+		if (next.items.length === 0) break
+		all.push(...next.items)
+		hasMore = next.pagination?.hasMore === true
+	}
+
+	return all
 }
 
 /** Keys sorted, because Postgres hands JSON back reordered. */
