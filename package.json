@@ -124,10 +124,13 @@
 		"access": "public"
 	},
 	"scripts": {
+		"prepare": "husky",
 		"build": "bun scripts/build.ts",
 		"test": "bun test",
-		"typecheck": "bun check",
+		"test:integration": "bun scripts/test-integration.ts",
+		"typecheck": "bun check --no-script",
 		"fmt": "bun fmt --no-script '**/*.ts'",
+		"check": "bun run lint",
 		"lint": "bun run typecheck && bun fmt --no-script --check '**/*.ts' && biome check",
 		"lint:write": "bun run typecheck && biome check --write && bun run fmt",
 		"attw": "attw --pack . --profile esm-only",
@@ -258,6 +261,7 @@
 		"@upstash/redis": "^1.39.0",
 		"ai": "^7.0.143",
 		"hono": "^4.12.32",
+		"husky": "^9.1.7",
 		"ioredis": "^5.11.1",
 		"pg": "^8.23.1",
 		"publint": "^0.3.12",
