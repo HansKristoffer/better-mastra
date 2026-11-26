@@ -78,6 +78,20 @@ export interface ChatTurnPlan {
 	readonly maxSteps: number
 	readonly maxOutputTokens?: number
 	/**
+	 * Stops the run before its next model call once what it spent passes
+	 * `maxUsd`: the outcome is `budget_stop`, with the tripwire reason
+	 * `cost_budget`. `cost` prices the steps so far, such as
+	 * `({ steps, usage }) => llms.cost({ modelId, steps, usage }).then((c) => c.usd)`;
+	 * null (an unpriced model) never stops the run.
+	 */
+	readonly costBudget?: {
+		readonly maxUsd: number
+		cost(spent: {
+			readonly steps: readonly unknown[]
+			readonly usage: TurnStepUsage
+		}): Promise<number | null> | number | null
+	}
+	/**
 	 * Overrides the agent's default tool-call concurrency for this turn.
 	 * `createChatAgent` defaults to `{ limit: 10, strategy: 'called' }` so
 	 * parallel read-tool batches run concurrently even when approval/suspend
@@ -117,6 +131,13 @@ export interface ChatTurnPlan {
 	 * keep the unfinished end of a delta back in `state` until the next one.
 	 */
 	readonly outputProcessors?: readonly OutputProcessorOrWorkflow[]
+}
+
+/** The tokens of a run's steps so far, added up, in the shape `estimateModelCostUsd` and `llms.cost` take. */
+export interface TurnStepUsage {
+	readonly inputTokens: number | null
+	readonly outputTokens: number | null
+	readonly cachedInputTokens: number | null
 }
 
 /** The minimum chat body: the AI SDK's messages, and a suspended run to resume. */

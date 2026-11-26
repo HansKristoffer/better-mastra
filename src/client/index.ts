@@ -20,6 +20,7 @@ export {
 	type ChatErrors,
 	chatErrorCodes,
 	chatErrorStatuses,
+	COST_BUDGET_STOP_REASON,
 	defineChatErrors,
 	MESSAGE_DECLINED_PART,
 	type ScreeningVerdictKind,

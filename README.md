@@ -203,6 +203,34 @@ runChatTurn(request, {
 - **A screener that fails** or takes longer than `timeoutMs` (10 s) lets the message through (`onError: 'decline'` turns it away) and is logged with stage `screening`.
 - **A thread's model tier.** `prepare` gets the verdict as `screening`, a promise. On a new thread, await it to start the thread on the tier the screener picked and store it in `threadMetadata`, as `defineModelArms` stores an arm; later turns read the tier from the thread and never wait. The effort can still change per turn.
 
+### Spending caps
+
+`budget_stop` used to mean one thing: the tool-call budget. A plan's `costBudget` adds a cap in dollars per turn. Before each model call after the first, the turn prices the steps so far and stops the run once they reach `maxUsd`; the outcome is `budget_stop` and the `data-tripwire` part's reason `cost_budget` (`COST_BUDGET_STOP_REASON`), with what was spent:
+
+```ts
+plan: {
+	// …
+	costBudget: {
+		maxUsd: 0.25,
+		cost: async ({ steps, usage }) => (await llms.cost({ modelId, steps, usage })).usd // null (no price) never stops
+	}
+}
+```
+
+Per user and period, `createSpendLimit` from `better-mastra/usage` adds each turn's cost to every window and refuses the next request with `usage_limited` and `Retry-After` while any window is full. The turn that crosses a limit finishes:
+
+```ts
+const spend = createSpendLimit({
+	runScript, secret: process.env.AUTH_SECRET, keyPrefix: 'app:spend',
+	windows: [{ name: 'day', seconds: 86_400, limitUsd: 2 }, { name: 'month', seconds: 2_592_000, limitUsd: 20 }]
+})
+
+admit: async (scope) => admissionRefusal(await spend.admit(scope.userId), { whenUnavailable: 'admit' }),
+sinks: {
+	usage: async (event) => spend.record(event.scope.userId, (await llms.cost({ modelId: event.modelId, steps: event.steps, usage: readStreamTextUsage(event.totalUsage) })).usd)
+}
+```
+
 The plan splits instructions three ways so the provider's cache keeps hitting: `instructions` (stable, cached), `perRequestInstructions` (per thread), and `signal` (per request, sent after the user's message and never stored).
 
 `instructions` is a string, or a list of stable blocks that each become a system message ending in a cache breakpoint. Put what every user shares first and what one workspace shares after it, and the first block and the tools are read from the provider's cache across users:
@@ -372,6 +400,8 @@ defineTool({
 - A dataset holds at most `maxRows` (5,000) rows; more is refused with a sentence that asks the model to narrow its query. It lives as long as its thread (`deleteThreadEverywhere`, `sweepOldThreads` and `createThreadHandlers` with `records`), or `ttlMs` with `records.deleteExpired(new Date())` on a schedule.
 - On the client, `createDatasetStore({ api, fetch })` takes the streamed parts (`onData`) and loads the rest by id; `useDataset(datasets, threadId, datasetId)` from `/react` and `/vue` gives `dataset` (`columns`, `rows`), `missing` and `reload`. How a table or chart looks is yours.
 - In a dry run the datasets stay in memory on the request context, and display tools still find them.
+
+Text that users or third parties wrote (an email, a document, a customer's note) can tell the model what to do. `untrustedOutput: true` on a tool hands the model its result inside a fence named after a hash of the text: the text cannot close the fence or open a fake one, since a closing tag inside it would have to contain the hash of the text that contains it. The same text fences the same way every time, so the prompt cache keeps hitting. Put `UNTRUSTED_TEXT_INSTRUCTION` in the stable instructions once, and use `fenceUntrusted(text, { source })` for untrusted text you put in the prompt yourself (`perRequestInstructions`, `signal`).
 
 Whatever `execute` throws is what the model, the stored thread and the client read. With `maskErrors: true` (or `{ sentence, onError }`), only a `ToolRefusal`'s message and an abort get through; any other error goes to `onError` and the model reads one fixed sentence:
 

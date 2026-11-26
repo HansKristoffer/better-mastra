@@ -24,6 +24,7 @@ import type { z } from 'zod'
 
 import { compactTool } from '../tools/toolInputSchema.js'
 import {
+	CostBudgetStop,
 	RetryBeforeAnswerText,
 	ScreeningGate,
 	ToolCallBudgetStop,
@@ -138,6 +139,7 @@ export function createChatAgent(options: CreateChatAgentOptions): Agent {
 	)
 	const staticProcessors: InputProcessorOrWorkflow[] = [
 		new ToolCallBudgetStop(options.toolCallsPerStep),
+		new CostBudgetStop(),
 		new ScreeningGate(),
 		new TurnSignals(),
 		...(options.processors ?? [])

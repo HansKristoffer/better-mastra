@@ -106,6 +106,12 @@ To adopt screening, see the README's "Message screening": `createMessageScreener
 
 **Check afterwards.** A dashboard of outcomes or refusal codes has the new labels. A declined message is not stored: a client that reloads the thread after it no longer shows it, which is intended.
 
+### Worth adopting
+
+- **A per-turn cost cap.** `plan.costBudget: { maxUsd, cost }` stops a run before its next model call once its spend reaches the cap. It reports as the existing `budget_stop` outcome; tell it apart from the tool-call budget by the tripwire reason `cost_budget`.
+- **A per-period spend limit.** `createSpendLimit` from `better-mastra/usage`, wired into `admit` and `sinks.usage` (README, "Spending caps").
+- **Fenced untrusted text.** `untrustedOutput: true` on tools that read email, documents or anything a customer typed, plus `UNTRUSTED_TEXT_INSTRUCTION` once in the stable instructions. The fenced results are a new prompt prefix: the provider's cache is written once more after the deploy.
+
 ## 0.11.0
 
 No export was removed or renamed, and no existing union requires new switch cases. Several defaults changed for better prompt-cache hit rates, latency and safety, and new helpers remove boilerplate from apps.

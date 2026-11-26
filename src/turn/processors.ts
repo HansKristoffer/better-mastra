@@ -18,11 +18,14 @@ import {
 } from '@mastra/core/processors'
 import { must } from 'hanzio'
 
-import { TOOL_CALL_BUDGET_STOP_REASON } from '../protocol/index.js'
+import {
+	COST_BUDGET_STOP_REASON,
+	TOOL_CALL_BUDGET_STOP_REASON
+} from '../protocol/index.js'
 import { passTurnGate, ScreeningDeclined } from './screening.js'
-import { findTurnPlan } from './types.js'
+import { findTurnPlan, type TurnStepUsage } from './types.js'
 
-export { TOOL_CALL_BUDGET_STOP_REASON }
+export { COST_BUDGET_STOP_REASON, TOOL_CALL_BUDGET_STOP_REASON }
 
 /** Sent on the last step, because a tool call on the last step ends the turn with an empty reply. */
 export const LAST_STEP_SIGNAL =
@@ -53,6 +56,57 @@ export class ToolCallBudgetStop implements Processor<'tool-call-budget'> {
 		}
 
 		return messageList
+	}
+}
+
+/**
+ * Stops the run before a model call once the steps so far cost more than
+ * the plan's `costBudget.maxUsd`. The first call always runs: a run that has
+ * spent nothing is under any cap. The app receives a `data-tripwire` part
+ * with the reason and what was spent.
+ */
+export class CostBudgetStop implements Processor<'cost-budget'> {
+	readonly id = 'cost-budget'
+
+	async processInputStep({
+		stepNumber,
+		steps,
+		requestContext,
+		abort
+	}: ProcessInputStepArgs): Promise<undefined> {
+		const budget = requestContext && findTurnPlan(requestContext)?.costBudget
+
+		if (!budget || stepNumber === 0) return undefined
+
+		const spentUsd = await budget.cost({ steps, usage: addUpUsage(steps) })
+
+		if (spentUsd !== null && spentUsd >= budget.maxUsd) {
+			abort(COST_BUDGET_STOP_REASON, {
+				metadata: { spentUsd, maxUsd: budget.maxUsd }
+			})
+		}
+
+		return undefined
+	}
+}
+
+/** The tokens of the steps, added up; null for a count no step reported. */
+export function addUpUsage(steps: readonly unknown[]): TurnStepUsage {
+	const total = (key: 'inputTokens' | 'outputTokens' | 'cachedInputTokens') => {
+		let sum: number | null = null
+
+		for (const step of steps) {
+			const value = (step as { usage?: Record<string, unknown> }).usage?.[key]
+			if (typeof value === 'number') sum = (sum ?? 0) + value
+		}
+
+		return sum
+	}
+
+	return {
+		inputTokens: total('inputTokens'),
+		outputTokens: total('outputTokens'),
+		cachedInputTokens: total('cachedInputTokens')
 	}
 }
 

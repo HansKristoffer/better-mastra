@@ -92,6 +92,7 @@ export {
 	isDryRunResult,
 	markDryRun
 } from './dryRun.js'
+export { fenceUntrusted, UNTRUSTED_TEXT_INSTRUCTION } from './fence.js'
 export {
 	buildToolManifest,
 	defineToolManifest,

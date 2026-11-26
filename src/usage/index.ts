@@ -35,3 +35,10 @@ export {
 	createAbuseStrikes,
 	screeningStrikes
 } from './strikes.js'
+export {
+	createSpendLimit,
+	SPEND_ADMISSION_SCRIPT,
+	SPEND_RECORD_SCRIPT,
+	type SpendLimit,
+	type SpendWindow
+} from './spend.js'

@@ -69,6 +69,9 @@ export const APPROVAL_ID_SEPARATOR = '::'
 /** The tripwire reason of an answer the tool call budget stopped (`readStopReason`). */
 export const TOOL_CALL_BUDGET_STOP_REASON = 'tool_call_budget'
 
+/** The tripwire reason of an answer stopped because its spend passed the plan's `costBudget.maxUsd`. */
+export const COST_BUDGET_STOP_REASON = 'cost_budget'
+
 // REFUSALS
 
 /** The fixed codes every refusal carries. */

@@ -23,6 +23,7 @@ import {
 } from './changePlans.js'
 import { type DatasetToolContext, showDatasets } from './datasets.js'
 import { dryRunResult, isDryRun, isDryRunResult } from './dryRun.js'
+import { fenceUntrusted } from './fence.js'
 import { ToolRefusal } from './refusal.js'
 import { compactToolInputSchema, withHiddenInputs } from './toolInputSchema.js'
 
@@ -94,6 +95,14 @@ export interface ToolDefinition<
 	 * payloads are truncated with a note asking the model to narrow its query.
 	 */
 	readonly maxModelOutputChars?: number
+	/**
+	 * The result holds text users or third parties wrote (an email, a
+	 * document, a customer's note): the model reads it inside a fence it
+	 * cannot be talked out of (`fenceUntrusted`). Add
+	 * `UNTRUSTED_TEXT_INSTRUCTION` to the stable instructions once. `true`
+	 * names the tool as the source.
+	 */
+	readonly untrustedOutput?: boolean | { readonly source: string }
 	/**
 	 * For `tier: 'read'` tools: memoizes identical calls within the same turn's
 	 * `requestContext` so repeated lookups avoid duplicate DB/API round trips.
@@ -326,10 +335,50 @@ export function defineTool<
 			? compactToolInputSchema(inputSchemaWithHidden)
 			: inputSchemaWithHidden
 
+	const fenceSource = definition.untrustedOutput
+		? definition.untrustedOutput === true
+			? undefined
+			: definition.untrustedOutput.source
+		: null
 	const hasModelOutputHook =
+		fenceSource !== null ||
 		plan !== undefined ||
 		toModelOutput !== undefined ||
 		(maxModelOutputChars !== undefined && maxModelOutputChars > 0)
+
+	/** What the model reads of a result: the compact text, clipped to its cap. */
+	const modelPartOf = (output: unknown): unknown => {
+		if (isDryRunResult(output)) {
+			return { type: 'text', value: JSON.stringify(output) }
+		}
+
+		const raw = toModelOutput
+			? toModelOutput(output as never)
+			: plan && isPlanStepOutput(output)
+				? planStepSentence(output.changePlan.step)
+				: output
+		if (maxModelOutputChars !== undefined && maxModelOutputChars > 0) {
+			const payload =
+				typeof raw === 'object' &&
+				raw !== null &&
+				'type' in raw &&
+				(raw as { type?: unknown }).type === 'text' &&
+				'value' in raw &&
+				typeof (raw as { value?: unknown }).value === 'string'
+					? (raw as { value: string }).value
+					: raw
+			const clipped = truncateModelOutput(payload, maxModelOutputChars)
+			if (clipped) return clipped
+		}
+
+		if (toModelOutput) {
+			return typeof raw === 'string' ? { type: 'text', value: raw } : raw
+		}
+
+		return typeof raw === 'string'
+			? { type: 'text', value: raw }
+			: { type: 'json', value: raw }
+	}
 
 	const tool = createTool({
 		...(base as CreateToolOptions),
@@ -355,36 +404,21 @@ export function defineTool<
 		}),
 		...(hasModelOutputHook && {
 			toModelOutput: (output: unknown) => {
-				if (isDryRunResult(output)) {
-					return { type: 'text', value: JSON.stringify(output) }
-				}
+				const modelOutput = modelPartOf(output)
 
-				const raw = toModelOutput
-					? toModelOutput(output as never)
-					: plan && isPlanStepOutput(output)
-						? planStepSentence(output.changePlan.step)
-						: output
-				if (maxModelOutputChars !== undefined && maxModelOutputChars > 0) {
-					const payload =
-						typeof raw === 'object' &&
-						raw !== null &&
-						'type' in raw &&
-						(raw as { type?: unknown }).type === 'text' &&
-						'value' in raw &&
-						typeof (raw as { value?: unknown }).value === 'string'
-							? (raw as { value: string }).value
-							: raw
-					const clipped = truncateModelOutput(payload, maxModelOutputChars)
-					if (clipped) return clipped
-				}
+				// The dry-run marker is ours, not untrusted text.
+				if (fenceSource === null || isDryRunResult(output)) return modelOutput
 
-				if (toModelOutput) {
-					return typeof raw === 'string' ? { type: 'text', value: raw } : raw
-				}
+				const part = modelOutput as { type?: string; value?: unknown }
+				const text =
+					part.type === 'text' && typeof part.value === 'string'
+						? part.value
+						: (JSON.stringify(part.value) ?? '')
 
-				return typeof raw === 'string'
-					? { type: 'text', value: raw }
-					: { type: 'json', value: raw }
+				return {
+					type: 'text',
+					value: fenceUntrusted(text, { source: fenceSource ?? base.id })
+				}
 			}
 		})
 	} as CreateToolOptions) as AnyTool

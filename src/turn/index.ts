@@ -45,6 +45,9 @@ export {
 	screeningVerdicts
 } from './screening.js'
 export {
+	addUpUsage,
+	COST_BUDGET_STOP_REASON,
+	CostBudgetStop,
 	LAST_STEP_SIGNAL,
 	RetryBeforeAnswerText,
 	ScreeningGate,
@@ -139,5 +142,6 @@ export {
 	type ProviderOptions,
 	rememberTurnPlan,
 	stableInstructionBlocks,
-	type ThreadKey
+	type ThreadKey,
+	type TurnStepUsage
 } from './types.js'
