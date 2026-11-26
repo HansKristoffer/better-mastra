@@ -23,6 +23,7 @@ import {
 	type PlanTool,
 	readChangePlan
 } from '../tools/changePlans.js'
+import { readTurnDataset } from '../tools/datasets.js'
 import type { ChatRecordStore } from '../tools/records.js'
 import { chatErrorResponse } from '../turn/errors.js'
 import { SSE_HEARTBEAT_MS, toChatStreamResponse } from '../turn/response.js'
@@ -86,6 +87,12 @@ export interface ChatRouteOptions<
 		) => void
 	}
 	/**
+	 * Adds `GET {path}/:threadId/datasets/:datasetId`, for the thread's owner
+	 * only (`ownsThread` is required): a dataset's rows by id, for a client
+	 * that shows a stored answer. `{ dataset }`, or 404.
+	 */
+	readonly datasets?: { readonly store: ChatRecordStore }
+	/**
 	 * The refusals the route answers itself, in the app's codes: a caller
 	 * without `auth` (`unauthenticated`), a body `parseBody` rejects
 	 * (`invalid_request`), a thread that is not the caller's on reconnect or
@@ -115,6 +122,10 @@ export function createChatRoute<
 
 	if (options.changePlans && !options.ownsThread) {
 		throw new Error('A chat route with change plans needs ownsThread.')
+	}
+
+	if (options.datasets && !options.ownsThread) {
+		throw new Error('A chat route with datasets needs ownsThread.')
 	}
 
 	app.post(options.path, async (c) => {
@@ -184,6 +195,28 @@ export function createChatRoute<
 
 	if (options.changePlans)
 		mountChangePlans(app, options.path, options.changePlans, owned)
+
+	const datasets = options.datasets
+
+	if (datasets) {
+		app.get(`${options.path}/:threadId/datasets/:datasetId`, async (c) => {
+			const { refusal, threadId, exists } = await owned(c)
+
+			if (refusal) return refusal
+
+			const dataset = exists
+				? await readTurnDataset({
+						store: datasets.store,
+						datasetId: c.req.param('datasetId') ?? '',
+						threadId
+					})
+				: null
+
+			return dataset
+				? c.json({ dataset }, 200, { 'Cache-Control': 'private, max-age=3600' })
+				: refuse('not_found')
+		})
+	}
 
 	if (!resumable) return app
 

@@ -34,6 +34,8 @@ import type {
 	ChangePlanStore,
 	ChatSession,
 	ChatSessionSnapshot,
+	DatasetState,
+	DatasetStore,
 	ChatSessions,
 	ChatSnapshot,
 	PendingChange,
@@ -511,5 +513,48 @@ export function useChangePlan(
 		failed: computed(() => state.value.failed),
 		confirm: () => store.confirm(toValue(threadId), toValue(planId)),
 		discard: () => store.discard(toValue(threadId), toValue(planId))
+	}
+}
+
+export interface DatasetRefs {
+	readonly state: ComputedRef<DatasetState>
+	readonly dataset: ComputedRef<DatasetState['dataset']>
+	readonly missing: ComputedRef<boolean>
+	readonly failed: ComputedRef<boolean>
+	readonly reload: () => Promise<void>
+}
+
+/**
+ * One dataset as refs, loaded when its ids are set unless the stream already
+ * brought it: the rows a display part names by id.
+ */
+export function useDataset(
+	store: DatasetStore,
+	threadId: MaybeRefOrGetter<string>,
+	datasetId: MaybeRefOrGetter<string>
+): DatasetRefs {
+	const state = shallowRef(store.get(toValue(datasetId)))
+	const unsubscribe = store.subscribe(() => {
+		state.value = store.get(toValue(datasetId))
+	})
+
+	watch(
+		() => [toValue(threadId), toValue(datasetId)] as const,
+		([thread, dataset]) => {
+			state.value = store.get(dataset)
+			void store.load(thread, dataset)
+		},
+		{ immediate: true }
+	)
+
+	if (getCurrentScope() !== undefined) onScopeDispose(unsubscribe)
+
+	return {
+		state: computed(() => state.value),
+		dataset: computed(() => state.value.dataset),
+		missing: computed(() => state.value.missing),
+		failed: computed(() => state.value.failed),
+		reload: () =>
+			store.load(toValue(threadId), toValue(datasetId), { force: true })
 	}
 }

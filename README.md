@@ -17,14 +17,14 @@ ESM only, Node 20+ or Bun. Every peer is optional and loaded only by the subpath
 | Import | What it gives you | Needs |
 | --- | --- | --- |
 | `better-mastra` | Memory preset, health check, ordered shutdown | `@mastra/core`, `@mastra/memory` |
-| `better-mastra/pg`, `better-mastra/libsql` | Mastra storage on Postgres or libSQL that survives dropped connections; the record store of change plans | `@mastra/pg` + `pg`, or `@mastra/libsql` |
+| `better-mastra/pg`, `better-mastra/libsql` | Mastra storage on Postgres or libSQL that survives dropped connections; the record store of change plans and turn datasets | `@mastra/pg` + `pg`, or `@mastra/libsql` |
 | `better-mastra/models` | Model registry (`route/model@effort` ids), prompt caching, OpenRouter batching, pricing | `ai`, `@ai-sdk/provider`, a provider SDK per route |
 | `better-mastra/openrouter` | One OpenRouter route, synchronous, for building models at import time | `@openrouter/ai-sdk-provider` |
 | `better-mastra/turn` | `runChatTurn`, the chat agent, request context, reply suggestions, thread handlers | `@mastra/core`, `@mastra/memory`, `@mastra/ai-sdk`, `ai`, `zod` |
 | `better-mastra/protocol` | The wire contract: part names, refusal codes, outcomes, `chatTurnBodySchema` | `zod` (`ai` types only); safe in a browser |
 | `better-mastra/hono` | The chat route (`POST`, stream, stop) and a local Mastra Studio mount | `hono` (Studio: `@mastra/hono`) |
 | `better-mastra/resumable` | Turns that keep running past a disconnect, reconnectable across replicas; a thread lock | a Redis client, or none |
-| `better-mastra/tools` | `defineTool`: a tool plus its tier, card and hidden inputs; change plans; deferred tools; dry runs | `@mastra/core`, `zod` |
+| `better-mastra/tools` | `defineTool`: a tool plus its tier, card and hidden inputs; change plans; turn datasets; deferred tools; dry runs | `@mastra/core`, `zod` |
 | `better-mastra/client` | Framework-free chat session: turns, approvals, client actions, resume, tool cards | `ai`, `zod` |
 | `better-mastra/react`, `better-mastra/vue` | Hooks/composables and `ToolParts` over a chat session | `ai`, `zod`, `react` or `vue` |
 | `better-mastra/react/markdown` | Streaming markdown for React Native, word by word with fade-in | `react-native`, `react-native-markdown-display` |
@@ -308,6 +308,40 @@ createChatRoute({
 - **Evals.** In a dry run (`markDryRun`) `propose` runs, since it only reads, and the plan stays on the request context: `readDryRunChangePlan(requestContext)` returns it, and nothing is stored.
 
 On the client, `createChangePlanStore({ api, fetch })` holds the plans; pass its `onData` to the session (`createChatSession({ onData: plans.onData })`). `readProposedChangePlans(message)` finds a message's plans in its tool results, live and stored alike; draw a card once the turn is no longer busy. `useChangePlan(plans, threadId, planId)` from `/react` and `/vue` gives the plan, what this window is doing with it (`phase`, `runningStep`), why it was turned away (`refusal`), and `confirm` and `discard`. `deleteThreadEverywhere`, `sweepOldThreads` and `createThreadHandlers` take `records` and delete a thread's plans with it; `records.deleteExpired(new Date())` removes plans past their `ttlMs` (7 days).
+
+### Turn datasets: numbers that never pass through the model
+
+A data tool registers its rows as a dataset of the thread and gives the model a handle: the id, the columns, a count and a summary you work out in code. The model never reads the rows. A display tool (a table, a chart, a report block) names the dataset by id; its rows reach the client from the store, so the numbers the user sees are the stored ones, never ones the model typed:
+
+```ts
+defineTool({
+	tool: {
+		id: 'revenue_by_month', description, inputSchema,
+		execute: async (input, context) => {
+			const rows = await revenue.byMonth(input)
+			return registerDataset(context, {
+				rows,
+				columns: [{ key: 'month' }, { key: 'revenue', label: 'Revenue', type: 'currency' }],
+				title: 'Revenue by month',
+				summary: `${rows.length} months, total ${formatTotal(rows)}` // what the model may talk about
+			})
+		}
+	},
+	tier: 'read'
+})
+
+defineTool({
+	tool: { id: 'show_chart', description: 'Shows a dataset as a chart.', inputSchema: z.object({ datasetId: z.string(), kind: z.enum(['bar', 'line']) }), execute: async () => ({ shown: true }) },
+	tier: 'read',
+	datasets: (input) => [input.datasetId]
+})
+```
+
+- Pass the store to the turn and the route: `runChatTurn(request, { datasets: { store: records } })` and `createChatRoute({ ownsThread, datasets: { store: records } })`. It is the same `ChatRecordStore` change plans use.
+- Before a display tool runs, each id must be a dataset of this thread, or the model reads a refusal: it can show only rows a tool registered in this conversation. The rows then stream as a transient `data-turn-dataset` part. `GET {path}/:threadId/datasets/:datasetId` serves them for a stored answer.
+- A dataset holds at most `maxRows` (5,000) rows; more is refused with a sentence that asks the model to narrow its query. It lives as long as its thread (`deleteThreadEverywhere`, `sweepOldThreads` and `createThreadHandlers` with `records`), or `ttlMs` with `records.deleteExpired(new Date())` on a schedule.
+- On the client, `createDatasetStore({ api, fetch })` takes the streamed parts (`onData`) and loads the rest by id; `useDataset(datasets, threadId, datasetId)` from `/react` and `/vue` gives `dataset` (`columns`, `rows`), `missing` and `reload`. How a table or chart looks is yours.
+- In a dry run the datasets stay in memory on the request context, and display tools still find them.
 
 Whatever `execute` throws is what the model, the stored thread and the client read. With `maskErrors: true` (or `{ sentence, onError }`), only a `ToolRefusal`'s message and an abort get through; any other error goes to `onError` and the model reads one fixed sentence:
 

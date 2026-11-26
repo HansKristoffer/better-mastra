@@ -393,3 +393,27 @@ export const changePlanStepOutputSchema = z.object({
 	})
 })
 export type ChangePlanStepOutput = z.infer<typeof changePlanStepOutputSchema>
+
+// TURN DATASETS
+
+/** The transient data part a display tool streams for each dataset it shows: `{ dataset: TurnDatasetView }`. */
+export const TURN_DATASET_PART = 'data-turn-dataset'
+
+/** One column of a dataset; `type` is the app's own hint for its renderer, such as `currency`. */
+export const turnDatasetColumnSchema = z.object({
+	key: z.string(),
+	label: z.string().optional(),
+	type: z.string().optional()
+})
+export type TurnDatasetColumn = z.infer<typeof turnDatasetColumnSchema>
+
+/** The rows a data tool registered, as the client renders them. */
+export const turnDatasetSchema = z.object({
+	id: z.string(),
+	threadId: z.string(),
+	title: z.string().optional(),
+	columns: z.array(turnDatasetColumnSchema),
+	rows: z.array(z.record(z.string(), z.unknown())),
+	createdAt: z.string()
+})
+export type TurnDatasetView = z.infer<typeof turnDatasetSchema>

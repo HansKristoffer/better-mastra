@@ -36,6 +36,7 @@ import {
 	closeTurnChangePlan,
 	moveOnFromWaitingPlans
 } from '../tools/changePlans.js'
+import { bindTurnDatasets } from '../tools/datasets.js'
 import type { ChatRecordStore } from '../tools/records.js'
 import { chatErrorResponse, chatRefusal } from './errors.js'
 import {
@@ -265,6 +266,18 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 		readonly caps?: ChangePlanCaps
 		/** How long a plan is kept, in ms; null for the thread's life. Default 7 days. */
 		readonly ttlMs?: number | null
+	}
+	/**
+	 * Turn datasets: rows a data tool registers (`registerDataset`) are kept
+	 * in `store` for the thread, the model gets a handle, and display tools
+	 * (`defineTool({ datasets })`) stream the rows to the client by id.
+	 */
+	readonly datasets?: {
+		readonly store: ChatRecordStore
+		/** How long a dataset is kept, in ms; null keeps it as long as its thread. Default null. */
+		readonly ttlMs?: number | null
+		/** Rows one dataset may hold. Default 5,000. */
+		readonly maxRows?: number
 	}
 	readonly sinks?: ChatTurnSinks<TScope>
 	onFirstText?(elapsedMs: number, scope: TScope, labels: TurnLabels): void
@@ -525,6 +538,19 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	requestContext.setRaw(MASTRA_THREAD_ID_KEY, threadKey.threadId)
 	requestContext.setRaw(MASTRA_RESOURCE_ID_KEY, threadKey.resourceId)
 	rememberTurnPlan(requestContext, plan)
+
+	if (deps.datasets) {
+		bindTurnDatasets(requestContext, {
+			store: deps.datasets.store,
+			threadId: threadKey.threadId,
+			resourceId: threadKey.resourceId,
+			...(deps.datasets.ttlMs !== undefined && { ttlMs: deps.datasets.ttlMs }),
+			...(deps.datasets.maxRows !== undefined && {
+				maxRows: deps.datasets.maxRows
+			}),
+			...(deps.now && { now: deps.now })
+		})
+	}
 
 	if (deps.changePlans) {
 		bindTurnChangePlan(requestContext, {

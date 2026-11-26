@@ -21,6 +21,7 @@ import {
 	proposePlanStep,
 	type ToolPlan
 } from './changePlans.js'
+import { type DatasetToolContext, showDatasets } from './datasets.js'
 import { dryRunResult, isDryRun, isDryRunResult } from './dryRun.js'
 import { ToolRefusal } from './refusal.js'
 import { compactToolInputSchema, withHiddenInputs } from './toolInputSchema.js'
@@ -116,6 +117,14 @@ export interface ToolDefinition<
 	 */
 	// biome-ignore lint/suspicious/noExplicitAny: each tool types its own plan; the definition only runs it.
 	readonly plan?: ToolPlan<any, any, any>
+	/**
+	 * For a display tool (a table, a chart, a report block): the dataset ids
+	 * its input names. Before it runs, each must be a dataset of this thread
+	 * (`registerDataset`), or the model reads a refusal; the rows then stream
+	 * to the client as `data-turn-dataset` parts, so they never pass through
+	 * the model's output.
+	 */
+	readonly datasets?: (input: never) => readonly string[]
 	/** The server's own data about the tool (a gate, a permission); never reaches the manifest. */
 	readonly meta?: TMeta
 	/**
@@ -246,6 +255,18 @@ export function defineTool<
 	const masking =
 		definition.maskErrors === true ? {} : definition.maskErrors || undefined
 	const { change } = definition
+	const datasetsOf = definition.datasets as
+		((input: unknown) => readonly string[]) | undefined
+	const runChecked = (
+		input: unknown,
+		context: { requestContext?: RequestContext }
+	) =>
+		datasetsOf
+			? showDatasets(
+					context as DatasetToolContext,
+					datasetsOf(fillHiddenInputs(input, hidden, context?.requestContext))
+				).then(() => run(input, context))
+			: run(input, context)
 	const run = (
 		input: unknown,
 		context: { requestContext?: RequestContext }
@@ -325,12 +346,12 @@ export function defineTool<
 						}
 					) => {
 						try {
-							return await run(input, context)
+							return await runChecked(input, context)
 						} catch (error) {
 							throw maskedError(error, base.id, context, masking)
 						}
 					}
-				: run
+				: runChecked
 		}),
 		...(hasModelOutputHook && {
 			toModelOutput: (output: unknown) => {

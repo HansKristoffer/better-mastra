@@ -71,6 +71,20 @@ export {
 	truncateModelOutput
 } from './defineTool.js'
 export {
+	bindTurnDatasets,
+	DATASET_HANDLE_NOTE,
+	type DatasetToolContext,
+	readTurnDataset,
+	registerDataset,
+	showDatasets,
+	TURN_DATASET_KIND,
+	type TurnDatasetData,
+	type TurnDatasetHandle,
+	type TurnDatasetRecord,
+	type TurnDatasetRow,
+	type TurnDatasetsBinding
+} from './datasets.js'
+export {
 	DRY_RUN_KEY,
 	type DryRunResult,
 	dryRunResult,

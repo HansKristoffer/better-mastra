@@ -62,6 +62,31 @@ Then move a bulk write tool from `tier: 'approval'` with `execute` to `tier: 'pl
 - The apply route's request context carries what your guards read (the user, the workspace, the role): it is built from the apply request, not copied from the turn.
 - Your platform does not buffer `application/x-ndjson` responses, or the progress arrives all at once at the end.
 
+### Turn datasets (opt-in)
+
+Data tools register rows by id and display tools show them by id, so tables and charts show stored numbers, never ones the model typed. It uses the same `ChatRecordStore` as change plans.
+
+```ts
+import { registerDataset } from 'better-mastra/tools'
+import { createDatasetStore } from 'better-mastra/client'
+import { useDataset } from 'better-mastra/react' // or 'better-mastra/vue'
+
+runChatTurn(request, { datasets: { store: records }, /* … */ })
+createChatRoute({ /* …, */ ownsThread, datasets: { store: records } })
+
+// a data tool's execute returns the handle instead of the rows
+execute: async (input, context) => registerDataset(context, { rows, columns, title, summary })
+
+// a display tool names the datasets its input shows
+defineTool({ /* … */ datasets: (input) => [input.datasetId] })
+
+// client: one onData for every store
+const datasets = createDatasetStore({ api: '/chat', fetch: chatFetch })
+createChatSession({ /* …, */ onData: (part) => { plans.onData(part); datasets.onData(part) } })
+```
+
+**Check afterwards.** A data tool whose rows used to reach the model as its result now gives a handle: move what the model needs to talk about into `summary`, worked out in code, and tell it in the instructions to show tables and charts with the display tools.
+
 ## 0.11.0
 
 No export was removed or renamed, and no existing union requires new switch cases. Several defaults changed for better prompt-cache hit rates, latency and safety, and new helpers remove boilerplate from apps.

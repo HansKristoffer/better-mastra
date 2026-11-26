@@ -28,6 +28,8 @@ import type {
 	ChangePlanStore,
 	ChatSession,
 	ChatSessionSnapshot,
+	DatasetState,
+	DatasetStore,
 	ChatSnapshot,
 	ScreenContextStack,
 	ScreenEntry,
@@ -305,4 +307,28 @@ export function useChangePlan(
 	)
 
 	return { ...state, confirm, discard }
+}
+
+/**
+ * One dataset as hook state, loaded on mount unless the stream already
+ * brought it: the rows a display part names by id.
+ */
+export function useDataset(
+	store: DatasetStore,
+	threadId: string,
+	datasetId: string
+): DatasetState & { readonly reload: () => Promise<void> } {
+	const getState = useCallback(() => store.get(datasetId), [store, datasetId])
+	const state = useSyncExternalStore(store.subscribe, getState, getState)
+
+	useEffect(() => {
+		void store.load(threadId, datasetId)
+	}, [store, threadId, datasetId])
+
+	const reload = useCallback(
+		() => store.load(threadId, datasetId, { force: true }),
+		[store, threadId, datasetId]
+	)
+
+	return { ...state, reload }
 }
