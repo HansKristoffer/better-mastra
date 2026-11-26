@@ -6,6 +6,7 @@ import { z } from 'zod'
 
 import {
 	createCardRegistry,
+	createChangePlanStore,
 	createChatSession,
 	createChatSessions,
 	createScreenContextStack,
@@ -13,6 +14,7 @@ import {
 } from '../client/index.js'
 import {
 	ToolParts,
+	useChangePlan,
 	useChatSession,
 	useChatThread,
 	useScreenContext,
@@ -231,5 +233,44 @@ describe('ToolParts', () => {
 		expect((await renderToString(app)).replace(/<!--.*?-->/g, '')).toBe(
 			'<ul><i>search</i><i>lookup</i></ul><b>2</b>'
 		)
+	})
+})
+
+describe('useChangePlan', () => {
+	test('loads the plan when its ids are set and follows the store', async () => {
+		const plan = (id: string, status: string) => ({
+			id,
+			threadId: 'thread-1',
+			status,
+			steps: [],
+			createdAt: '2026-11-26T00:00:00.000Z',
+			updatedAt: '2026-11-26T00:00:00.000Z'
+		})
+		// Answers each plan by the id at the end of its URL.
+		const store = createChangePlanStore({
+			api: '/chat',
+			fetch: async (input) =>
+				Response.json({
+					plan: plan(String(input).split('/').at(-1) ?? '', 'proposed')
+				})
+		})
+		const planId = ref('plan-1')
+		const scope = effectScope()
+		const refs = scope.run(() => useChangePlan(store, 'thread-1', planId))!
+
+		await wait(5)
+		expect(refs.plan.value?.id).toBe('plan-1')
+
+		planId.value = 'plan-2'
+		await nextTick()
+		await wait(5)
+		expect(refs.plan.value?.id).toBe('plan-2')
+
+		store.onData({
+			type: 'data-change-plan',
+			data: { plan: plan('plan-2', 'discarded') }
+		})
+		expect(refs.plan.value?.status).toBe('discarded')
+		scope.stop()
 	})
 })

@@ -26,6 +26,17 @@ import {
 	type TurnChanges,
 	withoutStaleAnswers
 } from './changes.js'
+import { CHANGE_PLAN_PART, type ChangePlanView } from '../protocol/index.js'
+import {
+	bindTurnChangePlan,
+	CHANGE_PLAN_KIND,
+	type ChangePlanCaps,
+	type ChangePlanRecord,
+	changePlansSignal,
+	closeTurnChangePlan,
+	moveOnFromWaitingPlans
+} from '../tools/changePlans.js'
+import type { ChatRecordStore } from '../tools/records.js'
 import { chatErrorResponse, chatRefusal } from './errors.js'
 import {
 	createTurnObserver,
@@ -242,6 +253,19 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 					change: PendingChange
 				) => Record<string, unknown>
 		  }
+	/**
+	 * Change plans: the turn's plan-tier tools add steps to one plan in
+	 * `store`, which the turn offers to the user when it has answered
+	 * (`data-change-plan`) and discards otherwise. A new user message discards
+	 * the thread's plans still waiting, and every turn tells the model what
+	 * became of the thread's plans in its per-request signal.
+	 */
+	readonly changePlans?: {
+		readonly store: ChatRecordStore
+		readonly caps?: ChangePlanCaps
+		/** How long a plan is kept, in ms; null for the thread's life. Default 7 days. */
+		readonly ttlMs?: number | null
+	}
 	readonly sinks?: ChatTurnSinks<TScope>
 	onFirstText?(elapsedMs: number, scope: TScope, labels: TurnLabels): void
 	/** The thread's title from its messages, written once; `false` writes none. */
@@ -478,6 +502,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 ): Promise<ChatTurnResult> {
 	const { request, scope, threadKey, atStage } = turn
 	const waiting = readWaitingChanges(turn, deps)
+	const threadPlans = readThreadPlans(turn, deps)
 	const prepared = await atStage('preparation', () =>
 		deps.prepare({
 			scope,
@@ -488,14 +513,31 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			signal: request.signal
 		})
 	)
-	const { requestContext, plan } = prepared
+	const { requestContext } = prepared
 	throwIfAborted(request.signal)
 	const labels = prepared.labels ?? {}
+	const plan = withSignal(
+		prepared.plan,
+		changePlansSignal((await threadPlans) ?? [])
+	)
 
 	// The reserved keys force every memory operation in the run onto this thread.
 	requestContext.setRaw(MASTRA_THREAD_ID_KEY, threadKey.threadId)
 	requestContext.setRaw(MASTRA_RESOURCE_ID_KEY, threadKey.resourceId)
 	rememberTurnPlan(requestContext, plan)
+
+	if (deps.changePlans) {
+		bindTurnChangePlan(requestContext, {
+			store: deps.changePlans.store,
+			threadId: threadKey.threadId,
+			resourceId: threadKey.resourceId,
+			...(deps.changePlans.caps && { caps: deps.changePlans.caps }),
+			...(deps.changePlans.ttlMs !== undefined && {
+				ttlMs: deps.changePlans.ttlMs
+			}),
+			...(deps.now && { now: deps.now })
+		})
+	}
 
 	const memory = { thread: threadKey.threadId, resource: threadKey.resourceId }
 	const { changes, pending } = await classifyChanges(
@@ -642,6 +684,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	// Start reply suggestions in parallel with `close()` (metadata write + lock
 	// release) while buffering early suggestion chunks until `ANSWER_COMPLETE_PART`
 	// is emitted after the thread lock is released.
+	let proposedPlan: ChangePlanView | undefined
 	let pendingSuggestions:
 		| {
 				readonly promise: Promise<void>
@@ -713,6 +756,19 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 				: (report('deriveTitle', () => deriveTitle(turn.messages)) ?? null)
 
 		try {
+			if (deps.changePlans) {
+				// Before the stream closes, so a confirm right after finds the plan proposed.
+				proposedPlan = await closeTurnChangePlan(
+					requestContext,
+					finished.outcome === 'answered'
+				).catch((error: unknown) => {
+					logger.error('[better-mastra] the change plan was not closed', {
+						error
+					})
+					return undefined
+				})
+			}
+
 			report('sinks.turnFinished', () => deps.sinks?.turnFinished?.(finished))
 
 			// Nothing to write means no read either: a thread that has its title
@@ -741,10 +797,19 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		}
 	}
 
-	// Replies follow an answer that ended normally and leaves nothing to answer on a card.
+	// The plan the turn proposed, then replies, which follow an answer that
+	// ended normally and leaves nothing to answer on a card.
 	const epilogue =
-		suggestions &&
+		(suggestions || deps.changePlans) &&
 		(async (send: (chunk: UIMessageChunk) => void) => {
+			if (proposedPlan) {
+				send({
+					type: CHANGE_PLAN_PART,
+					data: { plan: proposedPlan },
+					transient: true
+				} as UIMessageChunk)
+			}
+
 			if (!pendingSuggestions) return
 
 			send({ type: ANSWER_COMPLETE_PART, data: {}, transient: true })
@@ -828,6 +893,56 @@ async function forgetAnswerAfter(
 	if (answer.length > 0) {
 		await memory.deleteMessages(answer.map((storedMessage) => storedMessage.id))
 	}
+}
+
+/** The plan with `extra` after its own per-request signal. */
+function withSignal(
+	plan: ChatTurnPlan,
+	extra: string | undefined
+): ChatTurnPlan {
+	if (!extra) return plan
+
+	return { ...plan, signal: plan.signal ? `${plan.signal}\n\n${extra}` : extra }
+}
+
+/**
+ * The thread's change plans, read while the turn is prepared. A new user
+ * message moves on from the plans still waiting for the user, as it declines
+ * waiting approvals. A thread never written has none. Undefined without
+ * `changePlans`; a failed read is logged and gives none, so plans never stop
+ * a turn.
+ */
+function readThreadPlans<TAuth, TBody extends ChatTurnBody, TScope>(
+	turn: AdmittedTurn<TAuth, TBody, TScope>,
+	deps: ChatTurnDeps<TAuth, TBody, TScope>
+): Promise<readonly ChangePlanRecord[] | undefined> {
+	const plans = deps.changePlans
+
+	if (!plans || turn.thread === null) return Promise.resolve(undefined)
+
+	const { threadId } = turn.threadKey
+	const movesOn = turn.messages.at(-1)?.role === 'user'
+
+	return turn
+		.atStage('thread', async () =>
+			movesOn
+				? moveOnFromWaitingPlans({
+						store: plans.store,
+						threadId,
+						...(deps.now && { now: deps.now })
+					})
+				: ((await plans.store.list(
+						CHANGE_PLAN_KIND,
+						threadId
+					)) as ChangePlanRecord[])
+		)
+		.catch((error: unknown) => {
+			;(deps.logger ?? consoleLogger).error(
+				"[better-mastra] the thread's change plans were not read",
+				{ error: error instanceof ChatTurnStageError ? error.failure : error }
+			)
+			return undefined
+		})
 }
 
 /**

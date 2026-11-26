@@ -1,6 +1,38 @@
 export {
+	type ApplyChangePlanResult,
+	applyChangePlan,
+	type BoundToolPlan,
+	bindTurnChangePlan,
+	CHANGE_PLAN_ERROR_SENTENCES,
+	CHANGE_PLAN_KIND,
+	CHANGE_PLAN_SAMPLE_SIZE,
+	type ChangePlanCaps,
+	type ChangePlanData,
+	type ChangePlanRecord,
+	changePlansSignal,
+	closeTurnChangePlan,
+	discardChangePlan,
+	moveOnFromWaitingPlans,
+	type PlanProposal,
+	type PlanTargetChange,
+	type PlanTool,
+	proposePlanStep,
+	readChangePlan,
+	readDryRunChangePlan,
+	type StandardValueSchema,
+	type StoredPlanChange,
+	type StoredPlanStep,
+	type ToolPlan,
+	type TurnChangePlanBinding,
+	toChangePlanView,
+	turnChangePlanId
+} from './changePlans.js'
+export {
+	type ApplyOutcome,
+	applyTarget,
 	CHANGE_UNREAD_SENTENCE,
 	NO_UNDO,
+	sameValue,
 	type ToolChange,
 	type ToolChangeCall,
 	tallyUndo,
@@ -33,6 +65,7 @@ export {
 	ToolRefusal,
 	type ToolKind,
 	type ToolTier,
+	planStepSentence,
 	toToolName,
 	toToolSet,
 	truncateModelOutput
@@ -53,6 +86,11 @@ export {
 	type ToolManifestEntry
 } from './manifest.js'
 export { type JsonProjection, toJsonProjection } from './projection.js'
+export {
+	type ChatRecord,
+	type ChatRecordStore,
+	createMemoryRecordStore
+} from './records.js'
 export {
 	coerceDateStrings,
 	compactJsonSchema,

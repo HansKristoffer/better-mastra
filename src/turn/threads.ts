@@ -9,6 +9,7 @@
  * earlier read.
  */
 
+import type { ChatRecordStore } from '../tools/records.js'
 import { toAISdkMessages } from '@mastra/ai-sdk/ui'
 import type { Agent } from '@mastra/core/agent'
 import type { Mastra } from '@mastra/core/mastra'
@@ -99,6 +100,8 @@ export interface ThreadHandlersOptions<TScope> {
 	readonly agent?: Agent | (() => Agent)
 	/** Runs a delete under the thread lock; null when a turn holds it. */
 	lock?(key: ThreadKey): Promise<(() => Promise<void>) | null>
+	/** The store of the thread's change plans and datasets; a deleted thread takes its records along. */
+	readonly records?: ChatRecordStore
 	/**
 	 * Which parts a stored answer resumed after, so `get` shows the
 	 * continuation in the same message (see `joinResumedAnswers`). Default:
@@ -298,7 +301,12 @@ export function createThreadHandlers<TScope>(
 			if (!release) return 'locked'
 
 			try {
-				await deleteThreadEverywhere(memory, key, resolveLazy(options.agent))
+				await deleteThreadEverywhere(
+					memory,
+					key,
+					resolveLazy(options.agent),
+					options.records
+				)
 				return 'deleted'
 			} finally {
 				await release().catch(() => {})
@@ -470,18 +478,23 @@ export function createThreadHandlers<TScope>(
 }
 
 /**
- * Deletes a thread, its observations and, with the agent, its suspended runs.
- * Clears the observations on every call: once a first attempt has removed the
- * thread row, `deleteThread` no longer knows the resource and skips them.
+ * Deletes a thread, its observations, with the agent its suspended runs, and
+ * with `records` its change plans and datasets. Clears the observations on
+ * every call: once a first attempt has removed the thread row, `deleteThread`
+ * no longer knows the resource and skips them.
  */
 export async function deleteThreadEverywhere(
 	memory: MastraMemory,
 	key: ThreadKey,
-	agent?: Agent
+	agent?: Agent,
+	records?: ChatRecordStore
 ): Promise<void> {
 	const runs = agent
 		? (await agent.listSuspendedRuns(key)).runs.map((run) => run.runId)
 		: []
+
+	// First: a record left behind would outlive the thread that owns it.
+	await records?.deleteThread(key.threadId)
 
 	await memory.deleteThread(key.threadId)
 	await (
@@ -512,6 +525,8 @@ export async function sweepOldThreads(input: {
 	/** Only threads this accepts, such as one agent's thread id prefix. */
 	readonly filter?: (thread: StorageThreadType) => boolean
 	readonly agent?: Agent
+	/** Deletes each thread's change plans and datasets too. */
+	readonly records?: ChatRecordStore
 	readonly onError?: (error: unknown, threadId: string) => void
 }): Promise<{ readonly deleted: number; readonly failed: number }> {
 	const batchSize = input.batchSize ?? 200
@@ -553,7 +568,8 @@ export async function sweepOldThreads(input: {
 				await deleteThreadEverywhere(
 					input.memory,
 					{ threadId: thread.id, resourceId: thread.resourceId },
-					input.agent
+					input.agent,
+					input.records
 				)
 				deletedThisRound += 1
 			} catch (error) {

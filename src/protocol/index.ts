@@ -268,3 +268,128 @@ export const chatTurnBodySchema = z.object({
 })
 
 export type ChatTurnBodyInput = z.infer<typeof chatTurnBodySchema>
+
+// CHANGE PLANS
+
+/** The transient data part a turn streams after its answer when it proposed a change plan: `{ plan: ChangePlanView }`. */
+export const CHANGE_PLAN_PART = 'data-change-plan'
+
+/**
+ * Where a change plan is: `draft` while its turn adds steps, `proposed` once
+ * the turn answered and the user may confirm it, `applying` while one runner
+ * holds it, then `applied`, `failed` (stopped at a step; applying again
+ * resumes there) or `discarded`. `applied` and `discarded` are final.
+ */
+export const changePlanStatuses = [
+	'draft',
+	'proposed',
+	'applying',
+	'applied',
+	'failed',
+	'discarded'
+] as const
+export type ChangePlanStatus = (typeof changePlanStatuses)[number]
+
+export const changePlanStepStatuses = ['pending', 'applied', 'failed'] as const
+export type ChangePlanStepStatus = (typeof changePlanStepStatuses)[number]
+
+/**
+ * Why a step was not applied: its guard refused it (`refused`, with the
+ * guard's sentence), a target no longer holds the value the plan saw
+ * (`changed_since`), the stored snapshot is missing or unreadable
+ * (`snapshot_unreadable`), the tool is gone (`unknown_tool`), a read or a
+ * write failed, or another runner took the plan over (`lease_lost`).
+ */
+export const changePlanErrorCodes = [
+	'refused',
+	'changed_since',
+	'snapshot_unreadable',
+	'unknown_tool',
+	'read_failed',
+	'write_failed',
+	'lease_lost'
+] as const
+export type ChangePlanErrorCode = (typeof changePlanErrorCodes)[number]
+
+/** Why a plan could not be applied or discarded at all. */
+export const changePlanRefusalCodes = [
+	'not_found',
+	'not_ready',
+	'in_progress',
+	'closed'
+] as const
+export type ChangePlanRefusalCode = (typeof changePlanRefusalCodes)[number]
+
+/** The HTTP status of each refusal. */
+export const changePlanRefusalStatuses: Readonly<
+	Record<ChangePlanRefusalCode, number>
+> = { not_found: 404, not_ready: 409, in_progress: 409, closed: 409 }
+
+/** One target of a step as the confirm card shows it. */
+export const changePlanChangeSchema = z.object({
+	label: z.string().optional(),
+	target: z.unknown(),
+	before: z.unknown(),
+	after: z.unknown()
+})
+export type ChangePlanChangeView = z.infer<typeof changePlanChangeSchema>
+
+export const changePlanStepErrorSchema = z.object({
+	code: z.enum(changePlanErrorCodes),
+	message: z.string()
+})
+
+/** One step: its tool, what it changes, and for a bulk step a count with the first rows. */
+export const changePlanStepSchema = z.object({
+	index: z.number().int(),
+	tool: z.string(),
+	title: z.string(),
+	status: z.enum(changePlanStepStatuses),
+	/** How many targets the step changes. */
+	count: z.number().int(),
+	/** The first targets, all of them when `count` is no larger. */
+	sample: z.array(changePlanChangeSchema),
+	error: changePlanStepErrorSchema.optional()
+})
+export type ChangePlanStepView = z.infer<typeof changePlanStepSchema>
+
+/** A change plan as the client sees it. */
+export const changePlanSchema = z.object({
+	id: z.string(),
+	threadId: z.string(),
+	status: z.enum(changePlanStatuses),
+	steps: z.array(changePlanStepSchema),
+	createdAt: z.string(),
+	updatedAt: z.string()
+})
+export type ChangePlanView = z.infer<typeof changePlanSchema>
+
+/** One line of the apply route's NDJSON stream. */
+export const changePlanProgressSchema = z.discriminatedUnion('type', [
+	z.object({ type: z.literal('step-started'), index: z.number().int() }),
+	z.object({ type: z.literal('step-applied'), index: z.number().int() }),
+	z.object({
+		type: z.literal('step-failed'),
+		index: z.number().int(),
+		error: changePlanStepErrorSchema
+	}),
+	z.object({ type: z.literal('finished'), plan: changePlanSchema })
+])
+export type ChangePlanProgress = z.infer<typeof changePlanProgressSchema>
+
+/** The `{ error }` body of a refused apply or discard. */
+export const changePlanRefusalSchema = z.object({
+	error: z.enum(changePlanRefusalCodes)
+})
+
+/**
+ * What a plan-tier tool returns, so a client finds the plan in a stored
+ * thread as well as on the live stream.
+ */
+export const changePlanStepOutputSchema = z.object({
+	changePlan: z.object({
+		planId: z.string(),
+		step: changePlanStepSchema
+	})
+})
+export type ChangePlanStepOutput = z.infer<typeof changePlanStepOutputSchema>

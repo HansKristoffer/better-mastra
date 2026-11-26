@@ -85,6 +85,50 @@ export function tallyUndo(
 	return counted
 }
 
+/** What applying one target of a change plan did. */
+export type ApplyOutcome =
+	'applied' | 'alreadyApplied' | 'changedSince' | 'failed'
+
+/** The JSON-with-sorted-keys comparison `undoTarget` and `applyTarget` use by default. */
+export function sameValue(left: unknown, right: unknown): boolean {
+	return stableStringify(left) === stableStringify(right)
+}
+
+/**
+ * Applies one target of a change plan, the mirror of `undoTarget`: reads what
+ * it holds now and writes `next` only while it still holds `seen`, the value
+ * the plan was made against. A target that already holds `next` is
+ * `alreadyApplied`: an earlier run wrote it before it was interrupted, so a
+ * resumed plan counts it done instead of refusing it as changed. A read that
+ * throws is the caller's to count; a write that throws is `failed`, with the
+ * error handed to `onError`.
+ */
+export async function applyTarget<T>(target: {
+	readonly read: () => Promise<T | undefined>
+	readonly seen: T
+	readonly next: T
+	readonly write: (next: T) => Promise<unknown>
+	readonly equals?: (left: T | undefined, right: T) => boolean
+	readonly onError?: (error: unknown) => void
+}): Promise<ApplyOutcome> {
+	const equals = target.equals ?? sameValue
+	const current = await target.read()
+
+	if (equals(current, target.next)) return 'alreadyApplied'
+
+	if (!equals(current, target.seen)) return 'changedSince'
+
+	try {
+		await target.write(target.next)
+
+		return 'applied'
+	} catch (error) {
+		target.onError?.(error)
+
+		return 'failed'
+	}
+}
+
 /**
  * Undoes one target of a change: reads what it holds now and writes
  * `previous` back only while it still holds `next`, the value the change
@@ -100,9 +144,7 @@ export async function undoTarget<T>(target: {
 	readonly equals?: (left: T | undefined, right: T) => boolean
 	readonly onError?: (error: unknown) => void
 }): Promise<UndoOutcome> {
-	const equals =
-		target.equals ??
-		((left, right) => stableStringify(left) === stableStringify(right))
+	const equals = target.equals ?? sameValue
 	const current = await target.read()
 
 	if (equals(current, target.previous)) return 'alreadyUndone'

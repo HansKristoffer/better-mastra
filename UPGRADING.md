@@ -14,6 +14,54 @@ bun pm ls --all | grep -E " (@mastra/core|zod|ai)@" | sed -E 's/^[^@a-z]*//' | s
 
 Each name must appear on one line. With npm, `npm ls @mastra/core zod ai` shows the same and which package pulled in a second copy. Fix a duplicate by moving your own dependency into the range in better-mastra's `peerDependencies`.
 
+## 0.12.0
+
+No export was removed or renamed. `ToolTier` names a new tier, `plan`; the type stays open (`string & {}`), so a `switch` over tiers keeps typechecking, but give `plan` its own branch where tiers decide what a card shows.
+
+### Change plans (opt-in)
+
+A plan-tier tool drafts writes into the turn's change plan, which the user confirms once. Nothing changes for an app that does not use it. To adopt it:
+
+```ts
+import { pgRecordStore } from 'better-mastra/pg'
+import { createChangePlanStore, readProposedChangePlans } from 'better-mastra/client'
+import { useChangePlan } from 'better-mastra/react' // or 'better-mastra/vue'
+
+// 1. Server: one store, created once by the process that migrates.
+const records = pgRecordStore({ pool }) // a pg Pool; creates mastra.better_mastra_records
+await records.init()
+
+// 2. The turn: binds the turn's plan and offers it when the turn answered.
+runChatTurn(request, { changePlans: { store: records }, /* … */ })
+
+// 3. The route: GET/apply/discard under {path}/:threadId/plans/:planId. Needs ownsThread.
+createChatRoute({
+	/* …, */ ownsThread,
+	changePlans: { store: records, tools: allDefinedTools, requestContext: (auth, threadId) => contextFor(auth, threadId) }
+})
+
+// 4. Cleanup: a deleted thread takes its plans along; expired plans go on a schedule.
+createThreadHandlers({ records, /* … */ })
+await sweepOldThreads({ memory, olderThan, records })
+await records.deleteExpired(new Date())
+
+// 5. Client: the plan store hears the turn's plan part.
+const plans = createChangePlanStore({ api: '/chat', fetch: chatFetch })
+const session = createChatSession({ /* …, */ onData: plans.onData })
+// per assistant message, once the turn is no longer busy:
+for (const { planId, steps } of readProposedChangePlans(message)) {
+	// <PlanCard planId={planId} fallbackSteps={steps} />, with useChangePlan(plans, threadId, planId)
+}
+```
+
+Then move a bulk write tool from `tier: 'approval'` with `execute` to `tier: 'plan'` with `plan: { propose, read, write, guard }` (see the README). Keep `tier: 'approval'` for single writes.
+
+**Check afterwards.**
+
+- `bun run test` in the app: a plan-tier tool's `propose` must not write. The README's guard test pattern (count writes in the data layer across a whole turn, with a negative control) is in `src/turn/changePlans.test.ts`.
+- The apply route's request context carries what your guards read (the user, the workspace, the role): it is built from the apply request, not copied from the turn.
+- Your platform does not buffer `application/x-ndjson` responses, or the progress arrives all at once at the end.
+
 ## 0.11.0
 
 No export was removed or renamed, and no existing union requires new switch cases. Several defaults changed for better prompt-cache hit rates, latency and safety, and new helpers remove boilerplate from apps.

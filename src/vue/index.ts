@@ -30,6 +30,8 @@ import type {
 	Card,
 	CardRegistry,
 	CardSchemas,
+	ChangePlanState,
+	ChangePlanStore,
 	ChatSession,
 	ChatSessionSnapshot,
 	ChatSessions,
@@ -458,3 +460,56 @@ export const ToolParts = ToolPartsImpl as unknown as new <
 // FUNCTIONS
 
 let nextInstanceId = 0
+
+export interface ChangePlanRefs {
+	readonly state: ComputedRef<ChangePlanState>
+	readonly plan: ComputedRef<ChangePlanState['plan']>
+	readonly phase: ComputedRef<ChangePlanState['phase']>
+	readonly runningStep: ComputedRef<ChangePlanState['runningStep']>
+	readonly refusal: ComputedRef<ChangePlanState['refusal']>
+	readonly failed: ComputedRef<boolean>
+	/** Applies the plan; progress arrives in `plan` step by step. */
+	readonly confirm: () => Promise<void>
+	readonly discard: () => Promise<void>
+}
+
+/**
+ * One change plan as refs, loaded when its ids are set: its steps and
+ * status, what this window is doing with it, and the user's two answers.
+ * Draw the card from `readProposedChangePlans(message)` until `plan` has
+ * loaded.
+ */
+export function useChangePlan(
+	store: ChangePlanStore,
+	threadId: MaybeRefOrGetter<string>,
+	planId: MaybeRefOrGetter<string>
+): ChangePlanRefs {
+	const state = shallowRef(store.get(toValue(planId)))
+	const unsubscribe = store.subscribe(() => {
+		state.value = store.get(toValue(planId))
+	})
+
+	watch(
+		() => [toValue(threadId), toValue(planId)] as const,
+		([thread, plan]) => {
+			state.value = store.get(plan)
+			void store.load(thread, plan)
+		},
+		{ immediate: true }
+	)
+
+	if (getCurrentScope() !== undefined) onScopeDispose(unsubscribe)
+
+	const current = computed(() => state.value)
+
+	return {
+		state: current,
+		plan: computed(() => state.value.plan),
+		phase: computed(() => state.value.phase),
+		runningStep: computed(() => state.value.runningStep),
+		refusal: computed(() => state.value.refusal),
+		failed: computed(() => state.value.failed),
+		confirm: () => store.confirm(toValue(threadId), toValue(planId)),
+		discard: () => store.discard(toValue(threadId), toValue(planId))
+	}
+}

@@ -17,14 +17,14 @@ ESM only, Node 20+ or Bun. Every peer is optional and loaded only by the subpath
 | Import | What it gives you | Needs |
 | --- | --- | --- |
 | `better-mastra` | Memory preset, health check, ordered shutdown | `@mastra/core`, `@mastra/memory` |
-| `better-mastra/pg`, `better-mastra/libsql` | Mastra storage on Postgres or libSQL that survives dropped connections | `@mastra/pg` + `pg`, or `@mastra/libsql` |
+| `better-mastra/pg`, `better-mastra/libsql` | Mastra storage on Postgres or libSQL that survives dropped connections; the record store of change plans | `@mastra/pg` + `pg`, or `@mastra/libsql` |
 | `better-mastra/models` | Model registry (`route/model@effort` ids), prompt caching, OpenRouter batching, pricing | `ai`, `@ai-sdk/provider`, a provider SDK per route |
 | `better-mastra/openrouter` | One OpenRouter route, synchronous, for building models at import time | `@openrouter/ai-sdk-provider` |
 | `better-mastra/turn` | `runChatTurn`, the chat agent, request context, reply suggestions, thread handlers | `@mastra/core`, `@mastra/memory`, `@mastra/ai-sdk`, `ai`, `zod` |
 | `better-mastra/protocol` | The wire contract: part names, refusal codes, outcomes, `chatTurnBodySchema` | `zod` (`ai` types only); safe in a browser |
 | `better-mastra/hono` | The chat route (`POST`, stream, stop) and a local Mastra Studio mount | `hono` (Studio: `@mastra/hono`) |
 | `better-mastra/resumable` | Turns that keep running past a disconnect, reconnectable across replicas; a thread lock | a Redis client, or none |
-| `better-mastra/tools` | `defineTool`: a tool plus its tier, card and hidden inputs; deferred tools; dry runs | `@mastra/core`, `zod` |
+| `better-mastra/tools` | `defineTool`: a tool plus its tier, card and hidden inputs; change plans; deferred tools; dry runs | `@mastra/core`, `zod` |
 | `better-mastra/client` | Framework-free chat session: turns, approvals, client actions, resume, tool cards | `ai`, `zod` |
 | `better-mastra/react`, `better-mastra/vue` | Hooks/composables and `ToolParts` over a chat session | `ai`, `zod`, `react` or `vue` |
 | `better-mastra/react/markdown` | Streaming markdown for React Native, word by word with fade-in | `react-native`, `react-native-markdown-display` |
@@ -260,6 +260,54 @@ const outcome = await undoTarget({
 	write: (amount) => budgets.set(record.budgetId, amount)
 }) // 'undone' | 'alreadyUndone' | 'changedSince' | 'failed'
 ```
+
+### Change plans: draft many changes, confirm once
+
+`tier: 'approval'` asks the user about each write as the model makes it. For bulk business changes ("raise these 50 prices by 5%") a plan-tier tool drafts instead. Its `propose` reads the targets, validates, and works out what it would write; the step joins the turn's plan. When the turn has answered, the user sees every step on one card and confirms or discards the plan once. Applying runs in the user's own request, never in the model run:
+
+```ts
+defineTool({
+	tool: { id: 'prices_raise', description, inputSchema }, // no execute
+	tier: 'plan',
+	hiddenInputs: { shopId: (ctx) => context.read(ctx).shopId },
+	plan: {
+		guard: async ({ requestContext }) => (canEditPrices(requestContext) ? undefined : 'Only an owner can change prices.'),
+		propose: async ({ input }) => ({
+			title: `Raise ${input.productIds.length} prices by ${input.percent}%`,
+			changes: await Promise.all(input.productIds.map(async (id) => {
+				const seen = await prices.get(input.shopId, id) // what the target holds now
+				return { target: id, seen, next: Math.round(seen * (1 + input.percent / 100)), label: await names.get(id) }
+			}))
+		}),
+		read: (id, { input }) => prices.get(input.shopId, id),
+		write: (id, price, { input }) => prices.set(input.shopId, id, price)
+	}
+})
+```
+
+Plans live in a `ChatRecordStore`: `pgRecordStore({ pool })` from `better-mastra/pg` (one table, `mastra.better_mastra_records`, created by `init()`), or `createMemoryRecordStore()` for tests and one process. The port is five methods with compare-and-set, so a store of your own cannot get the plan's rules wrong. Wire it in three places:
+
+```ts
+const records = pgRecordStore({ pool })
+await records.init() // once, in the process that migrates
+
+runChatTurn(request, { changePlans: { store: records } /* … */ })
+
+createChatRoute({
+	/* …, */ ownsThread,
+	changePlans: { store: records, tools, requestContext: (auth, threadId) => buildRequestContext(auth, threadId) }
+})
+```
+
+- **Proposing.** A plan holds at most 20 steps and a step at most 50 targets (`changePlans.caps`). A proposal that changes nothing, breaks a cap, names a target twice or touches a target an earlier step of the plan already changes is refused with a sentence the model reads. The tool's guard runs at propose. The model reads that nothing is changed yet; the client gets the step with its count and first ten targets.
+- **Offering.** An answered turn moves its plan from `draft` to `proposed` and streams a transient `data-change-plan` part (`{ plan }`) after the answer. Any other ending discards it, and the part says so. A new user message discards the thread's plans still waiting (`proposed`, `failed`), as it declines waiting approvals; a plan being applied is left alone. Every turn tells the model what became of the thread's newest plans in its per-request signal, so it never claims a change it only proposed.
+- **Applying.** `POST {path}/:threadId/plans/:planId/apply` (or `applyChangePlan`) claims the plan and runs its steps in order, streaming NDJSON progress. Per step: the guard again with the apply request's context (permission is checked when the write happens, not when the model proposed it), every target read and compared with the snapshot the plan saw before the first write, and each target read once more right before its own write. A target that holds anything but the snapshot refuses the step (`changed_since`) rather than overwrite someone's edit. The first failure stops the plan as `failed`; applying it again resumes at that step. Progress is saved after every step.
+- **Resuming is idempotent.** A target that already holds the step's new value counts as done: that is the plan's own earlier write, from a run interrupted before it saved its progress.
+- **The stale check fails closed.** A snapshot that is missing, does not parse, or fails the plan's `valueSchema` refuses the step (`snapshot_unreadable`); it is never skipped.
+- **One runner per plan.** The claim is a lease with an owner id, taken and renewed by compare-and-set: a double click or a second window gets `in_progress` (409) and can follow the plan with `GET …/plans/:planId`. `applied` and `discarded` are final. A crashed runner's lease expires after `leaseMs` (60 s) and the next confirm resumes the plan. A runner that loses its lease while a write is in flight stops and saves nothing more; that write was checked against the snapshot right before it, so at worst it lands the same value again.
+- **Evals.** In a dry run (`markDryRun`) `propose` runs, since it only reads, and the plan stays on the request context: `readDryRunChangePlan(requestContext)` returns it, and nothing is stored.
+
+On the client, `createChangePlanStore({ api, fetch })` holds the plans; pass its `onData` to the session (`createChatSession({ onData: plans.onData })`). `readProposedChangePlans(message)` finds a message's plans in its tool results, live and stored alike; draw a card once the turn is no longer busy. `useChangePlan(plans, threadId, planId)` from `/react` and `/vue` gives the plan, what this window is doing with it (`phase`, `runningStep`), why it was turned away (`refusal`), and `confirm` and `discard`. `deleteThreadEverywhere`, `sweepOldThreads` and `createThreadHandlers` take `records` and delete a thread's plans with it; `records.deleteExpired(new Date())` removes plans past their `ttlMs` (7 days).
 
 Whatever `execute` throws is what the model, the stored thread and the client read. With `maskErrors: true` (or `{ sentence, onError }`), only a `ToolRefusal`'s message and an abort get through; any other error goes to `onError` and the model reads one fixed sentence:
 

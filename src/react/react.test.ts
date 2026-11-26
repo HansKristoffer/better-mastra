@@ -7,6 +7,7 @@ import { z } from 'zod'
 
 import {
 	createCardRegistry,
+	createChangePlanStore,
 	createChatSession,
 	createScreenContextStack,
 	type ToolPart
@@ -28,8 +29,13 @@ GlobalRegistrator.register()
 Object.assign(globalThis, native)
 
 const { act, renderHook } = await import('@testing-library/react')
-const { ToolParts, useChatSession, useScreenContext, useWordReveal } =
-	await import('./index.js')
+const {
+	ToolParts,
+	useChangePlan,
+	useChatSession,
+	useScreenContext,
+	useWordReveal
+} = await import('./index.js')
 
 afterAll(() => GlobalRegistrator.unregister())
 
@@ -175,5 +181,43 @@ describe('ToolParts', () => {
 		)
 
 		expect(html).toBe('<ul><i>search</i><i>lookup</i></ul><b>2</b>')
+	})
+})
+
+describe('useChangePlan', () => {
+	test('loads the plan on mount and shows it applied after confirm', async () => {
+		const plan = (status: string) => ({
+			id: 'plan-1',
+			threadId: 'thread-1',
+			status,
+			steps: [],
+			createdAt: '2026-11-26T00:00:00.000Z',
+			updatedAt: '2026-11-26T00:00:00.000Z'
+		})
+		const store = createChangePlanStore({
+			api: '/chat',
+			fetch: async (_input, init) =>
+				init?.method === 'POST'
+					? new Response(
+							`${JSON.stringify({ type: 'finished', plan: plan('applied') })}\n`
+						)
+					: Response.json({ plan: plan('proposed') })
+		})
+
+		const { result } = renderHook(() =>
+			useChangePlan(store, 'thread-1', 'plan-1')
+		)
+		await act(async () => {
+			await Bun.sleep(5)
+		})
+		expect(result.current.plan?.status).toBe('proposed')
+
+		await act(async () => {
+			await result.current.confirm()
+		})
+		expect(result.current).toMatchObject({
+			phase: 'idle',
+			plan: { status: 'applied' }
+		})
 	})
 })

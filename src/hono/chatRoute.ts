@@ -9,6 +9,21 @@
 
 import { type Context, type Env, Hono } from 'hono'
 
+import type { RequestContext } from '@mastra/core/request-context'
+
+import {
+	type ChangePlanProgress,
+	type ChangePlanRefusalCode,
+	changePlanRefusalStatuses
+} from '../protocol/index.js'
+import {
+	type ApplyChangePlanResult,
+	applyChangePlan,
+	discardChangePlan,
+	type PlanTool,
+	readChangePlan
+} from '../tools/changePlans.js'
+import type { ChatRecordStore } from '../tools/records.js'
 import { chatErrorResponse } from '../turn/errors.js'
 import { SSE_HEARTBEAT_MS, toChatStreamResponse } from '../turn/response.js'
 import type { ChatTurnRequest, ChatTurnResult } from '../turn/runChatTurn.js'
@@ -42,6 +57,35 @@ export interface ChatRouteOptions<
 	ownsThread?(threadId: string, auth: TAuth): Promise<boolean | undefined>
 	readonly heartbeatMs?: number
 	/**
+	 * Adds the change plan routes, for the thread's owner only (`ownsThread`
+	 * is required): `GET {path}/:threadId/plans/:planId` reads a plan,
+	 * `POST …/apply` applies it and streams its progress as NDJSON
+	 * (`ChangePlanProgress` per line), `POST …/discard` discards it. A plan
+	 * that cannot be applied or discarded answers `{ error }` with
+	 * `changePlanRefusalStatuses`.
+	 */
+	readonly changePlans?: {
+		readonly store: ChatRecordStore
+		/** The plan-tier tools steps may name; `DefinedTool`s. */
+		readonly tools: readonly PlanTool[]
+		/**
+		 * The apply request's context, built from the caller as a turn builds
+		 * it: each step's guard and hidden inputs read it.
+		 */
+		requestContext(
+			auth: TAuth,
+			threadId: string
+			// biome-ignore lint/suspicious/noExplicitAny: a context the app typed is not a RequestContext<unknown>.
+		): RequestContext<any> | Promise<RequestContext<any>>
+		/** How long a runner holds a plan without renewing. Default 60 s. */
+		readonly leaseMs?: number
+		/** A read or write error the user does not see, for the log. */
+		readonly onError?: (
+			error: unknown,
+			event: { readonly tool: string; readonly step: number }
+		) => void
+	}
+	/**
 	 * The refusals the route answers itself, in the app's codes: a caller
 	 * without `auth` (`unauthenticated`), a body `parseBody` rejects
 	 * (`invalid_request`), a thread that is not the caller's on reconnect or
@@ -67,6 +111,10 @@ export function createChatRoute<
 
 	if (resumable && !options.ownsThread) {
 		throw new Error('A resumable chat route needs ownsThread.')
+	}
+
+	if (options.changePlans && !options.ownsThread) {
+		throw new Error('A chat route with change plans needs ownsThread.')
 	}
 
 	app.post(options.path, async (c) => {
@@ -119,8 +167,6 @@ export function createChatRoute<
 		return toChatStreamResponse(stream, heartbeatMs)
 	})
 
-	if (!resumable) return app
-
 	const owned = async (c: Context<E>) => {
 		const auth = await options.auth(c)
 		const threadId = c.req.param('threadId')
@@ -133,8 +179,13 @@ export function createChatRoute<
 
 		if (owns === false) return { refusal: refuse('not_found') }
 
-		return { threadId, exists: owns === true }
+		return { threadId, exists: owns === true, auth }
 	}
+
+	if (options.changePlans)
+		mountChangePlans(app, options.path, options.changePlans, owned)
+
+	if (!resumable) return app
 
 	app.get(`${options.path}/:threadId/stream`, async (c) => {
 		const { refusal, threadId, exists } = await owned(c)
@@ -161,6 +212,173 @@ export function createChatRoute<
 	})
 
 	return app
+}
+
+type OwnedThread<TAuth> =
+	| {
+			readonly refusal: Response
+			readonly threadId?: undefined
+			readonly exists?: undefined
+			readonly auth?: undefined
+	  }
+	| {
+			readonly refusal?: undefined
+			readonly threadId: string
+			readonly exists: boolean
+			readonly auth: TAuth
+	  }
+
+function mountChangePlans<TAuth, E extends Env>(
+	app: Hono<E>,
+	path: string,
+	plans: NonNullable<ChatRouteOptions<TAuth, ChatTurnBody, E>['changePlans']>,
+	owned: (c: Context<E>) => Promise<OwnedThread<TAuth>>
+): void {
+	const planPath = `${path}/:threadId/plans/:planId`
+	// A plan lives in a thread that exists; any other answer is not found.
+	const ownedPlan = async (
+		c: Context<E>
+	): Promise<
+		| {
+				readonly refusal: Response
+				readonly threadId?: undefined
+				readonly planId?: undefined
+				readonly auth?: undefined
+		  }
+		| {
+				readonly refusal?: undefined
+				readonly threadId: string
+				readonly planId: string
+				readonly auth: TAuth
+		  }
+	> => {
+		const thread = await owned(c)
+
+		if (thread.refusal) return { refusal: thread.refusal }
+
+		if (!thread.exists) return { refusal: planRefusal('not_found') }
+
+		return {
+			threadId: thread.threadId,
+			auth: thread.auth,
+			planId: c.req.param('planId') ?? ''
+		}
+	}
+
+	app.get(planPath, async (c) => {
+		const { refusal, threadId, planId } = await ownedPlan(c)
+
+		if (refusal) return refusal
+
+		const plan = await readChangePlan({ store: plans.store, planId, threadId })
+
+		return plan ? c.json({ plan }) : planRefusal('not_found')
+	})
+
+	app.post(`${planPath}/discard`, async (c) => {
+		const { refusal, threadId, planId } = await ownedPlan(c)
+
+		if (refusal) return refusal
+
+		const result = await discardChangePlan({
+			store: plans.store,
+			planId,
+			threadId
+		})
+
+		return result.kind === 'refused'
+			? planRefusal(result.code)
+			: c.json({ plan: result.plan })
+	})
+
+	app.post(`${planPath}/apply`, async (c) => {
+		const { refusal, threadId, planId, auth } = await ownedPlan(c)
+
+		if (refusal) return refusal
+
+		keepConnectionOpen(c)
+
+		const requestContext = await plans.requestContext(auth, threadId)
+
+		return streamApply((onProgress) =>
+			applyChangePlan({
+				store: plans.store,
+				planId,
+				threadId,
+				tools: plans.tools,
+				requestContext,
+				onProgress,
+				...(plans.leaseMs !== undefined && { leaseMs: plans.leaseMs }),
+				...(plans.onError && { onError: plans.onError })
+			})
+		)
+	})
+}
+
+/**
+ * Runs the apply and answers once it is known whether the plan was claimed:
+ * a refusal as `{ error }` with its status, a claimed plan as an NDJSON
+ * stream of its progress. The plan runs to its end even when the caller goes
+ * away; another window follows it with the GET route.
+ */
+async function streamApply(
+	run: (
+		onProgress: (event: ChangePlanProgress) => void
+	) => Promise<ApplyChangePlanResult>
+): Promise<Response> {
+	const encoder = new TextEncoder()
+	const buffered: ChangePlanProgress[] = []
+	let controller: ReadableStreamDefaultController<Uint8Array> | undefined
+	let started: () => void = () => {}
+	const firstEvent = new Promise<'started'>((resolve) => {
+		started = () => resolve('started')
+	})
+	const send = (event: ChangePlanProgress) => {
+		try {
+			controller?.enqueue(encoder.encode(`${JSON.stringify(event)}\n`))
+		} catch {
+			// The caller went away; the plan goes on.
+		}
+	}
+	const running = run((event) => {
+		started()
+		if (controller) send(event)
+		else buffered.push(event)
+	})
+	const first = await Promise.race([firstEvent, running])
+
+	if (first !== 'started' && first.kind === 'refused')
+		return planRefusal(first.code)
+
+	const body = new ReadableStream<Uint8Array>({
+		start(streamController) {
+			controller = streamController
+			for (const event of buffered.splice(0)) send(event)
+			running
+				.catch(() => {})
+				.finally(() => {
+					try {
+						streamController.close()
+					} catch {
+						// Already closed by a gone caller.
+					}
+				})
+		}
+	})
+
+	return new Response(body, {
+		headers: {
+			'Content-Type': 'application/x-ndjson',
+			'Cache-Control': 'no-store'
+		}
+	})
+}
+
+function planRefusal(code: ChangePlanRefusalCode): Response {
+	return Response.json(
+		{ error: code },
+		{ status: changePlanRefusalStatuses[code] }
+	)
 }
 
 /** What the chat client retries once on its own, after a second (`createChatFetch`'s `retry.draining`). */

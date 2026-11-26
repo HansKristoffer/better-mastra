@@ -24,6 +24,8 @@ import type {
 	Card,
 	CardRegistry,
 	CardSchemas,
+	ChangePlanState,
+	ChangePlanStore,
 	ChatSession,
 	ChatSessionSnapshot,
 	ChatSnapshot,
@@ -268,4 +270,39 @@ function drawCard<S extends CardSchemas>(
 
 function useMountEffect(effect: EffectCallback): void {
 	useEffect(effect, [effect])
+}
+
+export interface ChangePlanHook extends ChangePlanState {
+	/** Applies the plan; progress arrives in `plan` step by step. */
+	readonly confirm: () => Promise<void>
+	readonly discard: () => Promise<void>
+}
+
+/**
+ * One change plan as hook state, loaded on mount: its steps and status, what
+ * this window is doing with it, and the user's two answers. Draw the card
+ * from `readProposedChangePlans(message)` until `plan` has loaded.
+ */
+export function useChangePlan(
+	store: ChangePlanStore,
+	threadId: string,
+	planId: string
+): ChangePlanHook {
+	const getState = useCallback(() => store.get(planId), [store, planId])
+	const state = useSyncExternalStore(store.subscribe, getState, getState)
+
+	useEffect(() => {
+		void store.load(threadId, planId)
+	}, [store, threadId, planId])
+
+	const confirm = useCallback(
+		() => store.confirm(threadId, planId),
+		[store, threadId, planId]
+	)
+	const discard = useCallback(
+		() => store.discard(threadId, planId),
+		[store, threadId, planId]
+	)
+
+	return { ...state, confirm, discard }
 }

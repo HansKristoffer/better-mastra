@@ -16,7 +16,13 @@ import {
 	type ToolChange,
 	type ToolChangeCall
 } from './changes.js'
+import {
+	type BoundToolPlan,
+	proposePlanStep,
+	type ToolPlan
+} from './changePlans.js'
 import { dryRunResult, isDryRun, isDryRunResult } from './dryRun.js'
+import { ToolRefusal } from './refusal.js'
 import { compactToolInputSchema, withHiddenInputs } from './toolInputSchema.js'
 
 type CreateToolOptions = Parameters<typeof createTool>[0]
@@ -24,23 +30,17 @@ type CreateToolOptions = Parameters<typeof createTool>[0]
 // biome-ignore lint/suspicious/noExplicitAny: any Mastra tool, whatever its schemas.
 type AnyTool = Tool<any, any, any, any, any, any, any>
 
-/** A tier: `read` runs at once, `approval` waits for the user's approval. Apps may add their own. */
-export type ToolTier = 'read' | 'approval' | (string & {})
+/**
+ * A tier: `read` runs at once, `approval` waits for the user's approval,
+ * `plan` adds a step to the turn's change plan, which the user confirms once
+ * when the turn has answered. Apps may add their own.
+ */
+export type ToolTier = 'read' | 'approval' | 'plan' | (string & {})
 
 /** Where the tool runs: on the server, or without `execute` in the client (`addToolOutput`). */
 export type ToolKind = 'server' | 'client'
 
-/**
- * An error whose message the model may read as it is: input the tool cannot
- * act on, a missing permission. With `maskErrors`, every other error a tool
- * throws reaches the model as one fixed sentence.
- */
-export class ToolRefusal extends Error {
-	constructor(message: string, options?: ErrorOptions) {
-		super(message, options)
-		this.name = 'ToolRefusal'
-	}
-}
+export { ToolRefusal }
 
 /** What the model reads for a masked error, unless the definition says otherwise. */
 export const TOOL_ERROR_SENTENCE =
@@ -108,6 +108,14 @@ export interface ToolDefinition<
 	 */
 	// biome-ignore lint/suspicious/noExplicitAny: each tool types its own change; the definition only runs it.
 	readonly change?: ToolChange<any, any, any, any>
+	/**
+	 * For `tier: 'plan'`: the tool never writes when the model calls it. Its
+	 * `propose` reads the targets and works out what it would write, and the
+	 * step joins the turn's change plan; `applyChangePlan` writes it once the
+	 * user confirmed the plan. The tool needs no `execute`.
+	 */
+	// biome-ignore lint/suspicious/noExplicitAny: each tool types its own plan; the definition only runs it.
+	readonly plan?: ToolPlan<any, any, any>
 	/** The server's own data about the tool (a gate, a permission); never reaches the manifest. */
 	readonly meta?: TMeta
 	/**
@@ -138,6 +146,17 @@ export interface DefinedTool<
 	readonly invalidates: readonly string[]
 	readonly manifest: Readonly<Record<string, unknown>>
 	readonly meta: TMeta
+	/** A plan-tier tool's plan, bound to its hidden inputs, for `applyChangePlan`. */
+	readonly plan?: BoundToolPlan
+}
+
+/** What the model reads when a plan-tier tool added its step. */
+export function planStepSentence(step: {
+	readonly index: number
+	readonly title: string
+	readonly count: number
+}): string {
+	return `Added step ${step.index + 1} to this turn's change plan: ${step.title} (${step.count} ${step.count === 1 ? 'change' : 'changes'}). Nothing is changed yet: when your answer ends, the user sees the whole plan and confirms or discards it. Do not say it is done.`
 }
 
 /** Per-turn read-tool result cache scoped to a requestContext; auto-invalidated on any write tool call. */
@@ -186,14 +205,42 @@ export function defineTool<
 	// With hidden inputs that second pass is the only check of the filled
 	// values, so it stays; without them the outer tool already validated the
 	// same input, so the function the options name runs directly.
+	const plan = definition.plan
+	const callFor = (
+		input: unknown,
+		requestContext: RequestContext | undefined
+	) => ({
+		input: fillHiddenInputs(input, hidden, requestContext),
+		requestContext
+	})
+	const proposeStep = plan
+		? async (input: unknown, context: { requestContext?: RequestContext }) => {
+				const call = callFor(input, context?.requestContext)
+				const refusal = await plan.guard?.(call)
+
+				if (refusal !== undefined) throw new ToolRefusal(refusal)
+
+				const visibleInput =
+					hiddenNames.length === 0
+						? input
+						: omit((input ?? {}) as Record<string, unknown>, hiddenNames)
+
+				return proposePlanStep(
+					{ ...call, tool: base.id, visibleInput },
+					await plan.propose(call)
+				)
+			}
+		: undefined
 	const baseExecute =
-		hiddenNames.length === 0 && !isTool(definition.tool)
+		proposeStep ??
+		(hiddenNames.length === 0 && !isTool(definition.tool)
 			? definition.tool.execute
-			: base.execute
+			: base.execute)
 	const toModelOutput = definition.toModelOutput
 	const maxModelOutputChars = definition.maxModelOutputChars
-	// Only a read is safe to run in an eval's dry run.
-	const honoursDryRun = definition.tier !== 'read'
+	// Only a read is safe to run in an eval's dry run; a plan's propose only
+	// reads, and in a dry run its step stays in memory (`readDryRunChangePlan`).
+	const honoursDryRun = definition.tier !== 'read' && !plan
 	const memoizesReads =
 		definition.tier === 'read' && definition.memoizePerTurn === true
 	const masking =
@@ -212,6 +259,8 @@ export function defineTool<
 			// Any non-read tool invalidates memoized read results in the same turn.
 			turnReadCache.delete(requestContext)
 		}
+
+		if (proposeStep) return proposeStep(input, context)
 
 		const filled = fillHiddenInputs(input, hidden, requestContext)
 		const execute = () => baseExecute!(filled, context as never)
@@ -257,6 +306,7 @@ export function defineTool<
 			: inputSchemaWithHidden
 
 	const hasModelOutputHook =
+		plan !== undefined ||
 		toModelOutput !== undefined ||
 		(maxModelOutputChars !== undefined && maxModelOutputChars > 0)
 
@@ -288,7 +338,11 @@ export function defineTool<
 					return { type: 'text', value: JSON.stringify(output) }
 				}
 
-				const raw = toModelOutput ? toModelOutput(output as never) : output
+				const raw = toModelOutput
+					? toModelOutput(output as never)
+					: plan && isPlanStepOutput(output)
+						? planStepSentence(output.changePlan.step)
+						: output
 				if (maxModelOutputChars !== undefined && maxModelOutputChars > 0) {
 					const payload =
 						typeof raw === 'object' &&
@@ -325,8 +379,22 @@ export function defineTool<
 			...(change?.confirmFields && { confirmFields: change.confirmFields }),
 			...definition.manifest
 		},
-		meta: definition.meta as TMeta
+		meta: definition.meta as TMeta,
+		...(plan && { plan: { definition: plan, callFor } })
 	}
+}
+
+function isPlanStepOutput(output: unknown): output is {
+	readonly changePlan: {
+		readonly step: { index: number; title: string; count: number }
+	}
+} {
+	return (
+		typeof output === 'object' &&
+		output !== null &&
+		'changePlan' in output &&
+		typeof (output as { changePlan?: unknown }).changePlan === 'object'
+	)
 }
 
 /**

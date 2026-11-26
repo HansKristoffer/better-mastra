@@ -140,3 +140,9 @@ export function pgStorage(
 		}
 	}
 }
+
+export {
+	type PgQueryable,
+	type PgRecordStore,
+	pgRecordStore
+} from './records.js'
