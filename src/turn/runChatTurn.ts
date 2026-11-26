@@ -26,7 +26,11 @@ import {
 	type TurnChanges,
 	withoutStaleAnswers
 } from './changes.js'
-import { CHANGE_PLAN_PART, type ChangePlanView } from '../protocol/index.js'
+import {
+	CHANGE_PLAN_PART,
+	type ChangePlanView,
+	MESSAGE_DECLINED_PART
+} from '../protocol/index.js'
 import {
 	bindTurnChangePlan,
 	CHANGE_PLAN_KIND,
@@ -39,6 +43,13 @@ import {
 import { bindTurnDatasets } from '../tools/datasets.js'
 import type { ChatRecordStore } from '../tools/records.js'
 import { chatErrorResponse, chatRefusal } from './errors.js'
+import {
+	type ChatTurnScreening,
+	runScreening,
+	SCREENING_REPLIES,
+	type ScreeningVerdict,
+	setTurnGate
+} from './screening.js'
 import {
 	createTurnObserver,
 	type ToolSettledEvent,
@@ -60,6 +71,7 @@ import {
 	type RunUsage,
 	type StreamTextUsage
 } from '../usage/stream.js'
+import { deleteThreadEverywhere } from './threads.js'
 import { deriveThreadTitle, persistThreadMetadata } from './title.js'
 import {
 	type AnyRequestContext,
@@ -190,6 +202,7 @@ export const chatTurnStages = [
 	'gate',
 	'thread_lock',
 	'usage_limit',
+	'screening',
 	'preparation',
 	'thread',
 	'tool',
@@ -241,6 +254,11 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 		 */
 		readonly thread: StorageThreadType | null
 		readonly signal: AbortSignal
+		/**
+		 * The screening verdict, when this message is screened. Await it only
+		 * to pick a new thread's model tier: the turn then waits for it.
+		 */
+		readonly screening?: Promise<ScreeningVerdict>
 	}): Promise<PreparedChatTurn>
 	/**
 	 * Waiting approvals and suspended tool calls: a request may answer only its
@@ -267,6 +285,14 @@ export interface ChatTurnDeps<TAuth, TBody extends ChatTurnBody, TScope> {
 		/** How long a plan is kept, in ms; null for the thread's life. Default 7 days. */
 		readonly ttlMs?: number | null
 	}
+	/**
+	 * Message screening: a cheap model classifies the user's message beside
+	 * the turn. Until it allows the message nothing is streamed or stored and
+	 * no tool runs; a declined message gets a short reply, outcome `declined`.
+	 * With `strikes`, a paused user is refused with `user_paused` and its
+	 * `retryAfterSeconds`.
+	 */
+	readonly screening?: ChatTurnScreening<TScope>
 	/**
 	 * Turn datasets: rows a data tool registers (`registerDataset`) are kept
 	 * in `store` for the thread, the model gets a handle, and display tools
@@ -439,10 +465,15 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 	)
 	// Avoid unhandled rejection if `gate` refuses or throws while `thread` also fails.
 	threadPromise.catch(() => {})
+	const pausedPromise = readPause(scope, deps, logger, atStage)
 
 	const gateRefusal = await gatePromise
 
 	if (gateRefusal) return refused(gateRefusal)
+
+	const pausedFor = await pausedPromise
+
+	if (pausedFor !== undefined) return pausedRefusal(deps, pausedFor)
 
 	const thread = await threadPromise
 	throwIfAborted(request.signal)
@@ -451,6 +482,13 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 	if (thread && thread.resourceId !== threadKey.resourceId) {
 		return refusedWith(deps, 'forbidden')
 	}
+
+	// Beside everything after: the lock, the limit, preparation and the model.
+	const screening = startScreening(
+		{ request, scope, threadKey, thread, messages },
+		deps,
+		logger
+	)
 
 	const lock = await atStage('thread_lock', async () =>
 		deps.lock ? deps.lock(threadKey) : async () => {}
@@ -484,7 +522,8 @@ async function admitAndRun<TAuth, TBody extends ChatTurnBody, TScope>(
 				startedAt,
 				release,
 				atStage,
-				stageMs
+				stageMs,
+				screening
 			},
 			deps,
 			logger
@@ -505,6 +544,8 @@ interface AdmittedTurn<TAuth, TBody extends ChatTurnBody, TScope> {
 	readonly release: () => Promise<void>
 	readonly atStage: StageClock['atStage']
 	readonly stageMs: StageClock['stageMs']
+	/** The verdict on this message, when it is screened. */
+	readonly screening: Promise<ScreeningVerdict> | undefined
 }
 
 /** Preparation, the waiting changes, then Mastra's stream. A failure here releases the lock. */
@@ -523,7 +564,8 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			messages: turn.messages,
 			threadKey,
 			thread: turn.thread,
-			signal: request.signal
+			signal: request.signal,
+			...(turn.screening && { screening: turn.screening })
 		})
 	)
 	const { requestContext } = prepared
@@ -562,6 +604,25 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 				ttlMs: deps.changePlans.ttlMs
 			}),
 			...(deps.now && { now: deps.now })
+		})
+	}
+
+	// A declined message aborts the run: Mastra then stores nothing of it.
+	const runAbort = new AbortController()
+	const runSignal = turn.screening
+		? AbortSignal.any([request.signal, runAbort.signal])
+		: request.signal
+	let declined: ScreeningVerdict | undefined
+
+	if (turn.screening) {
+		turn.screening.then((verdict) => {
+			if (verdict.verdict === 'allowed') return
+			declined = verdict
+			runAbort.abort('declined')
+		})
+		setTurnGate(requestContext, {
+			verdict: turn.screening,
+			mode: deps.screening?.mode ?? 'parallel'
 		})
 	}
 
@@ -643,7 +704,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 					: [...(prepared.messages ?? turn.messages)]) as never[],
 				memory,
 				requestContext,
-				abortSignal: request.signal,
+				abortSignal: runSignal,
 				...(request.body.trigger && { trigger: request.body.trigger }),
 				...(resume && { runId: resume.runId, resumeData: resume.data }),
 				...(prepared.tracingOptions && {
@@ -722,6 +783,7 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	const close = async (ending: TurnStreamEnding) => {
 		const finished: TurnFinishedEvent<TScope> = {
 			...observer.summary({ ending, ...stopOf(request.signal) }),
+			...(declined && { outcome: 'declined' as const }),
 			scope,
 			threadKey,
 			labels,
@@ -777,9 +839,33 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 		}
 
 		const title =
-			deriveTitle === false
+			// A declined message leaves no trace in the thread: no title, no metadata.
+			deriveTitle === false || declined
 				? null
 				: (report('deriveTitle', () => deriveTitle(turn.messages)) ?? null)
+
+		if (declined) {
+			// Mastra writes even for an aborted run (the thread at its start, the
+			// message on abort): remove it before anyone can read it, under the lock.
+			await forgetDeclinedMessage(
+				deps.memory,
+				threadKey,
+				turn.thread,
+				newMessage
+			).catch((error: unknown) =>
+				logger.error('[better-mastra] a declined message was not removed', {
+					stage: 'screening' satisfies ChatTurnStage,
+					error
+				})
+			)
+		}
+
+		if (declined?.verdict === 'abusive' && deps.screening?.strikes) {
+			const verdict = declined
+			report('screening.strikes', () =>
+				deps.screening?.strikes?.record(scope, verdict)
+			)
+		}
 
 		try {
 			if (deps.changePlans) {
@@ -801,7 +887,10 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 			// and already holds the turn's values, or a turn that gives neither.
 			// Held under the thread lock so a fast follow-up turn never reads stale
 			// metadata or races on the read-modify-write.
-			if (needsThreadMetadata(turn.thread, title, prepared.threadMetadata)) {
+			if (
+				!declined &&
+				needsThreadMetadata(turn.thread, title, prepared.threadMetadata)
+			) {
 				// Awaited: the client refreshes its thread list when the stream closes.
 				await persistThreadMetadata({
 					memory: deps.memory,
@@ -849,26 +938,228 @@ async function startTurn<TAuth, TBody extends ChatTurnBody, TScope>(
 	return {
 		kind: 'stream',
 		threadKey,
-		stream: toUserFacingStream(started, {
-			observe: (chunk) => {
-				observeErrors(chunk)
-				observer.observe(chunk)
-			},
-			...(newMessage && {
-				afterStart: {
-					type: USER_MESSAGE_PART,
-					data: { message: newMessage },
-					transient: true
-				} as UIMessageChunk
-			}),
-			close,
-			...(epilogue && { epilogue }),
-			...(suggestions?.holdFinish && { holdFinish: true }),
-			...(deps.errorSentence && { errorSentence: deps.errorSentence }),
-			onInternalError: (error) =>
-				logger.error('[better-mastra] the turn stream failed', { error })
-		})
+		stream: toUserFacingStream(
+			turn.screening
+				? holdUntilScreened(started, turn.screening, (verdict) =>
+						declinedReply(
+							verdict,
+							deps.screening?.reply?.(verdict) ??
+								SCREENING_REPLIES[
+									verdict.verdict === 'abusive' ? 'abusive' : 'off_topic'
+								]
+						)
+					)
+				: started,
+			{
+				observe: (chunk) => {
+					observeErrors(chunk)
+					observer.observe(chunk)
+				},
+				...(newMessage && {
+					afterStart: {
+						type: USER_MESSAGE_PART,
+						data: { message: newMessage },
+						transient: true
+					} as UIMessageChunk
+				}),
+				close,
+				...(epilogue && { epilogue }),
+				...(suggestions?.holdFinish && { holdFinish: true }),
+				...(deps.errorSentence && { errorSentence: deps.errorSentence }),
+				onInternalError: (error) =>
+					logger.error('[better-mastra] the turn stream failed', { error })
+			}
+		)
 	}
+}
+
+/**
+ * Removes what the aborted run of a declined message left in memory: the
+ * whole thread when the turn created it, else the message and anything
+ * after it.
+ */
+async function forgetDeclinedMessage(
+	memory: MastraMemory,
+	threadKey: ThreadKey,
+	threadBefore: StorageThreadType | null,
+	message: UIMessage | undefined
+): Promise<void> {
+	if (threadBefore === null) {
+		if (await memory.getThreadById({ threadId: threadKey.threadId })) {
+			await deleteThreadEverywhere(memory, threadKey)
+		}
+		return
+	}
+
+	if (!message) return
+
+	const { messages: stored } = await memory.recall({
+		threadId: threadKey.threadId,
+		resourceId: threadKey.resourceId,
+		perPage: RECENT_MESSAGES,
+		hideSignals: false,
+		includeTotal: false
+	})
+	const index = stored.findIndex(
+		(storedMessage) => storedMessage.id === message.id
+	)
+
+	if (index !== -1) {
+		await memory.deleteMessages(
+			stored.slice(index).map((storedMessage) => storedMessage.id)
+		)
+	}
+}
+
+/**
+ * Starts screening the request's new message when the app screens it: a new
+ * thread's first message, or every message. Undefined for a request with
+ * nothing new to screen (an approval answer, a client tool's result).
+ */
+function startScreening<TAuth, TBody extends ChatTurnBody, TScope>(
+	turn: {
+		readonly request: ChatTurnRequest<TAuth, TBody>
+		readonly scope: TScope
+		readonly threadKey: ThreadKey
+		readonly thread: StorageThreadType | null
+		readonly messages: readonly UIMessage[]
+	},
+	deps: ChatTurnDeps<TAuth, TBody, TScope>,
+	logger: ChatTurnLogger
+): Promise<ScreeningVerdict> | undefined {
+	const screening = deps.screening
+	const last = turn.messages.at(-1)
+	const text = last?.role === 'user' ? textOf(last).trim() : ''
+	const isNewThread = turn.thread === null
+
+	if (!screening || text === '') return undefined
+
+	if ((screening.when ?? 'first-message') === 'first-message' && !isNewThread) {
+		return undefined
+	}
+
+	return runScreening(
+		screening,
+		{
+			scope: turn.scope,
+			text,
+			threadKey: turn.threadKey,
+			isNewThread,
+			signal: turn.request.signal
+		},
+		(error) =>
+			logger.error('[better-mastra] the message screening failed', {
+				stage: 'screening' satisfies ChatTurnStage,
+				error
+			})
+	)
+}
+
+/** Seconds a paused user waits; undefined when not paused, no strikes are kept, or the check failed (logged, let through). */
+async function readPause<TAuth, TBody extends ChatTurnBody, TScope>(
+	scope: TScope,
+	deps: ChatTurnDeps<TAuth, TBody, TScope>,
+	logger: ChatTurnLogger,
+	atStage: StageClock['atStage']
+): Promise<number | undefined> {
+	const strikes = deps.screening?.strikes
+
+	if (!strikes) return undefined
+
+	try {
+		const seconds = await atStage('screening', () => strikes.check(scope))
+
+		return seconds !== undefined && seconds > 0 ? seconds : undefined
+	} catch (error) {
+		logger.error('[better-mastra] the abuse strikes were not read', {
+			stage: 'screening' satisfies ChatTurnStage,
+			error: error instanceof ChatTurnStageError ? error.failure : error
+		})
+
+		return undefined
+	}
+}
+
+/** `user_paused`, or the app's code for it, with the seconds until the pause ends. */
+function pausedRefusal(
+	deps: { readonly refusals?: Partial<Record<ChatErrorCode, ChatRefusal>> },
+	retryAfterSeconds: number
+): ChatTurnResult {
+	const own = deps.refusals?.user_paused
+	const { code, status } = chatRefusal(own ?? 'user_paused')
+
+	return refused({
+		code,
+		status,
+		retryAfterSeconds: Math.ceil(retryAfterSeconds)
+	})
+}
+
+/**
+ * The run's stream, held back until the verdict: an allowed message gets
+ * everything held so far and then the rest as it comes; a declined one gets
+ * only the reply, while the aborted run is read to its end and dropped.
+ */
+function holdUntilScreened(
+	source: ReadableStream<UIMessageChunk>,
+	verdict: Promise<ScreeningVerdict>,
+	reply: (verdict: ScreeningVerdict) => readonly UIMessageChunk[]
+): ReadableStream<UIMessageChunk> {
+	return new ReadableStream<UIMessageChunk>({
+		async start(controller) {
+			const held: UIMessageChunk[] = []
+			let state = 'holding' as 'holding' | 'open' | 'declined'
+			const decided = verdict.then((screened) => {
+				if (screened.verdict === 'allowed') {
+					for (const chunk of held.splice(0)) controller.enqueue(chunk)
+					state = 'open'
+				} else {
+					held.length = 0
+					state = 'declined'
+					for (const chunk of reply(screened)) controller.enqueue(chunk)
+				}
+			})
+			const reader = source.getReader()
+			let failure: unknown
+
+			try {
+				for (;;) {
+					const { done, value } = await reader.read()
+					if (done) break
+					if (state === 'open') controller.enqueue(value)
+					else if (state === 'holding') held.push(value)
+				}
+			} catch (error) {
+				failure = error
+			}
+
+			await decided
+
+			if (failure !== undefined && state === 'open') controller.error(failure)
+			else controller.close()
+		}
+	})
+}
+
+/** A declined message's reply, as a whole answer of its own. */
+function declinedReply(
+	verdict: ScreeningVerdict,
+	text: string
+): readonly UIMessageChunk[] {
+	const id = 'declined'
+
+	return [
+		{ type: 'start' },
+		{
+			type: MESSAGE_DECLINED_PART,
+			data: { verdict: verdict.verdict },
+			transient: true
+		} as UIMessageChunk,
+		{ type: 'text-start', id },
+		{ type: 'text-delta', id, delta: text },
+		{ type: 'text-end', id },
+		{ type: 'finish', finishReason: 'stop' }
+	]
 }
 
 /**
@@ -948,25 +1239,48 @@ function readThreadPlans<TAuth, TBody extends ChatTurnBody, TScope>(
 
 	const { threadId } = turn.threadKey
 	const movesOn = turn.messages.at(-1)?.role === 'user'
+	const logger = deps.logger ?? consoleLogger
+	const moveOn = () =>
+		moveOnFromWaitingPlans({
+			store: plans.store,
+			threadId,
+			...(deps.now && { now: deps.now })
+		})
+	const list = async () =>
+		(await plans.store.list(CHANGE_PLAN_KIND, threadId)) as ChangePlanRecord[]
+	const { screening } = turn
 
 	return turn
-		.atStage('thread', async () =>
-			movesOn
-				? moveOnFromWaitingPlans({
-						store: plans.store,
-						threadId,
-						...(deps.now && { now: deps.now })
-					})
-				: ((await plans.store.list(
-						CHANGE_PLAN_KIND,
-						threadId
-					)) as ChangePlanRecord[])
-		)
-		.catch((error: unknown) => {
-			;(deps.logger ?? consoleLogger).error(
-				"[better-mastra] the thread's change plans were not read",
-				{ error: error instanceof ChatTurnStageError ? error.failure : error }
+		.atStage('thread', async () => {
+			if (!movesOn) return list()
+
+			if (!screening) return moveOn()
+
+			// The discard waits for the verdict, so a declined message changes
+			// nothing; the model already reads the plans as moved on from.
+			screening
+				.then((verdict) =>
+					verdict.verdict === 'allowed' ? moveOn() : undefined
+				)
+				.catch((error: unknown) =>
+					logger.error(
+						'[better-mastra] waiting change plans were not discarded',
+						{
+							error
+						}
+					)
+				)
+
+			return (await list()).map((plan) =>
+				plan.data.status === 'proposed' || plan.data.status === 'failed'
+					? { ...plan, data: { ...plan.data, status: 'discarded' as const } }
+					: plan
 			)
+		})
+		.catch((error: unknown) => {
+			logger.error("[better-mastra] the thread's change plans were not read", {
+				error: error instanceof ChatTurnStageError ? error.failure : error
+			})
 			return undefined
 		})
 }
@@ -1025,7 +1339,13 @@ async function classifyChanges<TAuth, TBody extends ChatTurnBody, TScope>(
 		pending
 	)
 
-	if (changes.kind === 'newMessage' && changes.waiting.length > 0) {
+	// A message screening may still decline must not answer what waits.
+	const allowed =
+		changes.kind === 'newMessage' &&
+		changes.waiting.length > 0 &&
+		(!turn.screening || (await turn.screening).verdict === 'allowed')
+
+	if (changes.kind === 'newMessage' && allowed) {
 		const { movedOnData } = deps.pendingChanges || {}
 
 		await turn.atStage('tool', () =>

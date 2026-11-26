@@ -27,3 +27,11 @@ export {
 	type UserRequestAdmission,
 	type UserRequestWindow
 } from './userRequests.js'
+export {
+	ABUSE_PAUSE_SCRIPT,
+	ABUSE_STRIKE_SCRIPT,
+	type AbusePause,
+	type AbuseStrikes,
+	createAbuseStrikes,
+	screeningStrikes
+} from './strikes.js'

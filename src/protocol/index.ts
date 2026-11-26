@@ -83,6 +83,7 @@ export const chatErrorCodes = [
 	'turn_in_progress',
 	'change_expired',
 	'usage_limited',
+	'user_paused',
 	'temporarily_unavailable'
 ] as const
 export type ChatErrorCode = (typeof chatErrorCodes)[number]
@@ -99,6 +100,7 @@ export const chatErrorStatuses: Readonly<Record<ChatErrorCode, number>> = {
 	turn_in_progress: 409,
 	change_expired: 409,
 	usage_limited: 429,
+	user_paused: 429,
 	temporarily_unavailable: 503
 }
 
@@ -205,13 +207,15 @@ export function defineChatErrors<
  * `finishReason: 'length'`): the answer is cut off, and a tool call it was
  * still writing never ran. `stopped` is the user's Stop or a dropped
  * connection; `interrupted` is the server ending it, a newer turn on the
- * thread or a shutdown (`TurnAbortReason`).
+ * thread or a shutdown (`TurnAbortReason`). `declined` is a message
+ * screening turned away: the user got a short reply and nothing was stored.
  */
 export const turnOutcomes = [
 	'answered',
 	'truncated',
 	'stopped',
 	'interrupted',
+	'declined',
 	'budget_stop',
 	'timeout',
 	'error'
@@ -417,3 +421,12 @@ export const turnDatasetSchema = z.object({
 	createdAt: z.string()
 })
 export type TurnDatasetView = z.infer<typeof turnDatasetSchema>
+
+// SCREENING
+
+/** What message screening decides: answer it, or decline it as off topic or abusive. */
+export const screeningVerdicts = ['allowed', 'off_topic', 'abusive'] as const
+export type ScreeningVerdictKind = (typeof screeningVerdicts)[number]
+
+/** The transient data part a declined message's reply carries: `{ verdict }`, so a client can mark the message. */
+export const MESSAGE_DECLINED_PART = 'data-message-declined'

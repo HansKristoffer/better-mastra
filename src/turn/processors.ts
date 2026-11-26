@@ -19,6 +19,7 @@ import {
 import { must } from 'hanzio'
 
 import { TOOL_CALL_BUDGET_STOP_REASON } from '../protocol/index.js'
+import { passTurnGate, ScreeningDeclined } from './screening.js'
 import { findTurnPlan } from './types.js'
 
 export { TOOL_CALL_BUDGET_STOP_REASON }
@@ -52,6 +53,34 @@ export class ToolCallBudgetStop implements Processor<'tool-call-budget'> {
 		}
 
 		return messageList
+	}
+}
+
+/**
+ * With screening in `before-model` mode, holds the first model call until
+ * the verdict, so a declined message never reaches the main model. A
+ * declined message ends the run as an abort, never a tripwire: the turn has
+ * aborted the run's signal already, and an aborted run stores nothing, not
+ * even its thread. Other turns pass at once.
+ */
+export class ScreeningGate implements Processor<'screening-gate'> {
+	readonly id = 'screening-gate'
+
+	async processInputStep({
+		stepNumber,
+		requestContext
+	}: ProcessInputStepArgs): Promise<undefined> {
+		if (stepNumber !== 0) return undefined
+
+		try {
+			await passTurnGate(requestContext, 'model')
+		} catch (error) {
+			throw error instanceof ScreeningDeclined
+				? new DOMException(error.message, 'AbortError')
+				: error
+		}
+
+		return undefined
 	}
 }
 

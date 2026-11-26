@@ -25,6 +25,7 @@ const RETRYABLE_BUILT_IN_CODES: readonly ChatErrorCode[] = [
 	'turn_in_progress',
 	'temporarily_unavailable',
 	'usage_limited',
+	'user_paused',
 	'consent_required'
 ]
 

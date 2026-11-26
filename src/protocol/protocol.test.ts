@@ -116,6 +116,7 @@ describe('defineChatErrors', () => {
 			'turn_in_progress',
 			'change_expired',
 			'usage_limited',
+			'user_paused',
 			'temporarily_unavailable',
 			'workspace_forbidden',
 			'chat_model_forbidden'

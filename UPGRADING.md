@@ -87,6 +87,25 @@ createChatSession({ /* …, */ onData: (part) => { plans.onData(part); datasets.
 
 **Check afterwards.** A data tool whose rows used to reach the model as its result now gives a handle: move what the model needs to talk about into `summary`, worked out in code, and tell it in the instructions to show tables and charts with the display tools.
 
+### Three unions grew: `declined`, `user_paused`, `screening`
+
+Message screening (`runChatTurn({ screening })`, opt-in) adds a value to three unions an app may switch over. Nothing changes until you pass `screening`, but an exhaustive `switch` or `Record` stops typechecking until it has the case:
+
+- `TurnOutcome` / `turnOutcomes`: `declined`, a message screening turned away. `sinks.scoreTurn` is not called for it and it has no reply suggestions.
+- `ChatErrorCode` / `chatErrorCodes`: `user_paused` (429, with `retryAfterSeconds`), for a user paused after abuse strikes. The client counts it as worth trying again later; give it a sentence:
+
+```ts
+if (failure.kind === 'refused' && failure.refusal.code === 'user_paused') {
+	return t('chat.paused', { minutes: Math.ceil((failure.refusal.retryAfterSeconds ?? 60) / 60) })
+}
+```
+
+- `ChatTurnStage` / `chatTurnStages`: `screening`, in `stageMs` and in the stage of a logged failure.
+
+To adopt screening, see the README's "Message screening": `createMessageScreener` on a cheap model, `reply` in your copy, and `strikes: screeningStrikes(createAbuseStrikes({ runScript, secret, keyPrefix }), (scope) => scope.userId)`.
+
+**Check afterwards.** A dashboard of outcomes or refusal codes has the new labels. A declined message is not stored: a client that reloads the thread after it no longer shows it, which is intended.
+
 ## 0.11.0
 
 No export was removed or renamed, and no existing union requires new switch cases. Several defaults changed for better prompt-cache hit rates, latency and safety, and new helpers remove boilerplate from apps.

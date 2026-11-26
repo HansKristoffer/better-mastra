@@ -34,8 +34,20 @@ export {
 	type TurnSummary
 } from './observer.js'
 export {
+	type ChatTurnScreening,
+	createMessageScreener,
+	hasTurnGate,
+	passTurnGate,
+	SCREENING_REPLIES,
+	ScreeningDeclined,
+	type ScreeningVerdict,
+	type ScreeningVerdictKind,
+	screeningVerdicts
+} from './screening.js'
+export {
 	LAST_STEP_SIGNAL,
 	RetryBeforeAnswerText,
+	ScreeningGate,
 	TOOL_CALL_BUDGET_STOP_REASON,
 	ToolCallBudgetStop,
 	TurnSignals

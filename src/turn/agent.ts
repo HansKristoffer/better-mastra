@@ -25,6 +25,7 @@ import type { z } from 'zod'
 import { compactTool } from '../tools/toolInputSchema.js'
 import {
 	RetryBeforeAnswerText,
+	ScreeningGate,
 	ToolCallBudgetStop,
 	TurnSignals
 } from './processors.js'
@@ -33,6 +34,7 @@ import {
 	type PromptCacheTtl,
 	withConversationCache
 } from './promptCache.js'
+import { hasTurnGate, passTurnGate } from './screening.js'
 import {
 	type ChatTurnPlan,
 	findTurnPlan,
@@ -136,6 +138,7 @@ export function createChatAgent(options: CreateChatAgentOptions): Agent {
 	)
 	const staticProcessors: InputProcessorOrWorkflow[] = [
 		new ToolCallBudgetStop(options.toolCallsPerStep),
+		new ScreeningGate(),
 		new TurnSignals(),
 		...(options.processors ?? [])
 	]
@@ -153,7 +156,10 @@ export function createChatAgent(options: CreateChatAgentOptions): Agent {
 		maxProcessorRetries: options.maxProcessorRetries ?? 2,
 		instructions: ({ requestContext }) => instructionsFor(requestContext),
 		tools: ({ requestContext }) =>
-			normalizeTools(findTurnPlan(requestContext)?.tools, compactTools),
+			gateTools(
+				normalizeTools(findTurnPlan(requestContext)?.tools, compactTools),
+				requestContext
+			),
 		model: ({ requestContext }) => modelFor(findTurnPlan(requestContext)),
 		defaultOptions: ({ requestContext }) =>
 			defaultOptionsFor(
@@ -272,6 +278,34 @@ function normalizeTools(
 		sorted[key] = compactTools ? compactTool(tool as never) : tool
 	}
 	return sorted
+}
+
+/**
+ * While the turn's message is being screened, every tool waits for the
+ * verdict before it runs and never runs on a declined message, also when
+ * Mastra starts a tool while the model still streams. Turns without
+ * screening get the tools as they are.
+ */
+function gateTools(tools: ToolsInput, requestContext: object): ToolsInput {
+	if (!hasTurnGate(requestContext)) return tools
+
+	const gated: ToolsInput = {}
+
+	for (const [name, tool] of Object.entries(tools)) {
+		const execute = (tool as { execute?: (...args: unknown[]) => unknown })
+			.execute
+
+		gated[name] = execute
+			? (Object.assign(Object.create(Object.getPrototypeOf(tool)), tool, {
+					execute: async (...args: unknown[]) => {
+						await passTurnGate(requestContext, 'tool')
+						return execute.apply(tool, args)
+					}
+				}) as typeof tool)
+			: tool
+	}
+
+	return gated
 }
 
 function defaultOptionsFor(

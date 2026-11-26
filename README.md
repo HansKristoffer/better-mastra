@@ -173,6 +173,36 @@ Also here: `withLlmMode('batch')` to send background work through OpenRouter's B
 - **`createReplySuggestionsAgent`**: short replies offered after an answer. They stream after the answer's `finish`, so the answer never waits for them: the chat session ends its turn when the answer is complete and takes the replies as they arrive. `replySuggestions: { holdFinish: true }` keeps the `finish` until they are in, for a client that stops reading there. Pass `providerOptions` (as `resolveLlm()` returns them) to set the reasoning effort: a model left at its provider's default can think for longer than the replies are worth.
 - **`defineModelArms`**: model experiments by thread: a thread keeps its arm for life.
 
+### Message screening
+
+`screening` on `runChatTurn` has a cheap model classify the user's message as allowed, off topic or abusive before the assistant answers it. By default it screens a new thread's first message; `when: 'every-message'` screens them all.
+
+```ts
+import { createMessageScreener } from 'better-mastra/turn'
+import { createAbuseStrikes, screeningStrikes } from 'better-mastra/usage'
+
+const abuse = createAbuseStrikes({ runScript, secret: process.env.AUTH_SECRET, keyPrefix: 'app:abuse' })
+
+runChatTurn(request, {
+	screening: {
+		screen: createMessageScreener({
+			model: llms.resolveLlm('google/gemini-3.5-flash@minimal').model,
+			purpose: 'a household budgeting app: spending, budgets, savings and the app itself',
+			tiers: { fast: 'a quick lookup or short question', deep: 'analysis across many months' }
+		}),
+		reply: (verdict) => t(verdict.verdict === 'abusive' ? 'chat.declinedAbuse' : 'chat.offTopic'),
+		strikes: screeningStrikes(abuse, (scope) => scope.userId)
+	}
+	/* … */
+})
+```
+
+- **It runs beside the turn.** Screening starts once the thread is read, beside the lock, the limit, `prepare` and the model, so an allowed message waits for the slower of the screener and the model, not both. Until the verdict, the turn streams nothing, and every server tool waits inside the chat agent (also a tool Mastra starts while the model still streams); a client tool cannot run, since its call never reaches the client. `mode: 'before-model'` holds the first model call too, for an app that must not send a declined message to the main model at all.
+- **A declined message** gets a short reply (`reply`, or `SCREENING_REPLIES`) with a transient `data-message-declined` part, and the outcome `declined`. The run is aborted, and what Mastra wrote for it anyway (the thread at the run's start, the message on abort) is removed before the turn ends and the thread lock is released, so no later turn reads it and the thread list never shows it. A waiting approval or change plan is left alone.
+- **Abuse strikes** count abusive verdicts per user in Redis, by HMAC of the user id and the screener's category, never the text. `maxStrikes` (3) inside `windowSeconds` (a day) pause the user for `pauseSeconds` (an hour): their next request is refused with `user_paused` (429) and `retryAfterSeconds`. A Redis that does not answer lets the user through.
+- **A screener that fails** or takes longer than `timeoutMs` (10 s) lets the message through (`onError: 'decline'` turns it away) and is logged with stage `screening`.
+- **A thread's model tier.** `prepare` gets the verdict as `screening`, a promise. On a new thread, await it to start the thread on the tier the screener picked and store it in `threadMetadata`, as `defineModelArms` stores an arm; later turns read the tier from the thread and never wait. The effort can still change per turn.
+
 The plan splits instructions three ways so the provider's cache keeps hitting: `instructions` (stable, cached), `perRequestInstructions` (per thread), and `signal` (per request, sent after the user's message and never stored).
 
 `instructions` is a string, or a list of stable blocks that each become a system message ending in a cache breakpoint. Put what every user shares first and what one workspace shares after it, and the first block and the tools are read from the provider's cache across users:
@@ -522,6 +552,8 @@ Failure behaviour: a buffer over `maxBufferBytes` (2 MB) keeps streaming but new
 `readUsageBreakdown({ mastra, groupBy, from, to })` gives tokens and recorded cost per user, thread or agent from Mastra's metrics, with `cacheReadTokens` and `cacheWriteTokens` beside the input total.
 
 `withUsage({ llms, sink, onSinkError })` returns `generateText`, `generateObject` and `meterStream` that report every run's tokens and cost to your sink; `meterStream` also takes a finished run's values, such as the turn's `usage`. A sink that throws loses its row: log it with `onSinkError`. `createModelBudget` caps concurrent background model calls per provider and backs off on 429s.
+
+`createAbuseStrikes` keeps message screening's strikes per user (see Message screening above).
 
 `admitUserRequest` charges one request against every window of a user's operation at once, or refuses it with the seconds until the fullest window has room. The keys hold an HMAC of the user id, never the id itself. Pass any Redis client's `EVAL`:
 
